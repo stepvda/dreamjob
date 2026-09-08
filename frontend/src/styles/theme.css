@@ -1,0 +1,548 @@
+/* ==========================================================================
+   Dream Job — spectrum theme
+
+   Loaded after app.css, so it re-points the design tokens rather than
+   duplicating any layout.
+
+   The rainbow is not decoration: it is the journey. The five phases of the
+   pipeline get five points along the spectrum, cool to warm, in the order you
+   walk them —
+
+       Profile      violet     thinking about yourself
+       Plan         blue       deciding where to look
+       Discover     teal       seeing what is there
+       Apply        amber      acting
+       Follow up    rose       what came back
+
+   Because the hue is fixed to the phase, colour becomes a location: a violet
+   card is about your profile wherever it appears, and the sidebar, the journey
+   map, page headers and badges all agree. Cool-to-warm also tracks stakes —
+   the warm end is where messages actually leave the building.
+
+   Body text stays near-neutral throughout. Colour carries identity and state;
+   it never has to be read.
+   ========================================================================== */
+
+:root {
+  /* --- The spectrum ----------------------------------------------------- */
+  /* Each hue is dark enough to carry small text on its own soft tint at
+     WCAG AA (4.5:1) - these are label and badge colours, not decoration. */
+  --phase-1: #6d54d8;   /* Profile    — violet */
+  --phase-2: #2d6bc8;   /* Plan       — blue   */
+  --phase-3: #0b7b73;   /* Discover   — teal   */
+  --phase-4: #9f6011;   /* Apply      — amber  */
+  --phase-5: #bc3d66;   /* Follow up  — rose   */
+  --phase-0: #5f6672;   /* System     — slate  */
+
+  --phase-1-soft: #f0ecfd;
+  --phase-2-soft: #e9f1fd;
+  --phase-3-soft: #e2f4f2;
+  --phase-4-soft: #fcf1de;
+  --phase-5-soft: #fdeaf0;
+  --phase-0-soft: #f1f2f4;
+
+  --phase-1-line: #cdc0f4;
+  --phase-2-line: #b9d3f4;
+  --phase-3-line: #a8dcd7;
+  --phase-4-line: #efd3a0;
+  --phase-5-line: #f4bfd0;
+  --phase-0-line: #d6d8dc;
+
+  /* The whole spectrum, for rules, meters and the journey map. */
+  --spectrum: linear-gradient(
+    90deg,
+    var(--phase-1) 0%,
+    var(--phase-2) 26%,
+    var(--phase-3) 50%,
+    var(--phase-4) 74%,
+    var(--phase-5) 100%
+  );
+
+  /* --- Re-pointed base tokens ------------------------------------------- */
+  --bg: #f7f6fb;
+  --surface: #ffffff;
+  --surface-2: #faf9fd;
+  --surface-sunk: #f1f0f7;
+
+  --ink: #1a1a22;
+  --ink-2: #4a4a58;
+  --ink-3: #74748a;
+  --ink-4: #a1a1b4;
+
+  --line: #e6e4ef;
+  --line-strong: #cfccdf;
+
+  /* Accent sits at the indigo hinge between violet and blue, so it belongs to
+     the spectrum instead of competing with it. */
+  --accent: #4f57cf;
+  --accent-hover: #3f46b4;
+  --accent-soft: #ecedfc;
+  --accent-line: #c3c6f2;
+
+  --ok: #1f8a5a;
+  --ok-soft: #e4f5ec;
+  --warn: #a8700d;
+  --warn-soft: #fcf2df;
+  --danger: #c4344f;
+  --danger-soft: #fdeaee;
+  --info: #2f6fd0;
+  --info-soft: #e9f1fd;
+
+  /* Speculative openings keep their own hue, distinct from all five phases
+     (FR-263: they must never be mistaken for an advertised vacancy). */
+  --speculative: #8b46c4;
+  --speculative-soft: #f6ecfb;
+  --speculative-line: #e0c3ee;
+
+  --shadow: 0 1px 2px rgba(26, 26, 34, 0.05), 0 2px 10px rgba(79, 87, 207, 0.06);
+  --shadow-lift: 0 2px 5px rgba(26, 26, 34, 0.07), 0 10px 30px rgba(79, 87, 207, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --phase-1: #a690f5;
+    --phase-2: #78aaf0;
+    --phase-3: #4fc9bd;
+    --phase-4: #e8ad5c;
+    --phase-5: #f08aab;
+    --phase-0: #9aa0ab;
+
+    --phase-1-soft: #241f3d;
+    --phase-2-soft: #1a2740;
+    --phase-3-soft: #14302e;
+    --phase-4-soft: #2f2617;
+    --phase-5-soft: #331d27;
+    --phase-0-soft: #23252a;
+
+    --phase-1-line: #3f3568;
+    --phase-2-line: #2b3f61;
+    --phase-3-line: #245049;
+    --phase-4-line: #4b3c1f;
+    --phase-5-line: #543040;
+    --phase-0-line: #383b42;
+
+    --bg: #141419;
+    --surface: #1c1c24;
+    --surface-2: #22222c;
+    --surface-sunk: #121218;
+
+    --ink: #ecebf2;
+    --ink-2: #b8b6c6;
+    --ink-3: #8b8a9c;
+    --ink-4: #63636f;
+
+    --line: #2d2d38;
+    --line-strong: #3d3d4c;
+
+    --accent: #8f95f0;
+    --accent-hover: #a7abf6;
+    --accent-soft: #23243c;
+    --accent-line: #3b3d63;
+
+    --ok: #5fc48f;
+    --ok-soft: #16281f;
+    --warn: #e0b264;
+    --warn-soft: #2b2416;
+    --danger: #f08a9c;
+    --danger-soft: #2f1a20;
+    --info: #78aaf0;
+    --info-soft: #1a2740;
+
+    --speculative: #c78ee8;
+    --speculative-soft: #2a1e34;
+    --speculative-line: #4a3459;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.3);
+    --shadow-lift: 0 2px 5px rgba(0, 0, 0, 0.4), 0 10px 30px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* ==========================================================================
+   Icons
+   ========================================================================== */
+
+.icon {
+  display: inline-block;
+  vertical-align: -0.14em;
+  flex: none;
+}
+
+.btn .icon { font-size: 15px; }
+.btn-sm .icon { font-size: 13px; }
+.nav-item .icon { font-size: 16px; }
+.card-header .icon { font-size: 16px; }
+.badge .icon { font-size: 11px; }
+
+/* A tinted disc behind an icon, used for section headers and stat tiles. */
+.icon-chip {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex: none;
+}
+
+.icon-chip-lg { width: 38px; height: 38px; border-radius: 11px; font-size: 20px; }
+
+/* ==========================================================================
+   Phase colouring
+
+   One class per phase. Anything inside .phase-N picks up its hue through the
+   local variables, so a card, a badge, a meter and an icon chip all match by
+   sitting in the same container.
+   ========================================================================== */
+
+.phase-1 { --hue: var(--phase-1); --hue-soft: var(--phase-1-soft); --hue-line: var(--phase-1-line); }
+.phase-2 { --hue: var(--phase-2); --hue-soft: var(--phase-2-soft); --hue-line: var(--phase-2-line); }
+.phase-3 { --hue: var(--phase-3); --hue-soft: var(--phase-3-soft); --hue-line: var(--phase-3-line); }
+.phase-4 { --hue: var(--phase-4); --hue-soft: var(--phase-4-soft); --hue-line: var(--phase-4-line); }
+.phase-5 { --hue: var(--phase-5); --hue-soft: var(--phase-5-soft); --hue-line: var(--phase-5-line); }
+.phase-0 { --hue: var(--phase-0); --hue-soft: var(--phase-0-soft); --hue-line: var(--phase-0-line); }
+
+.phase-tint { background: var(--hue-soft); border-color: var(--hue-line); }
+.phase-ink { color: var(--hue); }
+.phase-chip { background: var(--hue-soft); color: var(--hue); }
+.phase-rule { border-left: 3px solid var(--hue); }
+
+/* ==========================================================================
+   Sidebar
+   ========================================================================== */
+
+.sidebar {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+}
+
+/* The spectrum as a hairline down the whole navigation. */
+.sidebar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(
+    180deg,
+    var(--phase-1) 0%,
+    var(--phase-2) 25%,
+    var(--phase-3) 50%,
+    var(--phase-4) 72%,
+    var(--phase-5) 88%,
+    var(--phase-0) 100%
+  );
+  opacity: 0.85;
+}
+
+.sidebar { position: relative; }
+
+.sidebar-brand h1 {
+  background: var(--spectrum);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 700;
+}
+
+.nav-group .nav-label { color: var(--hue, var(--ink-4)); opacity: 0.85; }
+
+.nav-item .icon { color: var(--hue, var(--ink-3)); opacity: 0.85; transition: opacity 0.12s; }
+.nav-item:hover .icon { opacity: 1; }
+
+.nav-item.active {
+  background: var(--hue-soft, var(--accent-soft));
+  color: var(--hue, var(--accent));
+  font-weight: 550;
+  box-shadow: inset 2px 0 0 var(--hue, var(--accent));
+}
+
+.nav-item.active .icon { opacity: 1; }
+
+/* ==========================================================================
+   Topbar and page furniture
+   ========================================================================== */
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+}
+
+/* A spectrum hairline under the header ties the whole app together. */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--spectrum);
+  opacity: 0.55;
+}
+
+.topbar h2 { display: flex; align-items: center; gap: 9px; }
+.topbar h2 .icon { color: var(--hue, var(--accent)); }
+
+.card-header {
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+}
+
+.card-header .icon { color: var(--hue, var(--accent)); }
+
+/* A card that belongs to a phase gets a spectrum edge. */
+.card.phase-edge {
+  border-top: 2px solid var(--hue, var(--accent));
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--phase-1));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(79, 87, 207, 0.25);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--accent-hover), var(--accent));
+  border-color: transparent;
+}
+
+/* A button tinted to its phase, for a phase's own primary action. */
+.btn-phase {
+  background: var(--hue);
+  border-color: var(--hue);
+  color: #fff;
+}
+.btn-phase:hover:not(:disabled) { filter: brightness(1.08); background: var(--hue); }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .btn-phase,
+  :root:not([data-theme='light']) .btn-primary { color: #14141a; }
+}
+
+/* ==========================================================================
+   Badges
+   ========================================================================== */
+
+.badge { gap: 4px; }
+.badge-phase { background: var(--hue-soft); color: var(--hue); border-color: transparent; }
+
+/* FR-263: an advertised vacancy and a speculative opening never look alike. */
+.badge-speculative {
+  background: var(--speculative-soft);
+  color: var(--speculative);
+  border-color: var(--speculative-line);
+}
+
+/* ==========================================================================
+   Meters
+
+   A score meter runs the warm half of the spectrum: a low score is rose, a
+   high one is teal-green. The fill is a gradient clipped to the value, so the
+   colour at the tip tells you the score even without reading the number.
+   ========================================================================== */
+
+.meter-track {
+  background: var(--surface-sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.meter-fill {
+  background: linear-gradient(
+    90deg,
+    var(--phase-5) 0%,
+    var(--phase-4) 45%,
+    var(--phase-3) 100%
+  );
+  background-size: 240px 100%;
+  background-repeat: no-repeat;
+}
+
+.meter-fill.ok { background: linear-gradient(90deg, var(--phase-3), #34b39a); background-size: auto; }
+.meter-fill.warn { background: linear-gradient(90deg, var(--phase-4), #e0a03f); background-size: auto; }
+.meter-fill.danger { background: linear-gradient(90deg, var(--phase-5), #e0648a); background-size: auto; }
+
+.progress-fill {
+  background: var(--spectrum);
+  background-size: 300px 100%;
+}
+
+/* ==========================================================================
+   The journey map — the spectrum at full strength
+   ========================================================================== */
+
+.wfmap {
+  background:
+    linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 34%) padding-box;
+  position: relative;
+  overflow: hidden;
+}
+
+.wfmap::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  background: var(--spectrum);
+}
+
+.wfmap-phase:nth-child(1) { --hue: var(--phase-1); --hue-soft: var(--phase-1-soft); --hue-line: var(--phase-1-line); }
+.wfmap-phase:nth-child(2) { --hue: var(--phase-2); --hue-soft: var(--phase-2-soft); --hue-line: var(--phase-2-line); }
+.wfmap-phase:nth-child(3) { --hue: var(--phase-3); --hue-soft: var(--phase-3-soft); --hue-line: var(--phase-3-line); }
+.wfmap-phase:nth-child(4) { --hue: var(--phase-4); --hue-soft: var(--phase-4-soft); --hue-line: var(--phase-4-line); }
+.wfmap-phase:nth-child(5) { --hue: var(--phase-5); --hue-soft: var(--phase-5-soft); --hue-line: var(--phase-5-line); }
+
+.wfmap-phase-index {
+  background: var(--hue-soft);
+  color: var(--hue);
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px var(--hue-line);
+}
+
+.wfmap-phase-label { color: var(--hue); }
+
+.wfmap-stage .icon { color: var(--hue); opacity: 0.75; }
+
+a.wfmap-stage:hover { background: var(--hue-soft); border-color: var(--hue-line); }
+
+.wfmap-dot { border-color: var(--hue-line); }
+.wfmap-dot-done { background: var(--hue); border-color: var(--hue); color: #fff; }
+.wfmap-dot-active { background: var(--hue); border-color: var(--hue); }
+.wfmap-dot-ready { border-color: var(--hue); border-style: dashed; background: var(--surface); }
+
+@keyframes wf-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--hue-soft); }
+  50% { box-shadow: 0 0 0 5px var(--hue-soft); }
+}
+
+.wfmap-current {
+  background: var(--hue-soft) !important;
+  border-color: var(--hue-line) !important;
+  box-shadow: inset 2px 0 0 var(--hue);
+}
+
+.wfmap-arrow { color: var(--hue-line); }
+
+/* Compact strip: each phase keeps its hue. */
+.wfstrip { background: linear-gradient(90deg, var(--surface), var(--surface-2)); }
+.wfstrip-item:nth-child(1) { --hue: var(--phase-1); --hue-soft: var(--phase-1-soft); }
+.wfstrip-item:nth-child(2) { --hue: var(--phase-2); --hue-soft: var(--phase-2-soft); }
+.wfstrip-item:nth-child(3) { --hue: var(--phase-3); --hue-soft: var(--phase-3-soft); }
+.wfstrip-item:nth-child(4) { --hue: var(--phase-4); --hue-soft: var(--phase-4-soft); }
+.wfstrip-item:nth-child(5) { --hue: var(--phase-5); --hue-soft: var(--phase-5-soft); }
+.wfstrip-node.wfmap-done { color: var(--hue); }
+.wfstrip-node.wfmap-active { color: var(--hue); }
+.wfstrip-node.wfmap-current { background: var(--hue-soft); color: var(--hue); border-color: var(--hue); }
+.wfstrip-node:hover { background: var(--hue-soft); color: var(--hue); }
+
+/* ==========================================================================
+   Tables, tabs, alerts
+   ========================================================================== */
+
+th {
+  background: var(--surface-2);
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.tab.active { color: var(--hue, var(--accent)); border-bottom-color: var(--hue, var(--accent)); }
+
+.alert { border-left-width: 3px; }
+.alert-info { border-color: var(--info); }
+.alert-ok { border-color: var(--ok); }
+.alert-warn { border-color: var(--warn); }
+.alert-danger { border-color: var(--danger); }
+
+.alert .icon { flex: none; margin-top: 1px; font-size: 15px; }
+
+/* Discretion mode reads as a state of the whole application (FR-385). */
+.discretion-bar {
+  background: linear-gradient(90deg, var(--warn-soft), var(--phase-4-soft));
+  border-bottom: 1px solid var(--phase-4-line);
+  color: var(--warn);
+}
+
+/* ==========================================================================
+   Board, opportunities, empty states
+   ========================================================================== */
+
+.board-col:nth-child(1) { --hue: var(--phase-2); --hue-soft: var(--phase-2-soft); }
+.board-col:nth-child(2) { --hue: var(--phase-3); --hue-soft: var(--phase-3-soft); }
+.board-col:nth-child(3) { --hue: var(--phase-4); --hue-soft: var(--phase-4-soft); }
+.board-col:nth-child(4) { --hue: var(--phase-5); --hue-soft: var(--phase-5-soft); }
+.board-col:nth-child(5) { --hue: var(--phase-0); --hue-soft: var(--phase-0-soft); }
+
+.board-col { border-top: 2px solid var(--hue); }
+.board-col h4 { color: var(--hue); }
+.board-card:hover { border-color: var(--hue); }
+
+.opp-row.speculative { border-left-color: var(--speculative); }
+.opp-row.pinned { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+
+.empty .icon-chip { margin: 0 auto 12px; }
+.first-run { border-top: 2px solid var(--accent); }
+
+/* ==========================================================================
+   Help
+   ========================================================================== */
+
+.helptip-trigger:hover,
+.helptip-trigger[aria-expanded='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.help-drawer-head { background: linear-gradient(90deg, var(--accent-soft), var(--surface-2)); }
+.help-drawer { border-left: 2px solid var(--accent); }
+.help-drawer-body h4 { color: var(--accent); }
+
+/* ==========================================================================
+   Stat tiles
+
+   A row of headline numbers, each carrying its phase hue so the overview reads
+   as the same spectrum as the journey map beneath it.
+   ========================================================================== */
+
+.stat {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 15px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-decoration: none;
+  color: inherit;
+  border-top: 2px solid var(--hue, var(--accent));
+  transition: box-shadow 0.14s, transform 0.14s;
+}
+
+a.stat:hover { box-shadow: var(--shadow-lift); transform: translateY(-1px); }
+
+.stat .icon-chip { background: var(--hue-soft, var(--accent-soft)); color: var(--hue, var(--accent)); }
+.stat-value { font-size: 21px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat-label { font-size: 11.5px; color: var(--ink-3); margin-top: 1px; }
+
+/* ==========================================================================
+   Motion — restrained, and off entirely when the viewer asks
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Stage labels carry their icon inline; keep it from crowding the text. */
+.wfmap-stage-label { gap: 6px; }
+.wfmap-stage-label .icon { font-size: 13px; }

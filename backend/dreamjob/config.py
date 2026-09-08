@@ -1,0 +1,154 @@
+"""Central configuration (CR-407..410, NFR-306).
+
+All runtime configuration is read from the environment / .env once and exposed
+as a single frozen ``Settings`` object.  Nothing in the codebase reads
+``os.environ`` directly; that keeps the deployment surface auditable and lets
+the administration screens (FR-362, FR-363) show exactly what is in force.
+"""
+
+from __future__ import annotations
+
+import base64
+from datetime import time
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(REPO_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # --- Core --------------------------------------------------------------
+    env: str = Field("development", alias="DREAMJOB_ENV")
+    host: str = Field("127.0.0.1", alias="DREAMJOB_HOST")
+    port: int = Field(8000, alias="DREAMJOB_PORT")
+    data_dir: Path = Field(Path("data"), alias="DREAMJOB_DATA_DIR")
+    db_path: Path = Field(Path("data/dreamjob.db"), alias="DREAMJOB_DB_PATH")
+
+    master_key: str = Field("", alias="DREAMJOB_MASTER_KEY")
+    session_secret: str = Field("", alias="DREAMJOB_SESSION_SECRET")
+
+    # --- LLM (CR-409) ------------------------------------------------------
+    llm_provider: str = Field("deepseek", alias="DREAMJOB_LLM_PROVIDER")
+    deepseek_api_key: str = Field("", alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field("https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
+    llm_model_cheap: str = Field("deepseek-chat", alias="DREAMJOB_LLM_MODEL_CHEAP")
+    llm_model_strong: str = Field("deepseek-reasoner", alias="DREAMJOB_LLM_MODEL_STRONG")
+
+    # NFR-306: privacy-sensitive tasks may be routed to a local model.
+    local_llm_base_url: str = Field("", alias="DREAMJOB_LOCAL_LLM_BASE_URL")
+    local_llm_model: str = Field("", alias="DREAMJOB_LOCAL_LLM_MODEL")
+    local_llm_api_key: str = Field("not-needed", alias="DREAMJOB_LOCAL_LLM_API_KEY")
+    local_llm_tasks: str = Field("", alias="DREAMJOB_LOCAL_LLM_TASKS")
+
+    default_token_budget: int = Field(2_000_000, alias="DREAMJOB_DEFAULT_TOKEN_BUDGET")
+    llm_cost_per_1m_input_eur: float = Field(0.25, alias="DREAMJOB_LLM_COST_PER_1M_INPUT_EUR")
+    llm_cost_per_1m_output_eur: float = Field(1.00, alias="DREAMJOB_LLM_COST_PER_1M_OUTPUT_EUR")
+
+    # --- Mail (FR-325) -----------------------------------------------------
+    mail_backend: str = Field("resend", alias="DREAMJOB_MAIL_BACKEND")
+    mail_from: str = Field("", alias="DREAMJOB_MAIL_FROM")
+    mail_from_name: str = Field("", alias="DREAMJOB_MAIL_FROM_NAME")
+    resend_api_key: str = Field("", alias="RESEND_API_KEY")
+    gmail_client_id: str = Field("", alias="GMAIL_CLIENT_ID")
+    gmail_client_secret: str = Field("", alias="GMAIL_CLIENT_SECRET")
+    gmail_redirect_uri: str = Field(
+        "http://127.0.0.1:8000/api/mail/gmail/callback", alias="GMAIL_REDIRECT_URI"
+    )
+    imap_host: str = Field("imap.gmail.com", alias="DREAMJOB_IMAP_HOST")
+    imap_port: int = Field(993, alias="DREAMJOB_IMAP_PORT")
+
+    send_daily_cap: int = Field(25, alias="DREAMJOB_SEND_DAILY_CAP")
+    send_min_interval_seconds: int = Field(90, alias="DREAMJOB_SEND_MIN_INTERVAL_SECONDS")
+    send_window_start: time = Field(time(8, 30), alias="DREAMJOB_SEND_WINDOW_START")
+    send_window_end: time = Field(time(17, 30), alias="DREAMJOB_SEND_WINDOW_END")
+
+    # --- Egress (FR-182, IR-102) -------------------------------------------
+    user_agent: str = Field(
+        "DreamJobBot/0.1 (+https://stepvda.net/dreamjob; contact stephane@stepvda.com)",
+        alias="DREAMJOB_USER_AGENT",
+    )
+    http_cache_ttl_seconds: int = Field(86_400, alias="DREAMJOB_HTTP_CACHE_TTL_SECONDS")
+    per_domain_rps: float = Field(0.5, alias="DREAMJOB_PER_DOMAIN_RPS")
+    http_max_concurrency: int = Field(20, alias="DREAMJOB_HTTP_MAX_CONCURRENCY")
+    respect_robots: bool = Field(True, alias="DREAMJOB_RESPECT_ROBOTS")
+
+    # --- Browser automation (FR-201..208) ----------------------------------
+    cdp_url: str = Field("http://127.0.0.1:9222", alias="DREAMJOB_CDP_URL")
+    browser_profile_dir: Path = Field(Path(".chrome-profile"), alias="DREAMJOB_BROWSER_PROFILE_DIR")
+    browser_min_delay_ms: int = Field(2500, alias="DREAMJOB_BROWSER_MIN_DELAY_MS")
+    browser_max_delay_ms: int = Field(6000, alias="DREAMJOB_BROWSER_MAX_DELAY_MS")
+
+    # --- Misc --------------------------------------------------------------
+    geocoder_url: str = Field("https://nominatim.openstreetmap.org", alias="DREAMJOB_GEOCODER_URL")
+    google_calendar_client_id: str = Field("", alias="GOOGLE_CALENDAR_CLIENT_ID")
+    google_calendar_client_secret: str = Field("", alias="GOOGLE_CALENDAR_CLIENT_SECRET")
+
+    @field_validator("send_window_start", "send_window_end", mode="before")
+    @classmethod
+    def _parse_time(cls, v: object) -> object:
+        if isinstance(v, str) and ":" in v:
+            hh, mm = v.split(":")[:2]
+            return time(int(hh), int(mm))
+        return v
+
+    # --- Derived helpers ---------------------------------------------------
+    @property
+    def abs_data_dir(self) -> Path:
+        p = self.data_dir
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def abs_db_path(self) -> Path:
+        p = self.db_path
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def raw_dir(self) -> Path:
+        return self.abs_data_dir / "raw"
+
+    @property
+    def generated_dir(self) -> Path:
+        return self.abs_data_dir / "generated"
+
+    @property
+    def uploads_dir(self) -> Path:
+        return self.abs_data_dir / "uploads"
+
+    @property
+    def local_llm_task_set(self) -> set[str]:
+        return {t.strip() for t in self.local_llm_tasks.split(",") if t.strip()}
+
+    def master_key_bytes(self) -> bytes:
+        """32-byte key for envelope encryption (NFR-201).
+
+        A missing key is tolerated in development so the app boots for a first
+        look, but every encrypt call records that data is unprotected.
+        """
+        if not self.master_key:
+            return b""
+        raw = base64.urlsafe_b64decode(self.master_key.encode())
+        if len(raw) != 32:
+            raise ValueError("DREAMJOB_MASTER_KEY must decode to exactly 32 bytes")
+        return raw
+
+    def ensure_dirs(self) -> None:
+        for d in (self.abs_data_dir, self.raw_dir, self.generated_dir, self.uploads_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        self.abs_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    s = Settings()
+    s.ensure_dirs()
+    return s

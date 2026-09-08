@@ -1,0 +1,192 @@
+"""Journey state for the workflow map (supports NFR-502, FR-361).
+
+One call returns where the job seeker stands in the ten-stage pipeline of
+specification section 2.3, grouped into the five phases the interface shows:
+profile, plan, discover, apply, follow up.
+
+Each stage reports one of:
+
+    done      it has produced what the next stage needs
+    active    work is running right now
+    ready     it can be started
+    blocked   an earlier stage has to finish first, and which one
+    pending   nothing yet
+
+The point is that a stage is never just "not done": it says what would unblock
+it, because the commonest way to get lost in a ten-stage pipeline is not
+knowing what the next move is.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+
+from dreamjob.api.deps import CurrentSeeker, current_seeker
+from dreamjob.db.repositories import learning as repo
+
+router = APIRouter()
+
+RUNNING_STATUSES = {"running", "planned"}
+
+
+@router.get("/journey")
+def journey(seeker: CurrentSeeker = Depends(current_seeker)) -> dict:
+    state = repo.journey_state(seeker.id)
+    counts = repo.journey_counts(seeker.id)
+
+    profile = state["profile"]
+    composite = state["composite"]
+    dream = state["dream_job"]
+    directives = state["directives"]
+    campaign = state["campaign"] or {}
+    campaign_status = campaign.get("status")
+
+    j: dict[str, dict] = {}
+
+    def stage(key, *, done, active=False, blocked_by=None, count=None, detail=None):
+        if done:
+            s = "done"
+        elif active:
+            s = "active"
+        elif blocked_by:
+            s = "blocked"
+        else:
+            s = "ready"
+        entry: dict = {"state": s}
+        if blocked_by and not done:
+            entry["blockedBy"] = blocked_by
+        if count is not None:
+            entry["count"] = count
+        if detail:
+            entry["detail"] = detail
+        j[key] = entry
+
+    # --- Profile -----------------------------------------------------------
+    conflicts = state["unresolved_conflicts"]
+    stage(
+        "profile",
+        done=bool(profile) and not conflicts,
+        detail=(
+            f"{conflicts} conflicts to resolve"
+            if conflicts
+            else (f"version {profile['version']}" if profile else None)
+        ),
+    )
+    pending = state["pending_findings"]
+    stage(
+        "composite",
+        done=bool(composite),
+        blocked_by=None if profile else "a profile",
+        detail=f"{pending} findings to confirm" if pending else None,
+    )
+    stage(
+        "dream_job",
+        done=bool(dream and dream["confirmed_by_user"]),
+        blocked_by=None if profile else "a profile",
+        detail=(
+            "written, not yet confirmed"
+            if dream and not dream["confirmed_by_user"]
+            else None
+        ),
+    )
+
+    # --- Plan --------------------------------------------------------------
+    stage("directives", done=bool(directives), blocked_by=None if composite else "a composite profile")
+    stage(
+        "plan",
+        done=bool(campaign_status and campaign_status != "draft"),
+        blocked_by=None if directives else "directives",
+        detail=campaign.get("name"),
+    )
+    stage(
+        "collection",
+        done=campaign_status == "completed",
+        active=campaign_status == "running",
+        blocked_by=None if campaign_status else "a campaign plan",
+        detail=(
+            f"{campaign.get('tokens_used', 0):,} of {campaign.get('token_budget', 0):,} tokens"
+            if campaign_status in RUNNING_STATUSES
+            else None
+        ),
+    )
+
+    # --- Discover ----------------------------------------------------------
+    stage("companies", done=counts["companies"] > 0, count=counts["companies"],
+          blocked_by=None if campaign_status else "collection")
+    stage(
+        "opportunities",
+        done=counts["opportunities"] > 0,
+        count=counts["opportunities"],
+        blocked_by=None if campaign_status else "collection",
+        detail=(
+            f"{counts['speculative']} speculative" if counts["speculative"] else None
+        ),
+    )
+    stage("scoring", done=counts["scored"] > 0, count=counts["scored"],
+          blocked_by=None if counts["opportunities"] else "opportunities")
+
+    # --- Apply -------------------------------------------------------------
+    stage("contacts", done=counts["contacts"] > 0, count=counts["contacts"],
+          blocked_by=None if counts["scored"] else "a ranked list")
+    stage(
+        "documents",
+        done=counts["packages"] > 0,
+        count=counts["packages"],
+        blocked_by=None if counts["scored"] else "a ranked list",
+        detail=f"{counts['approved']} approved" if counts["packages"] else None,
+    )
+    stage("dispatch", done=counts["sent"] > 0, count=counts["sent"],
+          blocked_by=None if counts["approved"] else "an approved application")
+
+    # --- Follow up ---------------------------------------------------------
+    stage(
+        "responses",
+        done=counts["replies"] > 0,
+        count=counts["replies"],
+        blocked_by=None if counts["sent"] else "a sent application",
+        detail="record replies as they arrive" if counts["sent"] and not counts["replies"] else None,
+    )
+    stage("pipeline", done=counts["cards"] > 0, count=counts["cards"],
+          blocked_by=None if counts["sent"] else "a sent application",
+          detail=f"{counts['interviews']} at interview or beyond" if counts["interviews"] else None)
+
+    # Learning needs a handful of resolved applications before it says anything.
+    enough = counts["sent"] >= 6
+    stage(
+        "learning",
+        done=counts["open_advice"] > 0,
+        count=counts["open_advice"] or None,
+        blocked_by=None if enough else "about six sent applications",
+        detail=None if enough else f"{counts['sent']} of ~6 applications sent",
+    )
+
+    return {
+        "journey": j,
+        "counts": counts,
+        "campaign": campaign or None,
+        "discretion_mode": bool(directives and directives.get("discretion_mode")),
+        "next_action": _next_action(j),
+    }
+
+
+def _next_action(j: dict[str, dict]) -> dict | None:
+    """The first stage that can actually be moved forward."""
+    order = [
+        ("profile", "Import your LinkedIn export and CV", "/profile"),
+        ("composite", "Build your composite profile", "/composite"),
+        ("dream_job", "Describe and confirm your dream job", "/dream-job"),
+        ("directives", "Set your search directives", "/directives"),
+        ("plan", "Generate a campaign plan", "/campaigns"),
+        ("collection", "Launch collection", "/campaigns"),
+        ("scoring", "Review the ranked opportunities", "/opportunities"),
+        ("contacts", "Find hiring contacts", "/contacts"),
+        ("documents", "Generate application packages", "/applications"),
+        ("dispatch", "Approve and send", "/applications"),
+        ("responses", "Record the responses you receive", "/pipeline"),
+        ("learning", "See what is working and where to redirect", "/pipeline"),
+    ]
+    for key, label, to in order:
+        entry = j.get(key, {})
+        if entry.get("state") in ("ready", "active"):
+            return {"stage": key, "label": label, "to": to}
+    return None

@@ -1,0 +1,866 @@
+"""Finding and inferring professional e-mail addresses (FR-303, CR-402, RK-08).
+
+FR-303 names four methods and asks for the one that produced each address to be
+recorded.  They are tried in that order because it is also the order of
+decreasing certainty and increasing intrusiveness:
+
+``website``
+    Addresses printed on the company's own contact, careers and legal pages.
+    Published by the company for exactly this purpose, so both the strongest
+    evidence and the least intrusive collection (CR-402).
+``press``
+    Addresses on press, newsroom and media pages.  Same standing, usually a
+    role mailbox.
+``pattern_inference``
+    No address for the person, but the domain's convention can be read off the
+    addresses that *are* published.  :func:`infer_pattern` scores the
+    convention against the named addresses it has seen; a guess derived from a
+    weak convention stays a guess, which is why the confidence travels with the
+    address and FR-304 validation still has to pass before it is used.
+``lookup_service``
+    A permitted third-party enrichment service.  OQ-05 has not settled which
+    services are acceptable in terms of cost and data protection, so the client
+    is complete but the feature is **off by default** and refuses to run until
+    an administrator names a provider and switches it on.
+
+Only professional addresses are collected, and nothing beyond the address, the
+method and the page it came from is kept (FR-306, RK-08).
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import unicodedata
+from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Any
+from urllib.parse import urlparse
+
+from dreamjob.adapters.website import crawler
+from dreamjob.db.repositories import contacts as repo
+from dreamjob.db.repositories import knowledge as kb
+from dreamjob.egress.client import EgressClient, RobotsDisallowed
+
+log = logging.getLogger(__name__)
+
+# --- FR-303 method labels, stored verbatim in ``contact.email_source_method``
+METHOD_WEBSITE = "website"
+METHOD_PRESS = "press"
+METHOD_PATTERN = "pattern_inference"
+METHOD_LOOKUP = "lookup_service"
+METHOD_MANUAL = "manual"
+METHOD_VACANCY = "vacancy"
+
+#: Confidence attached to an address purely because of how it was obtained.
+METHOD_CONFIDENCE = {
+    METHOD_MANUAL: 0.95,
+    METHOD_WEBSITE: 0.85,
+    METHOD_VACANCY: 0.85,
+    METHOD_PRESS: 0.8,
+    METHOD_LOOKUP: 0.7,
+    METHOD_PATTERN: 0.45,
+}
+
+#: OQ-05 - the lookup service stays off until an administrator answers it.
+SETTING_LOOKUP_ENABLED = "contacts.lookup_service_enabled"
+SETTING_LOOKUP_URL = "contacts.lookup_service_url"
+SETTING_LOOKUP_KEY = "contacts.lookup_service_api_key"
+SETTING_LOOKUP_NAME = "contacts.lookup_service_name"
+
+# An address in running text.  Deliberately stricter than RFC 5322: the input is
+# scraped HTML, and a permissive pattern turns CSS and JSON into "addresses".
+EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])"
+    r"([A-Za-z0-9](?:[A-Za-z0-9._%+\-]{0,62}[A-Za-z0-9])?)"
+    r"@"
+    r"((?:[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24})",
+)
+
+_MAILTO_RE = re.compile(r"mailto:([^\"'?>\s]+)", re.IGNORECASE)
+
+# "name (at) example (dot) com" and friends, the usual anti-harvesting spelling.
+_OBFUSCATED_RE = re.compile(
+    r"([A-Za-z0-9._%+\-]+)\s*(?:\(|\[|&#40;)?\s*(?:at|apenstaartje|arobase)\s*"
+    r"(?:\)|\]|&#41;)?\s*([A-Za-z0-9.\-]+)\s*(?:\(|\[)?\s*(?:dot|punt|point)\s*"
+    r"(?:\)|\])?\s*([A-Za-z]{2,24})",
+    re.IGNORECASE,
+)
+
+#: File extensions that look like addresses once an "@" sneaks into a filename.
+_NOT_A_DOMAIN = re.compile(r"\.(png|jpe?g|gif|svg|webp|css|js|json|xml|pdf|woff2?)$", re.I)
+
+#: Pages worth reading for an address, in the order FR-303 lists them.
+CONTACT_PATHS: tuple[str, ...] = (
+    "/contact",
+    "/contact-us",
+    "/contacts",
+    "/contacteer-ons",
+    "/nous-contacter",
+    "/kontakt",
+    "/about/contact",
+    "/company/contact",
+    "/imprint",
+    "/impressum",
+    "/legal-notice",
+    "/mentions-legales",
+    "/disclaimer",
+    "/privacy",
+    "/press",
+    "/pers",
+    "/presse",
+    "/newsroom",
+    "/media",
+    "/about/press",
+    "/jobs",
+    "/careers",
+    "/vacatures",
+    "/werken-bij",
+)
+
+#: Local parts that reach the hiring function - the FR-301 generic fallback.
+CAREERS_LOCAL_PARTS: tuple[str, ...] = (
+    "jobs",
+    "careers",
+    "career",
+    "recruitment",
+    "recruiting",
+    "hr",
+    "hrm",
+    "talent",
+    "vacatures",
+    "vacature",
+    "werkenbij",
+    "sollicitatie",
+    "emploi",
+    "recrutement",
+    "personal",
+    "personeel",
+    "bewerbung",
+    "karriere",
+    "apply",
+    "people",
+)
+
+#: Anchor and URL tokens that mark a page worth reading for an address.
+CONTACT_LINK_TOKENS: tuple[str, ...] = (
+    "contact", "contacteer", "kontakt", "imprint", "impressum", "legal-notice",
+    "mentions-legales", "colophon", "press", "pers", "presse", "newsroom", "media",
+    "jobs", "careers", "vacature", "werken-bij", "recruit", "emploi", "about",
+)
+
+#: Local parts that reach a company but not the hiring function.
+FALLBACK_LOCAL_PARTS: tuple[str, ...] = ("info", "contact", "hello", "office", "mail")
+
+
+# ---------------------------------------------------------------------------
+# Name and local-part normalisation
+# ---------------------------------------------------------------------------
+
+#: Dutch, French and German name particles.  "Stephane van der Aa" is filed
+#: under "vanderaa" by some employers and under "aa" by others, so both are
+#: generated and the observed addresses decide which the domain uses.
+NAME_PARTICLES = frozenset(
+    {
+        "van", "de", "der", "den", "ter", "ten", "het", "'t", "op", "in",
+        "vande", "vander", "vanden", "du", "des", "le", "la", "les", "di",
+        "da", "dos", "del", "della", "von", "zu", "af", "af.", "mac", "mc",
+    }
+)
+
+
+def strip_accents(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def slug(text: str) -> str:
+    """A name part as it can appear in a local part: ascii letters and digits."""
+    return re.sub(r"[^a-z0-9]", "", strip_accents(text or "").lower())
+
+
+@dataclass(frozen=True)
+class NameParts:
+    """A person's name split the way an e-mail convention splits it."""
+
+    first: str
+    last: str
+    middle: tuple[str, ...] = ()
+    particles: tuple[str, ...] = ()
+
+    @property
+    def last_no_particle(self) -> str:
+        return self.last
+
+    @property
+    def last_with_particle(self) -> str:
+        return "".join(self.particles) + self.last
+
+    def last_variants(self) -> tuple[str, ...]:
+        variants = [self.last]
+        if self.particles:
+            variants.append(self.last_with_particle)
+        return tuple(dict.fromkeys(v for v in variants if v))
+
+
+def split_name(full_name: str) -> NameParts | None:
+    """Split a display name into first, particles and last (FR-303).
+
+    Returns ``None`` for anything that is not a person's name - a single token,
+    a department label - because a pattern cannot be applied to it.
+    """
+    cleaned = re.sub(r"\s+", " ", strip_accents(full_name or "")).strip()
+    cleaned = re.sub(r"[,;].*$", "", cleaned).strip()
+    # Drop honorifics and post-nominals that would otherwise become the surname.
+    tokens = [
+        t
+        for t in cleaned.split(" ")
+        if t and t.lower().strip(".") not in {"mr", "mrs", "ms", "dr", "prof", "ir", "drs", "mgr"}
+    ]
+    tokens = [t for t in tokens if not re.fullmatch(r"\(.*\)", t)]
+    if len(tokens) < 2:
+        return None
+
+    first = slug(tokens[0])
+    rest = tokens[1:]
+    particles = tuple(slug(t) for t in rest[:-1] if t.lower() in NAME_PARTICLES)
+    middle = tuple(slug(t) for t in rest[:-1] if t.lower() not in NAME_PARTICLES)
+    last = slug(rest[-1])
+    if not first or not last:
+        return None
+    return NameParts(first=first, last=last, middle=middle, particles=particles)
+
+
+# ---------------------------------------------------------------------------
+# The patterns themselves (FR-303)
+# ---------------------------------------------------------------------------
+
+#: Pattern id -> how the local part is built from a name.
+#:
+#: Ordered by how common the convention is in the target market, which is the
+#: tie-breaker when the observed evidence supports several equally.
+PATTERNS: dict[str, Callable[[str, str], str]] = {
+    "first.last": lambda first, last: f"{first}.{last}",
+    "firstlast": lambda first, last: f"{first}{last}",
+    "f.last": lambda first, last: f"{first[0]}.{last}",
+    "flast": lambda first, last: f"{first[0]}{last}",
+    "first": lambda first, last: first,
+    "first_last": lambda first, last: f"{first}_{last}",
+    "first-last": lambda first, last: f"{first}-{last}",
+    "last.first": lambda first, last: f"{last}.{first}",
+    "lastfirst": lambda first, last: f"{last}{first}",
+    "firstl": lambda first, last: f"{first}{last[0]}",
+    "first.l": lambda first, last: f"{first}.{last[0]}",
+    "last": lambda first, last: last,
+    "lastf": lambda first, last: f"{last}{first[0]}",
+}
+
+PATTERN_ORDER: tuple[str, ...] = tuple(PATTERNS)
+
+
+def render_pattern(pattern: str, name: NameParts, *, particle: bool = False) -> str | None:
+    """Build the local part one pattern would give this name."""
+    builder = PATTERNS.get(pattern)
+    if builder is None:
+        return None
+    last = name.last_with_particle if particle and name.particles else name.last
+    if not name.first or not last:
+        return None
+    return builder(name.first, last)
+
+
+def address_for(pattern: str, full_name: str, domain: str, *, particle: bool = False) -> str | None:
+    parts = split_name(full_name)
+    if parts is None:
+        return None
+    local = render_pattern(pattern, parts, particle=particle)
+    if not local:
+        return None
+    return f"{local}@{domain.lower()}"
+
+
+# ---------------------------------------------------------------------------
+# Harvesting addresses from page text (FR-303 website / press)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FoundAddress:
+    """One address as it was found, with the FR-303 method that found it."""
+
+    email: str
+    method: str
+    source_url: str = ""
+    context: str = ""
+    full_name: str | None = None
+    confidence: float = 0.5
+    pattern: str | None = None
+
+    @property
+    def domain(self) -> str:
+        return self.email.rsplit("@", 1)[-1]
+
+    @property
+    def local_part(self) -> str:
+        return self.email.rsplit("@", 1)[0]
+
+    def as_contact_fields(self) -> dict[str, Any]:
+        """The FR-306 subset: the address, how it was found and where."""
+        return {
+            "email": self.email,
+            "email_source_method": self.method,
+            "source": self.source_url or self.method,
+            "confidence": round(self.confidence, 3),
+        }
+
+
+def _plausible(email: str) -> bool:
+    local, _, domain = email.partition("@")
+    if not local or not domain or _NOT_A_DOMAIN.search(domain):
+        return False
+    if len(email) > 254 or ".." in email:
+        return False
+    # Tracking pixels and Sentry DSNs are the usual false positives.
+    return not (len(local) > 40 and not any(c in local for c in "._-"))
+
+
+def extract_addresses(text: str, *, source_url: str = "", method: str = METHOD_WEBSITE,
+                      domain: str | None = None) -> list[FoundAddress]:
+    """Every address in one page, de-duplicated, optionally restricted to a domain."""
+    found: dict[str, FoundAddress] = {}
+    haystack = text or ""
+
+    def add(email: str, context: str) -> None:
+        email = email.strip().strip(".,;:<>()[]\"'").lower()
+        if not _plausible(email):
+            return
+        if domain and not email.endswith("@" + domain.lower()):
+            return
+        found.setdefault(
+            email,
+            FoundAddress(
+                email=email,
+                method=method,
+                source_url=source_url,
+                context=context[:200],
+                confidence=METHOD_CONFIDENCE.get(method, 0.6),
+            ),
+        )
+
+    for match in _MAILTO_RE.finditer(haystack):
+        add(match.group(1), _around(haystack, match.start()))
+    for match in EMAIL_RE.finditer(haystack):
+        add(match.group(0), _around(haystack, match.start()))
+    for match in _OBFUSCATED_RE.finditer(haystack):
+        add(
+            f"{match.group(1)}@{match.group(2)}.{match.group(3)}",
+            _around(haystack, match.start()),
+        )
+    return list(found.values())
+
+
+_NAME_NEAR_RE = re.compile(
+    r"\b([A-Z][\w'\u2019\-]+(?:\s+(?:van|de|der|den|von|le|du)){0,3}\s+[A-Z][\w'\u2019\-]+)\b"
+)
+
+
+def _around(text: str, index: int, width: int = 120) -> str:
+    start = max(0, index - width)
+    return re.sub(r"\s+", " ", text[start : index + width]).strip()
+
+
+def attach_names(found: Iterable[FoundAddress]) -> list[FoundAddress]:
+    """Guess the person an address belongs to from the text around it.
+
+    Only used as *evidence for the pattern*: a name read out of page furniture
+    is never stored on the contact (FR-306), it only tells :func:`infer_pattern`
+    which convention the local part fits.
+    """
+    out = []
+    for item in found:
+        if item.full_name is None and item.context:
+            match = _NAME_NEAR_RE.search(item.context)
+            if match:
+                item.full_name = match.group(1).strip()
+        out.append(item)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Pattern inference (FR-303)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PatternInference:
+    """What the observed addresses on a domain say about its convention."""
+
+    domain: str
+    pattern: str | None
+    confidence: float
+    sample_count: int
+    supporting: int
+    alternatives: list[dict[str, Any]] = field(default_factory=list)
+    local_parts: list[str] = field(default_factory=list)
+    source: str = METHOD_WEBSITE
+
+    def as_row(self) -> dict[str, Any]:
+        return {
+            "pattern": self.pattern or "",
+            "confidence": self.confidence,
+            "sample_count": self.sample_count,
+            "supporting": self.supporting,
+            "alternatives": self.alternatives,
+            "local_parts": self.local_parts[:50],
+            "source": self.source,
+        }
+
+
+def _confidence_for(supporting: int, samples: int) -> float:
+    """Agreement, damped for small samples.
+
+    One matching address is weak evidence and must not produce a 1.0 guess that
+    later reads as a verified address; four consistent ones are about as good as
+    an inference gets.  The curve is ``share * n / (n + 1)`` capped at 0.8, so
+    an inferred address never outranks one the company published (0.85).
+    """
+    if samples <= 0 or supporting <= 0:
+        return 0.0
+    share = supporting / samples
+    damping = samples / (samples + 1.0)
+    return round(min(0.8, share * damping), 3)
+
+
+def infer_pattern(
+    domain: str,
+    observations: Sequence[tuple[str, str]],
+    *,
+    source: str = METHOD_WEBSITE,
+) -> PatternInference:
+    """Infer the local-part convention of one domain (FR-303).
+
+    ``observations`` is ``(full_name, email)`` pairs seen on that domain.  Each
+    pair votes for every pattern that reproduces its local part - "j.smith"
+    votes for both ``f.last`` and, for a Jan Smith, nothing else - and the
+    pattern with the most votes wins, ties broken by how common the convention
+    is.  Role mailboxes are ignored: ``info@`` fits no naming rule and would
+    otherwise drown the evidence.
+    """
+    domain = domain.lower()
+    votes: Counter[str] = Counter()
+    considered = 0
+    seen_locals: list[str] = []
+
+    for full_name, email in observations:
+        if "@" not in (email or ""):
+            continue
+        local, _, addr_domain = email.lower().partition("@")
+        if addr_domain != domain:
+            continue
+        seen_locals.append(local)
+        parts = split_name(full_name or "")
+        if parts is None:
+            continue
+        considered += 1
+        matched = {
+            pattern
+            for pattern in PATTERN_ORDER
+            for particle in (False, True)
+            if render_pattern(pattern, parts, particle=particle) == local
+        }
+        for pattern in matched:
+            votes[pattern] += 1
+
+    if not votes:
+        return PatternInference(
+            domain=domain,
+            pattern=None,
+            confidence=0.0,
+            sample_count=considered,
+            supporting=0,
+            local_parts=seen_locals,
+            source=source,
+        )
+
+    best = max(votes.items(), key=lambda kv: (kv[1], -PATTERN_ORDER.index(kv[0])))
+    alternatives = [
+        {"pattern": p, "support": c}
+        for p, c in sorted(votes.items(), key=lambda kv: -kv[1])
+        if p != best[0]
+    ]
+    return PatternInference(
+        domain=domain,
+        pattern=best[0],
+        confidence=_confidence_for(best[1], considered),
+        sample_count=considered,
+        supporting=best[1],
+        alternatives=alternatives,
+        local_parts=seen_locals,
+        source=source,
+    )
+
+
+def learn_domain_pattern(
+    domain: str,
+    observations: Sequence[tuple[str, str]] | None = None,
+    *,
+    source: str = METHOD_WEBSITE,
+) -> PatternInference:
+    """Infer and store the pattern for a domain, reusing what is already known.
+
+    The stored addresses of that domain are always part of the evidence, so the
+    inference gets stronger as more contacts of the same employer are found.
+    """
+    domain = domain.lower()
+    pairs: list[tuple[str, str]] = list(observations or [])
+    for row in repo.known_addresses_on_domain(domain):
+        if row.get("full_name") and row.get("email"):
+            pairs.append((row["full_name"], row["email"]))
+
+    # De-duplicate on the address; the same person may appear twice.
+    unique: dict[str, tuple[str, str]] = {}
+    for name, email in pairs:
+        unique.setdefault(email.lower(), (name, email.lower()))
+
+    inference = infer_pattern(domain, list(unique.values()), source=source)
+    if inference.pattern:
+        repo.save_pattern(domain, inference.as_row())
+    return inference
+
+
+def known_pattern(domain: str) -> PatternInference | None:
+    row = repo.get_pattern(domain)
+    if not row or not row.get("pattern"):
+        return None
+    return PatternInference(
+        domain=domain.lower(),
+        pattern=row["pattern"],
+        confidence=float(row.get("confidence") or 0.0),
+        sample_count=int(row.get("sample_count") or 0),
+        supporting=int(row.get("supporting") or 0),
+        alternatives=row.get("alternatives") or [],
+        local_parts=row.get("local_parts") or [],
+        source=row.get("source") or METHOD_WEBSITE,
+    )
+
+
+def candidates_for_person(
+    full_name: str, domain: str, *, inference: PatternInference | None = None, limit: int = 4
+) -> list[FoundAddress]:
+    """Ranked guesses for one person on one domain (FR-303 pattern inference).
+
+    The domain's own convention comes first; the common conventions follow as
+    weaker guesses so FR-304 validation has something to test when the domain
+    has never been seen before.
+    """
+    parts = split_name(full_name)
+    if parts is None or not domain:
+        return []
+    inference = inference or known_pattern(domain)
+
+    ordered: list[tuple[str, float]] = []
+    if inference and inference.pattern:
+        ordered.append((inference.pattern, max(0.3, inference.confidence)))
+        for alt in inference.alternatives[:2]:
+            ordered.append((str(alt.get("pattern")), max(0.2, inference.confidence * 0.5)))
+    for pattern in ("first.last", "f.last", "firstlast", "first"):
+        ordered.append((pattern, 0.25))
+
+    out: dict[str, FoundAddress] = {}
+    for pattern, confidence in ordered:
+        for particle in (False, True):
+            local = render_pattern(pattern, parts, particle=particle)
+            if not local:
+                continue
+            email = f"{local}@{domain.lower()}"
+            if email in out:
+                continue
+            out[email] = FoundAddress(
+                email=email,
+                method=METHOD_PATTERN,
+                source_url="",
+                full_name=full_name,
+                confidence=round(confidence, 3),
+                pattern=pattern,
+            )
+            if len(out) >= limit:
+                return list(out.values())
+    return list(out.values())
+
+
+def generic_candidates(domain: str, *, careers_url: str | None = None) -> list[FoundAddress]:
+    """The generic careers mailbox FR-301 falls back to."""
+    if not domain:
+        return []
+    domain = domain.lower()
+    source = careers_url or f"https://{domain}"
+    out = []
+    for index, local in enumerate(CAREERS_LOCAL_PARTS[:6]):
+        out.append(
+            FoundAddress(
+                email=f"{local}@{domain}",
+                method=METHOD_PATTERN,
+                source_url=source,
+                confidence=round(0.4 - index * 0.03, 3),
+            )
+        )
+    for local in FALLBACK_LOCAL_PARTS[:2]:
+        out.append(
+            FoundAddress(
+                email=f"{local}@{domain}",
+                method=METHOD_PATTERN,
+                source_url=source,
+                confidence=0.2,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Collecting addresses off the company's own site (FR-303, CR-402)
+# ---------------------------------------------------------------------------
+
+
+def _classify_page(url: str) -> str:
+    kind, _ = crawler.classify_url(url)
+    if kind == "news" or any(token in url.lower() for token in ("press", "pers", "media")):
+        return METHOD_PRESS
+    return METHOD_WEBSITE
+
+
+async def collect_from_site(
+    domain: str,
+    *,
+    careers_url: str | None = None,
+    egress: EgressClient | None = None,
+    max_pages: int = 10,
+) -> list[FoundAddress]:
+    """Read the contact, press and careers pages of one company site (FR-303).
+
+    The home page is fetched first and its own links decide where to go next:
+    guessing two dozen conventional paths costs the company two dozen 404s for
+    a handful of hits, which is neither polite nor what CR-402 has in mind.
+    Conventional paths are tried only as a fallback, and only when the home
+    page named no contact page at all.  Robots.txt and the per-domain pacing
+    remain the egress layer's business (FR-182); a disallowed page is skipped,
+    never worked around.
+    """
+    if not domain:
+        return []
+    domain = domain.lower().lstrip(".")
+    base = f"https://{domain}"
+
+    async def _read(client: EgressClient, url: str) -> tuple[str, str] | None:
+        """``(html, url)`` for one page, or ``None`` when it cannot be read."""
+        try:
+            result = await client.fetch(url)
+        except RobotsDisallowed:
+            log.info("robots.txt disallows %s; skipped (CR-402)", url)
+            return None
+        except Exception as exc:  # noqa: BLE001 - one dead page must not stop the rest
+            log.debug("Could not fetch %s: %s", url, exc)
+            return None
+        return (result.text, str(url)) if result.ok else None
+
+    async def _run(client: EgressClient) -> list[FoundAddress]:
+        collected: dict[str, FoundAddress] = {}
+
+        def absorb(html: str, url: str) -> None:
+            text = crawler.extract_text(html, drop_chrome=False)
+            method = _classify_page(url)
+            for item in attach_names(
+                extract_addresses(f"{html}\n{text}", source_url=url, method=method, domain=domain)
+            ):
+                current = collected.get(item.email)
+                if current is None or item.confidence > current.confidence:
+                    collected[item.email] = item
+
+        home = await _read(client, base)
+        if home is None:
+            # No home page means no site to read; the pattern inference and the
+            # generic mailbox still carry FR-301 from here.
+            log.info("No reachable home page for %s; address discovery skipped", domain)
+            return []
+        absorb(*home)
+
+        # Follow the company's own links to its contact, press and careers pages.
+        targets: dict[str, float] = {}
+        for url, anchor in crawler.extract_links(home[0], base):
+            if not crawler.same_site(url, crawler.registrable_domain(domain)):
+                continue
+            kind, _ = crawler.classify_url(url, anchor)
+            haystack = f"{url} {anchor}".lower()
+            if kind in ("locations", "careers", "news") or any(
+                token in haystack for token in CONTACT_LINK_TOKENS
+            ):
+                targets[url] = 1.0 if kind == "locations" else 0.7
+        if careers_url:
+            targets.setdefault(careers_url, 0.9)
+        if not targets:
+            targets = {base + path: 0.5 for path in CONTACT_PATHS[:6]}
+
+        ordered = sorted(targets, key=lambda u: (-targets[u], len(u)))[: max(0, max_pages - 1)]
+        for url in ordered:
+            page = await _read(client, url)
+            if page is not None:
+                absorb(*page)
+        return list(collected.values())
+
+    if egress is not None:
+        return await _run(egress)
+    async with EgressClient() as client:
+        return await _run(client)
+
+
+def addresses_from_pages(pages: Iterable[Any], domain: str | None = None) -> list[FoundAddress]:
+    """Harvest a crawl that another stage already paid for (FR-182 reuse).
+
+    Accepts ``crawler.CrawledPage`` objects or plain ``{"url", "text"}`` dicts.
+    """
+    collected: dict[str, FoundAddress] = {}
+    for page in pages:
+        url = getattr(page, "url", None) or (page.get("url") if isinstance(page, dict) else "")
+        text = getattr(page, "text", None) or (page.get("text") if isinstance(page, dict) else "")
+        if not text:
+            continue
+        method = _classify_page(url or "")
+        for item in attach_names(
+            extract_addresses(text, source_url=url or "", method=method, domain=domain)
+        ):
+            current = collected.get(item.email)
+            if current is None or item.confidence > current.confidence:
+                collected[item.email] = item
+    return list(collected.values())
+
+
+# ---------------------------------------------------------------------------
+# Third-party lookup services (FR-303, OQ-05)
+# ---------------------------------------------------------------------------
+
+
+class LookupServiceDisabled(RuntimeError):
+    """Raised when the third-party lookup is called while OQ-05 is unresolved."""
+
+
+def lookup_service_config() -> dict[str, Any]:
+    """What an administrator has configured for the FR-303 lookup service."""
+    return {
+        "enabled": bool(kb.get_setting(SETTING_LOOKUP_ENABLED, False)),
+        "url": kb.get_setting(SETTING_LOOKUP_URL, "") or "",
+        "api_key": kb.get_setting(SETTING_LOOKUP_KEY, "") or "",
+        "name": kb.get_setting(SETTING_LOOKUP_NAME, "") or "",
+    }
+
+
+def lookup_service_enabled() -> bool:
+    config = lookup_service_config()
+    return bool(config["enabled"] and config["url"])
+
+
+async def lookup_via_service(
+    full_name: str,
+    domain: str,
+    *,
+    egress: EgressClient | None = None,
+) -> list[FoundAddress]:
+    """Ask the configured third-party service for an address (FR-303, OQ-05).
+
+    The request template is the shape every provider of this kind exposes -
+    ``GET <url>?domain=&first_name=&last_name=`` with a bearer key - and the
+    response is read defensively because the field names differ per provider.
+    Nothing is sent until an administrator has both named a provider and
+    switched the feature on, because OQ-05 has not established which services
+    are acceptable under the data-protection terms.
+    """
+    config = lookup_service_config()
+    if not config["enabled"] or not config["url"]:
+        raise LookupServiceDisabled(
+            "Third-party contact lookup is disabled (OQ-05 unresolved). An administrator "
+            f"must set {SETTING_LOOKUP_URL} and {SETTING_LOOKUP_ENABLED} before it is used."
+        )
+    parts = split_name(full_name)
+    if parts is None or not domain:
+        return []
+
+    params = {
+        "domain": domain.lower(),
+        "first_name": parts.first,
+        "last_name": parts.last,
+        "full_name": full_name,
+    }
+    headers = {"Accept": "application/json"}
+    if config["api_key"]:
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+
+    async def _run(client: EgressClient) -> list[FoundAddress]:
+        result = await client.fetch(
+            config["url"], params=params, headers=headers, use_cache=False, access_method="api"
+        )
+        if not result.ok:
+            log.info("Lookup service returned %s for %s", result.status_code, domain)
+            return []
+        import json  # noqa: PLC0415 - only needed on this path
+
+        try:
+            payload = json.loads(result.text)
+        except ValueError:
+            log.warning("Lookup service returned a non-JSON body")
+            return []
+        return _parse_lookup_payload(payload, domain, full_name, config["name"])
+
+    if egress is not None:
+        return await _run(egress)
+    async with EgressClient() as client:
+        return await _run(client)
+
+
+def _parse_lookup_payload(
+    payload: Any, domain: str, full_name: str, provider: str
+) -> list[FoundAddress]:
+    """Read an address and a score out of whatever shape the provider returns."""
+    node = payload.get("data", payload) if isinstance(payload, dict) else payload
+    candidates: list[dict] = []
+    if isinstance(node, dict):
+        if node.get("email"):
+            candidates.append(node)
+        for key in ("emails", "results", "candidates"):
+            value = node.get(key)
+            if isinstance(value, list):
+                candidates.extend(v for v in value if isinstance(v, dict))
+    elif isinstance(node, list):
+        candidates.extend(v for v in node if isinstance(v, dict))
+
+    out: list[FoundAddress] = []
+    for candidate in candidates:
+        email = str(candidate.get("email") or candidate.get("value") or "").strip().lower()
+        if not _plausible(email) or not email.endswith("@" + domain.lower()):
+            continue
+        raw_score = candidate.get("confidence", candidate.get("score", 70))
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            score = 70.0
+        out.append(
+            FoundAddress(
+                email=email,
+                method=METHOD_LOOKUP,
+                source_url=provider or "lookup_service",
+                full_name=full_name,
+                confidence=round(min(0.9, score / 100 if score > 1 else score), 3),
+            )
+        )
+    return out
+
+
+def domain_of(url_or_domain: str | None) -> str:
+    """The bare registrable host of a company, from a URL or a domain."""
+    if not url_or_domain:
+        return ""
+    value = url_or_domain.strip()
+    if "://" in value:
+        value = urlparse(value).netloc
+    value = value.split("/")[0].split("@")[-1].lower()
+    if value.startswith("www."):
+        value = value[4:]
+    return value

@@ -1,0 +1,430 @@
+"""The periodic loop (FR-401, FR-403, FR-327, FR-364, NFR-303).
+
+Five recurring pieces of work, none of which belongs to a request:
+
+============================  ==========  ==================================
+task                          default     what it does
+============================  ==========  ==================================
+``watchlist``                 hourly      runs the watches that are due
+                                          (FR-401); each watch's own
+                                          interval decides which those are
+``replies``                   15 minutes  classifies replies the mail slice
+                                          has stored (FR-422)
+``digest``                    6 hours     generates the digests that are
+                                          due; each seeker gets one a week
+                                          (FR-403)
+``follow_ups``                hourly      notifies about follow-ups whose
+                                          date has passed (FR-327)
+``retention``                 daily       deletes third-party records past
+                                          their retention date (NFR-303)
+``llm_redaction``             daily       nulls prompt and response text
+                                          past its retention (FR-364)
+============================  ==========  ==================================
+
+Two properties make this safe to run inside the API process:
+
+*Nothing here sends anything.*  The scheduler classifies, drafts, notifies and
+deletes.  Every outbound message still waits for the job seeker (NFR-305).
+
+*Everything is idempotent and time-stamped.*  Each task records its last run
+in ``app_setting``, so a restart does not re-run the day's work, and every
+task's own writes are de-duplicated (a watch has ``next_check_at``, a
+notification has ``dedup_key``, a digest has its period as a key).  A task
+that raises is logged and retried on its next tick; one broken task never
+stops the others.
+
+Running it for real
+-------------------
+
+In development the loop lives in the API process, started by ``POST
+/api/monitoring/scheduler/start`` (admin).  :func:`maybe_autostart` is the
+one-line hook for an application lifespan that wants it up without the call;
+nothing invokes it today, so ``DREAMJOB_SCHEDULER_AUTOSTART`` has no effect
+until ``main.py`` does.
+
+For a real deployment on macOS, run the tasks from ``launchd`` instead, so
+that they survive an API restart and appear in the system log::
+
+    # ~/Library/LaunchAgents/net.stepvda.dreamjob.monitoring.plist
+    <?xml version="1.0" encoding="UTF-8"?>
+    <plist version="1.0"><dict>
+      <key>Label</key><string>net.stepvda.dreamjob.monitoring</string>
+      <key>ProgramArguments</key>
+      <array>
+        <string>/usr/bin/env</string>
+        <string>PYTHONPATH=/opt/dreamjob/backend</string>
+        <string>/opt/dreamjob/.venv/bin/python</string>
+        <string>-m</string><string>dreamjob.monitoring.scheduler</string>
+        <string>--once</string>
+      </array>
+      <key>StartInterval</key><integer>3600</integer>
+      <key>StandardOutPath</key><string>/var/log/dreamjob-monitoring.log</string>
+      <key>StandardErrorPath</key><string>/var/log/dreamjob-monitoring.log</string>
+    </dict></plist>
+
+then ``launchctl load -w`` that file.  The equivalent crontab line is::
+
+    17 * * * * cd /opt/dreamjob && PYTHONPATH=backend .venv/bin/python \\
+               -m dreamjob.monitoring.scheduler --once >> /var/log/dreamjob.log 2>&1
+
+``--once`` runs every task whose interval has elapsed and exits, which is why
+the same code serves both: the intervals live in the task table, not in the
+scheduler that calls them, so cron firing hourly does not turn a daily sweep
+into an hourly one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import random
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from dreamjob.db.connection import utcnow
+from dreamjob.db.repositories import knowledge as kb_repo
+from dreamjob.db.repositories import pipeline_cards as repo
+from dreamjob.monitoring import digest as digest_mod
+from dreamjob.monitoring import watchlist as watchlist_mod
+
+log = logging.getLogger(__name__)
+
+SETTING_PREFIX = "scheduler.last_run."
+#: How often the loop wakes up to see whether anything is due.
+TICK_SECONDS = 60
+#: Up to this much random delay before a task runs, so several tasks that come
+#: due together do not all hit SQLite in the same instant.
+JITTER_SECONDS = 20
+
+
+@dataclass
+class Task:
+    """One recurring piece of work and how often it runs."""
+
+    name: str
+    interval_seconds: int
+    run: Callable[[], Awaitable[dict[str, Any]] | dict[str, Any]]
+    description: str = ""
+    enabled: bool = True
+
+    def due(self, last_run: str | None, now: datetime) -> bool:
+        if not self.enabled:
+            return False
+        if not last_run:
+            return True
+        try:
+            return datetime.fromisoformat(last_run) + timedelta(
+                seconds=self.interval_seconds
+            ) <= now
+        except ValueError:
+            return True
+
+
+def _last_run(name: str) -> str | None:
+    value = kb_repo.get_setting(f"{SETTING_PREFIX}{name}")
+    if isinstance(value, dict):
+        return value.get("at")
+    return value if isinstance(value, str) else None
+
+
+def _record_run(name: str, result: dict[str, Any] | None, error: str | None = None) -> None:
+    kb_repo.set_setting(
+        f"{SETTING_PREFIX}{name}",
+        {
+            "at": utcnow(),
+            "error": error,
+            "summary": {
+                k: v
+                for k, v in (result or {}).items()
+                if isinstance(v, (int, float, str, bool)) or v is None
+            },
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# The tasks
+# ---------------------------------------------------------------------------
+
+
+async def _run_watchlist() -> dict[str, Any]:
+    return await watchlist_mod.run_cycle()
+
+
+async def _run_replies() -> dict[str, Any]:
+    from dreamjob.postapp import reply_classifier  # noqa: PLC0415 - avoids an import cycle
+
+    def llm_for(seeker_id: str) -> Any:
+        from dreamjob.config import get_settings  # noqa: PLC0415
+        from dreamjob.llm.client import LLMClient  # noqa: PLC0415
+
+        if not get_settings().deepseek_api_key:
+            return None
+        return LLMClient(job_seeker_id=seeker_id)
+
+    return await asyncio.to_thread(
+        reply_classifier.process_pending, None, limit=25, llm_factory=llm_for
+    )
+
+
+async def _run_digest() -> dict[str, Any]:
+    return await asyncio.to_thread(digest_mod.run_cycle, email=False)
+
+
+async def _run_follow_ups() -> dict[str, Any]:
+    """Notify about follow-ups whose date has passed (FR-327, FR-403).
+
+    Notifies only.  Sending the follow-up is the mail slice's job and needs the
+    seeker's approval first (NFR-305).
+    """
+    now = utcnow()
+    since = (datetime.now(UTC) - timedelta(days=90)).isoformat(timespec="seconds")
+    raised = 0
+    for seeker_id in repo.active_seeker_ids(since):
+        for item in repo.due_follow_ups(seeker_id, now, limit=20):
+            if repo.notify(
+                seeker_id,
+                {
+                    "kind": "follow_up_due",
+                    "title": (
+                        f"Follow-up due: {item.get('company_name') or item.get('recipient_email')}"
+                    ),
+                    "body": (
+                        f"The follow-up for {item.get('opportunity_title') or 'this application'} "
+                        f"was due on {str(item.get('follow_up_due_at') or '')[:10]}."
+                    ),
+                    "payload": {
+                        "dispatch_id": item.get("dispatch_id"),
+                        "pipeline_card_id": item.get("pipeline_card_id"),
+                    },
+                    "severity": "action",
+                    "dedup_key": f"follow_up:{item.get('dispatch_id')}",
+                },
+            ):
+                raised += 1
+    return {"notifications": raised}
+
+
+async def _run_retention() -> dict[str, Any]:
+    """NFR-303: the contacts slice owns the sweep; the scheduler owns the clock."""
+    from dreamjob.db.repositories import contacts as contacts_repo  # noqa: PLC0415
+
+    return await asyncio.to_thread(contacts_repo.sweep_retention)
+
+
+async def _run_llm_redaction() -> dict[str, Any]:
+    """FR-364: the administration slice owns the policy; the clock lives here."""
+    from dreamjob.api.routers.admin import run_redaction_job  # noqa: PLC0415
+
+    return await asyncio.to_thread(run_redaction_job)
+
+
+HOUR = 3600
+
+DEFAULT_TASKS: list[Task] = [
+    Task("replies", 15 * 60, _run_replies,
+         "Classify incoming replies and draft answers (FR-422)"),
+    Task("watchlist", HOUR, _run_watchlist,
+         "Recheck watched companies that are due (FR-401, FR-402)"),
+    Task("follow_ups", HOUR, _run_follow_ups,
+         "Notify about follow-ups whose date has passed (FR-327)"),
+    Task("digest", 6 * HOUR, _run_digest,
+         "Generate the weekly digests that are due (FR-403)"),
+    Task("retention", 24 * HOUR, _run_retention,
+         "Delete third-party records past their retention date (NFR-303)"),
+    Task("llm_redaction", 24 * HOUR, _run_llm_redaction,
+         "Redact LLM prompts and responses past their retention (FR-364)"),
+]
+
+
+# ---------------------------------------------------------------------------
+# The loop
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Scheduler:
+    """An asyncio periodic runner.  One instance per process."""
+
+    tasks: list[Task] = field(default_factory=lambda: list(DEFAULT_TASKS))
+    tick_seconds: int = TICK_SECONDS
+    jitter_seconds: int = JITTER_SECONDS
+    _task: asyncio.Task | None = None
+    _stop: asyncio.Event | None = None
+    started_at: str | None = None
+    runs: int = 0
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def task(self, name: str) -> Task | None:
+        return next((t for t in self.tasks if t.name == name), None)
+
+    async def run_task(self, task: Task) -> dict[str, Any]:
+        """Run one task, recording its outcome either way."""
+        started = datetime.now(UTC)
+        try:
+            result = task.run()
+            if asyncio.iscoroutine(result):
+                result = await result
+            payload = result if isinstance(result, dict) else {"result": result}
+            _record_run(task.name, payload)
+            log.info(
+                "Scheduler task %s finished in %.1fs: %s",
+                task.name, (datetime.now(UTC) - started).total_seconds(),
+                {k: v for k, v in payload.items() if isinstance(v, (int, str, bool))},
+            )
+            return payload
+        except Exception as exc:  # noqa: BLE001 - one task must not stop the loop
+            log.exception("Scheduler task %s failed", task.name)
+            _record_run(task.name, None, error=str(exc)[:500])
+            return {"error": str(exc)[:500]}
+
+    async def run_due(self, *, now: datetime | None = None) -> dict[str, Any]:
+        """Run every task whose interval has elapsed.  This is ``--once``."""
+        moment = now or datetime.now(UTC)
+        outcomes: dict[str, Any] = {}
+        for task in self.tasks:
+            if not task.due(_last_run(task.name), moment):
+                continue
+            if self.jitter_seconds:
+                await asyncio.sleep(random.uniform(0, self.jitter_seconds))
+            outcomes[task.name] = await self.run_task(task)
+        self.runs += 1
+        return outcomes
+
+    async def _loop(self) -> None:
+        assert self._stop is not None
+        while not self._stop.is_set():
+            try:
+                await self.run_due()
+            except Exception:  # noqa: BLE001 - the loop outlives its iterations
+                log.exception("Scheduler tick failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.tick_seconds)
+            except TimeoutError:
+                continue
+
+    def start(self) -> dict[str, Any]:
+        if self.running:
+            return self.status()
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._loop())
+        self.started_at = utcnow()
+        log.info("Monitoring scheduler started with %d tasks", len(self.tasks))
+        return self.status()
+
+    async def stop(self) -> dict[str, Any]:
+        if self._stop is not None:
+            self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - stopping, not running
+                pass
+        self._task = None
+        self.started_at = None
+        log.info("Monitoring scheduler stopped")
+        return self.status()
+
+    def status(self) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        return {
+            "running": self.running,
+            "started_at": self.started_at,
+            "ticks": self.runs,
+            "tick_seconds": self.tick_seconds,
+            "tasks": [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "interval_seconds": t.interval_seconds,
+                    "enabled": t.enabled,
+                    "last_run": kb_repo.get_setting(f"{SETTING_PREFIX}{t.name}"),
+                    "due": t.due(_last_run(t.name), now),
+                }
+                for t in self.tasks
+            ],
+        }
+
+    def set_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        task = self.task(name)
+        if task is None:
+            raise KeyError(f"No scheduler task named {name!r}")
+        task.enabled = enabled
+        return self.status()
+
+
+#: The process-wide scheduler.  Started from the API, or by ``--once`` below.
+scheduler = Scheduler()
+
+
+def maybe_autostart() -> dict[str, Any] | None:
+    """Start the loop if the deployment asked for it.
+
+    Kept here rather than in ``main.py`` so that the decision to run background
+    work inside the API process is one line at the call site and reversible by
+    an environment variable.  Returns ``None`` when autostart is off.
+    """
+    if os.environ.get("DREAMJOB_SCHEDULER_AUTOSTART", "").strip().lower() not in {
+        "1", "true", "yes", "on"
+    }:
+        return None
+    return scheduler.start()
+
+
+async def run_now(name: str) -> dict[str, Any]:
+    """Run one task immediately, whether or not it is due (the API's button)."""
+    task = scheduler.task(name)
+    if task is None:
+        raise KeyError(f"No scheduler task named {name!r}")
+    return await scheduler.run_task(task)
+
+
+def main() -> None:  # pragma: no cover - the launchd / cron entry point
+    parser = argparse.ArgumentParser(description="Dream Job monitoring scheduler")
+    parser.add_argument(
+        "--once", action="store_true",
+        help="run every task whose interval has elapsed, then exit (for cron or launchd)",
+    )
+    parser.add_argument("--task", help="run one named task immediately and exit")
+    parser.add_argument("--list", action="store_true", help="list the tasks and their intervals")
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+
+    from dreamjob.db.migrator import migrate  # noqa: PLC0415 - stand-alone entry point
+
+    migrate()
+
+    if args.list:
+        for task in scheduler.tasks:
+            print(f"{task.name:<16} every {task.interval_seconds:>6}s  {task.description}")
+        return
+    if args.task:
+        print(asyncio.run(run_now(args.task)))
+        return
+    if args.once:
+        print(asyncio.run(scheduler.run_due()))
+        return
+
+    async def forever() -> None:
+        scheduler.start()
+        assert scheduler._task is not None
+        await scheduler._task
+
+    try:
+        asyncio.run(forever())
+    except KeyboardInterrupt:
+        print("stopped")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
