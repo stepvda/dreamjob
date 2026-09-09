@@ -60,12 +60,7 @@ class LinkedInRequest(ComputeRequest):
 
 def discretion_state(job_seeker_id: str, campaign_id: str | None = None) -> dict[str, Any]:
     """The FR-385 badge, plus what it is currently suppressing."""
-    campaign = (
-        repo.get_campaign(campaign_id, job_seeker_id)
-        if campaign_id
-        else repo.latest_campaign(job_seeker_id)
-    )
-    directives = repo.directive_set(job_seeker_id, (campaign or {}).get("directive_set_id"))
+    campaign, directives = repo.directives_in_force(job_seeker_id, campaign_id)
     on = bool((directives or {}).get("discretion_mode"))
     return {
         "discretion_mode": on,

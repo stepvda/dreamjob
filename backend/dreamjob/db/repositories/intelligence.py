@@ -289,6 +289,23 @@ def directive_set(job_seeker_id: str, directive_set_id: str | None) -> dict | No
     )
 
 
+def directives_in_force(
+    job_seeker_id: str, campaign_id: str | None = None
+) -> tuple[dict | None, dict | None]:
+    """The campaign in force and the directive set it runs under (FR-385).
+
+    One resolution, used by everything that has to say whether this search is a
+    discreet one: the named campaign, or the latest one, pins its directives,
+    and without a campaign the newest set is what the job seeker is editing.
+    The session-wide indicator in the application shell and the per-screen
+    badges both come through here, so they cannot disagree.
+    """
+    campaign = (
+        get_campaign(campaign_id, job_seeker_id) if campaign_id else latest_campaign(job_seeker_id)
+    )
+    return campaign, directive_set(job_seeker_id, (campaign or {}).get("directive_set_id"))
+
+
 def get_company(company_id: str) -> dict | None:
     return query_one("SELECT * FROM company WHERE id = ?", (company_id,))
 

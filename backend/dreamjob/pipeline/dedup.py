@@ -19,14 +19,14 @@ and duplicated qualifiers stop mattering, which is what distinguishes
 No third-party fuzzy-matching dependency is used.
 
 A plausible similarity measure destroys a corpus quietly, because a wrong merge
-looks exactly like a successful de-duplication: on real boards the previous
-settings merged 18% of genuinely distinct openings and reduced a 227-posting
-board to six rows (docs/Data_Gathering_Plan.md section 3 step 9 and section 5,
-C4/N6).  Three rules keep the fuzzy comparison honest, and each of them is a
-regression test in ``tests/unit/test_dedup_guards.py``: two stated, different
-locations veto a merge outright; a differing number is a level or a reference,
-never noise; and an unknown location no longer scores high enough to carry a
-pair over the threshold by itself.
+looks exactly like a successful de-duplication: the previous settings merged
+18% of genuinely distinct openings on real boards, and wrote a 227-posting
+board as six rows (docs/Data_Gathering_Plan.md section 3 step 9 and section 5,
+C4/N6).  Three rules keep the comparison honest, and each is a regression test
+in ``tests/unit/test_dedup_guards.py``: two stated, different locations veto a
+merge outright; a differing number is a level or a reference, never noise; and
+an unknown location no longer scores high enough to carry a pair over the
+threshold by itself.
 """
 
 from __future__ import annotations
@@ -171,9 +171,10 @@ def title_numbers(value: str | None) -> set[str]:
 
     Brackets are read too, because "Support Engineer (Level 6)" and
     "(Level 7)" are two openings and ``normalise_title`` used to throw both the
-    bracket and the number away, which merged them at 0.96
-    (docs/Data_Gathering_Plan.md section 5, N6).  A postcode and a workload are
-    not references, so they are removed before the numbers are read.
+    bracket and the number away: the pair scored a perfect 1.000
+    (docs/Data_Gathering_Plan.md section 5, N6, reports 0.955 for the same
+    defect on a live board).  A postcode and a workload are not references, so
+    they are removed before the numbers are read.
     """
     text = _POSTCODE_BEFORE_PLACE.sub(" ", _strip_workload(value or ""))
     return {t for t in tokens(text) if _bears_digit(t)}
@@ -402,8 +403,9 @@ def title_similarity(
     if difference & LEVEL_MARKERS or any(_bears_digit(t) for t in difference):
         # Seniority is never contextual noise, whatever the employer is called,
         # and neither is a number: a differing digit marks a level or a
-        # reference ("Support Engineer 6" / "7", "Magazijnier 100234" /
-        # "100567"), never the city or the employer that ``ignore`` covers.
+        # reference ("Support Engineer (Level 6)" against "(Level 7)", which
+        # scored a perfect 1.000 while the bracket and its number were being
+        # discarded), never the city or the employer that ``ignore`` covers.
         return min(DISTINCT_TITLE_CEILING, ratio)
     distinguishing = difference - TITLE_STOPWORDS - set(ignore)
     if not distinguishing:
@@ -428,12 +430,12 @@ def contextual_tokens(*records: dict) -> set[str]:
 
 
 # An unknown location is a missing fact, not a match.  It used to score 0.6,
-# which at the old 0.86 threshold carried a pair over the line on its own
-# (0.45 + 0.25 + 0.15 + 0.025 = 0.875): two postings that agreed on title and
-# employer merged purely because neither said where it was.  At 0.5 the best a
-# pair with an unknown location can reach is 0.875, below the threshold, so an
-# absent location can no longer decide a merge (docs/Data_Gathering_Plan.md
-# section 5, N6).
+# which at the old 0.86 threshold carried a pair over the line on its own:
+# "Data Engineer" in Brussels against "Data Engineer" with no stated place
+# scored 0.45 + 0.25 + 0.15 + 0.05 = 0.90 and merged, purely because one side
+# said nothing.  At 0.5 the most such a pair can reach is 0.875, under the
+# threshold, so an absent location no longer decides a merge either way
+# (docs/Data_Gathering_Plan.md section 5, N6).
 UNKNOWN_LOCATION_SIMILARITY = 0.5
 
 

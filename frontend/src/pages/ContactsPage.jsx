@@ -30,6 +30,12 @@ import {
 } from '../components/ui'
 import WorkflowMap from '../components/WorkflowMap'
 
+// The company chooser asks for one page of the knowledge-base browser. 100 is
+// the maximum GET /api/companies allows (FR-345); asking for more is answered
+// 422 and leaves the chooser empty, so the ceiling is named rather than
+// guessed, and a longer list is reported instead of silently truncated.
+const COMPANY_CHOICES = 100
+
 const TABS = [
   { key: 'contacts', label: 'Contacts' },
   { key: 'introductions', label: 'Introduction routes' },
@@ -62,7 +68,7 @@ export default function ContactsPage() {
 
 function ContactList() {
   const [companyId, setCompanyId] = useState('')
-  const companies = useFetch(() => api.get('/companies?limit=200').catch(() => []), [])
+  const companies = useFetch(() => api.get(`/companies?limit=${COMPANY_CHOICES}`), [])
   const contacts = useFetch(
     () => (companyId ? api.get(`/contacts/companies/${companyId}`) : Promise.resolve(null)),
     [companyId],
@@ -72,6 +78,7 @@ function ContactList() {
   const list = Array.isArray(companies.data)
     ? companies.data
     : companies.data?.items || companies.data?.companies || []
+  const total = Number.isFinite(companies.data?.total) ? companies.data.total : list.length
 
   async function validate(contact) {
     setValidating(contact.id)
@@ -84,6 +91,10 @@ function ContactList() {
   }
 
   if (companies.loading) return <Loading />
+  // A refused lookup is not an empty knowledge base: swallowing the failure
+  // would show "no companies yet" to a job seeker whose companies are all
+  // there, and no contact could ever be reached from this screen.
+  if (companies.error) return <ErrorBox error={companies.error} onRetry={companies.reload} />
   if (!list.length) {
     return (
       <FirstRun
@@ -119,6 +130,13 @@ function ContactList() {
             </select>
           </div>
         </div>
+        {total > list.length && (
+          <p className="small muted" style={{ marginBottom: 0 }}>
+            Showing the {list.length} most recently collected of {total} companies. Search
+            the full knowledge base on <Link to="/companies">Companies</Link> if the one you
+            want is not here.
+          </p>
+        )}
       </div>
 
       {!companyId && (

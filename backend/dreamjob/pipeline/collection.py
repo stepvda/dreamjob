@@ -77,6 +77,7 @@ from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import campaigns as repo
 from dreamjob.db.repositories import hygiene as hygiene_repo
 from dreamjob.db.repositories import knowledge as kb_repo
+from dreamjob.egress import client as egress_client
 from dreamjob.egress.client import EgressClient, FetchResult, RobotsDisallowed
 from dreamjob.jobs.runner import JobCancelled, JobContext, runner
 from dreamjob.pipeline import knowledge_base, planning
@@ -239,6 +240,13 @@ class _UnitEgress:
         self._client = client
         self.requests = 0
         self.refusals: list[str] = []
+        # The last request this item made, kept for the fetch ledger (N4): the
+        # ledger answers "was this target read recently", so it needs the URL
+        # and validators of the read, not just how many there were.
+        self.last_url: str | None = None
+        self.last_status: int | None = None
+        self.last_etag: str | None = None
+        self.last_modified: str | None = None
 
     def __getattr__(self, name: str) -> Any:
         # Everything not about accounting belongs to the shared client.
@@ -253,6 +261,11 @@ class _UnitEgress:
             raise
         if not result.ok:
             self.refusals.append(f"{url}: HTTP {result.status_code}")
+        self.last_url = result.url or url
+        self.last_status = result.status_code
+        headers = result.headers or {}
+        self.last_etag = headers.get("etag") or headers.get("ETag")
+        self.last_modified = headers.get("last-modified") or headers.get("Last-Modified")
         return result
 
     async def fetch_json(self, url: str, **kwargs: Any) -> object:
@@ -418,6 +431,8 @@ class ItemOutcome:
     charged: int = 0             # what this item cost the run's page budget (FR-186)
     errors: int = 0
     refused: int = 0             # requests the server or robots.txt turned down
+    #: Answers in which the source itself stated it holds nothing for this query.
+    stated_empty: int = 0
     blocked: bool = False        # robots.txt refused the source (FR-182)
     last_error: str | None = None
 
@@ -448,6 +463,13 @@ class ItemOutcome:
             return "rejected"
         if self.parsed or self.normalised:
             return "normalised_nothing"
+        if self.stated_empty:
+            # The source answered, and said it holds nothing for this query.
+            # A partitioned sweep asks narrow questions on purpose and some have
+            # no answer; reporting those as breakages made 9 of 54 EURES
+            # partitions read as "the source layout has probably changed" while
+            # the register was simply empty for them.
+            return "no_matches"
         if self.pages or self.requests:
             return "extracted_nothing"
         return "no_work"
@@ -466,6 +488,7 @@ class ItemOutcome:
             "pages": self.pages,
             "charged_pages": self.charged,
             "blocked_by_robots": self.blocked,
+            "stated_empty": self.stated_empty,
             "extraction_rate": self.extraction_rate,
         }
 
@@ -480,6 +503,10 @@ _STATE_STATUS: dict[str, str] = {
     "rejected": "failed",
     "normalised_nothing": "failed",
     "extracted_nothing": "failed",
+    # The source was read successfully and holds nothing for this query.  That
+    # is a completed unit of work, not a failure - but it still says so in
+    # words, so an empty partition is never mistaken for a collected one.
+    "no_matches": "done",
     "no_work": "skipped",
 }
 
@@ -507,6 +534,11 @@ def _state_message(outcome: ItemOutcome) -> str | None:
         return (
             f"fetched {outcome.pages} page(s) and extracted no record - the source layout "
             "has probably changed (NFR-403)"
+        )
+    if state == "no_matches":
+        return (
+            f"the source answered {outcome.stated_empty} request(s) and stated it holds no "
+            "vacancy for this query: read successfully, nothing to collect"
         )
     return "the source issued no request for this query: nothing to collect"
 
@@ -620,6 +652,51 @@ def _board_of(item: dict, adapter: Any) -> tuple[str, str] | None:
     if len(slugs) != 1:
         return None
     return vendor, slugs[0]
+
+
+def _target_key(unit: _Unit) -> str:
+    """A stable name for the thing this plan item reads (N4, FR-342).
+
+    The fetch ledger answers "was *this target* read recently".  Counting fresh
+    rows per adapter instead made one Greenhouse board's freshness stand for all
+    6,900 of them, so a second campaign skipped every board once any hundred
+    rows were fresh.  An ATS board is named by its slug; anything else is named
+    by the same identity the planner uses to match a re-plan to its rows, so a
+    EURES partition and its re-plan are one target and two partitions are two.
+    """
+    if unit.board:
+        return f"{unit.board[0]}/{unit.board[1]}"
+    _, digest = planning._plan_key(unit.adapter_key, unit.item.get("native_query"))
+    return digest or unit.adapter_key
+
+
+def _record_ledger(unit: _Unit) -> None:
+    """Remember that this target was read, whatever it answered (N4).
+
+    A 404 board is as worth remembering as a 200 one: both answer "do not read
+    this again this week".  The ledger row is written for every item that
+    actually issued a request, so a re-run can skip a target on evidence rather
+    than on a per-adapter row count.
+    """
+    view = unit.egress
+    if view is None or not getattr(view, "requests", 0):
+        return
+    url = getattr(view, "last_url", None)
+    if not url:
+        return
+    try:
+        egress_client.record_fetch(
+            unit.adapter_key,
+            _target_key(unit),
+            str(url),
+            http_status=getattr(view, "last_status", None),
+            record_count=unit.outcome.written,
+            etag=getattr(view, "last_etag", None),
+            last_modified=getattr(view, "last_modified", None),
+        )
+    except Exception:  # noqa: BLE001 - the ledger is an optimisation, never a run failure
+        log.warning("[%s] could not record the fetch ledger entry", unit.adapter_key,
+                    exc_info=True)
 
 
 def _board_company(unit: _Unit, records: list[Any]) -> str | None:
@@ -747,6 +824,11 @@ async def _run_page(unit: _Unit, page: int) -> ItemOutcome:
     measure()
     step.attempted = attempts_after - attempts_before
     step.parsed = successes_after - successes_before
+    # ``fetch_outcome`` is reset by the adapter at the start of every ``run()``,
+    # so this counts only the answers this page received (NFR-403).
+    step.stated_empty = int(
+        getattr(getattr(unit.adapter, "fetch_outcome", None), "stated_empty", 0) or 0
+    )
     step.normalised = len(records)
     _link_board_company(unit, records)
     written = unit.writer.write_many(records)
@@ -800,6 +882,7 @@ def _absorb(unit: _Unit, step: ItemOutcome) -> None:
     total.charged += step.charged
     total.errors += step.errors
     total.refused += step.refused
+    total.stated_empty += step.stated_empty
     total.blocked = total.blocked or step.blocked
     if step.last_error:
         total.last_error = step.last_error
@@ -1375,6 +1458,7 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     """Write down what this source did, in words that distinguish the cases."""
     outcome = unit.outcome
     _record_extraction(unit, campaign_id)
+    _record_ledger(unit)
     if not unit.started:
         if unit.remaining <= 0:
             # Every page of this item was already fetched by the run this one
@@ -1402,10 +1486,12 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
         return
     status = _STATE_STATUS.get(outcome.state(), "failed")
     message = _state_message(outcome)
-    if outcome.state() not in ("succeeded", "failed") and message:
+    if outcome.state() not in ("succeeded", "failed", "no_matches") and message:
         # A source that fetched and produced nothing has not raised, so nothing
         # has counted an error for it yet.  It counts as one now: "done, 0
         # records, 0 errors" is the shape this whole failure hid behind.
+        # ``no_matches`` is excluded: the source answered and said it holds
+        # nothing, so charging it an error would contradict its own "done".
         repo.bump_plan_item(unit.id, errors=1)
         stats.errors += 1
         stats.adapter(unit.adapter_key)["errors"] += 1

@@ -70,6 +70,15 @@ export default function CompositeProfile({ composite, findings, busy, onBuild, o
 
   const rows = composite.statements || []
   const unsupported = new Set(composite.unsupported_statements || [])
+  // NFR-104: when the synthesis could not run the backend assembles the
+  // composite from the profile alone. It reads like a thin synthesis, so
+  // without this the job seeker is shown a degraded profile as if it were the
+  // real one — and was charged for a call that produced nothing.
+  const generation = composite.generation || {}
+  const degraded =
+    generation.mode && generation.mode !== 'llm'
+      ? generation.reason || 'the synthesis did not return a usable answer'
+      : null
   const byBlock = {}
   for (const row of rows) (byBlock[row.block] ||= []).push(row)
 
@@ -98,6 +107,16 @@ export default function CompositeProfile({ composite, findings, busy, onBuild, o
             <Icon name="refresh" /> Re-synthesise
           </button>
         </div>
+        {degraded && (
+          <div className="alert alert-warn" style={{ marginTop: 10 }}>
+            <Icon name="warning" />
+            <span>
+              This version was assembled straight from your profile, without the synthesis:{' '}
+              {degraded}. Nothing below is invented, but it is thinner than a synthesised
+              profile — re-synthesise to try again.
+            </span>
+          </div>
+        )}
         <p className="small muted" style={{ margin: 0 }}>
           Every line below carries the source that supports it
           <HelpTip term="provenance" />. Editing a line makes you its source — your

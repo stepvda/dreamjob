@@ -973,7 +973,12 @@ def test_redirection_advice_shows_its_figures_and_can_be_dismissed(signed_in, pa
         assert cards.count() > 0, "the analysis produced proposals but none reached the screen"
         for index in range(cards.count()):
             text = cards.nth(index).inner_text()
-            assert "Moving away from" in text and "Towards" in text, (
+            # inner_text() is the *rendered* text and the design system
+            # upper-cases these small labels in CSS, so the comparison is
+            # case-insensitive - as it is for the help drawer's sub-headings
+            # and the dream-job threshold above.
+            shouted = text.upper()
+            assert "MOVING AWAY FROM" in shouted and "TOWARDS" in shouted, (
                 f"proposal {index} does not show both sides of the move: {text[:200]!r}"
             )
             assert re.search(r"\d+ of \d+", text), (

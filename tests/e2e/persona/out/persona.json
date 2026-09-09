@@ -10,223 +10,228 @@
   ],
   "notice": "Entirely fictional test data generated for the Dream Job end-to-end test. The person, the employers, the publications and the projects do not exist; the address is in the RFC 2606 reserved domain.",
   "identity": {
-    "first_name": "Lena",
-    "last_name": "Vermeulen",
-    "city": "Antwerp",
-    "region": "Flanders",
+    "first_name": "Thibault",
+    "last_name": "Casteleyn",
+    "city": "Ghent",
+    "region": "East Flanders",
     "country": "Belgium",
-    "headline": "AI Engineer | Building LLM-powered systems for industry | ex-data engineer",
-    "name": "Lena Vermeulen",
-    "email": "lena.vermeulen@example.com",
-    "phone": "+32 439 76 12 99",
-    "linkedin_url": "www.linkedin.com/in/lenavermeulen",
-    "website": "lenavermeulen.example.com",
-    "location_full": "Antwerp, Flanders, Belgium",
-    "location_short": "Antwerp, Belgium"
+    "headline": "Senior Software Engineer · Event-driven systems · Go & Kubernetes",
+    "name": "Thibault Casteleyn",
+    "email": "thibault.casteleyn@example.com",
+    "phone": "+32 427 49 54 44",
+    "linkedin_url": "www.linkedin.com/in/thibaultcasteleyn",
+    "website": "thibaultcasteleyn.example.com",
+    "location_full": "Ghent, East Flanders, Belgium",
+    "location_short": "Ghent, Belgium"
   },
-  "summary": "AI engineer with 10 years of experience spanning data engineering and machine learning. I design and deploy LLM-based solutions that turn unstructured data into actionable insights for manufacturing and logistics. Known for bridging the gap between research and production, with a focus on reliability and measurable business impact.",
+  "summary": "Software engineer with more than a decade in the Benelux tech scene, from first-line support to owning backend platforms for connected hardware and open-source developer tools. I care about clean boundaries in code and in teams, and I have a track record of making event-driven systems observable, affordable, and easy to reason about. Currently a senior software engineer at Dovane, building Go services that run on Kubernetes in multiple clouds.",
   "experience": [
     {
-      "employer": "Cortexa AI",
-      "title": "Lead AI Engineer, LLM Systems",
-      "location": "Antwerp, Belgium",
-      "start": "2024-08",
+      "employer": "Dovane",
+      "title": "Senior Software Engineer",
+      "location": "Ghent, Belgium",
+      "start": "2024-07",
       "end": null,
       "current": true,
-      "summary": "Currently building production-grade LLM applications for document understanding and conversational analytics in the manufacturing sector.",
+      "summary": "Directing backend architecture of an open-source developer platform, emphasizing event-driven patterns and cloud-native operations.",
       "achievements": [
-        "Developed a retrieval-augmented generation (RAG) pipeline that reduced document search time by 70% for engineers.",
-        "Fine-tuned a domain-specific LLM on technical manuals, achieving 92% accuracy on Q&A benchmarks.",
-        "Led the integration of LLM outputs into existing BI dashboards, enabling natural language queries for non-technical users."
+        "Redesigned core APIs serving 25,000+ weekly active developers.",
+        "Migrated from a monolith to 12 event-aligned microservices with an outbox pattern.",
+        "Lowered p95 API latency by 60% through PostgreSQL query tuning and caching."
       ],
       "technologies": [
-        "Python",
-        "LangChain",
-        "LlamaIndex",
-        "OpenAI API",
-        "Hugging Face Transformers",
-        "Pinecone",
-        "Weaviate",
-        "FastAPI",
-        "Docker",
-        "Kubernetes",
-        "Ray",
-        "MLflow",
-        "Prompt Engineering",
-        "RAG",
-        "Vector Databases",
-        "LLMOps"
-      ],
-      "employer_cv": "Cortexa AI",
-      "cv_end": null,
-      "employer_total_duration": null,
-      "linkedin_dates": "August 2024 - Present (2 years 2 months)",
-      "cv_dates": "August 2024 – Present"
-    },
-    {
-      "employer": "Volta Energy",
-      "title": "Senior AI Engineer",
-      "location": "Brussels, Belgium",
-      "start": "2022-12",
-      "end": "2024-07",
-      "current": false,
-      "summary": "Led AI initiatives for a renewable energy company, focusing on forecasting and optimization of energy grids.",
-      "achievements": [
-        "Designed a time-series forecasting model that improved wind energy prediction accuracy by 15%.",
-        "Implemented a reinforcement learning agent for battery storage optimization, increasing revenue by 12%.",
-        "Mentored a team of 3 junior engineers and established MLOps best practices."
-      ],
-      "technologies": [
-        "Python",
-        "PyTorch",
-        "Prophet",
-        "Gradient Boosting",
-        "Reinforcement Learning",
-        "Stable Baselines3",
-        "AWS SageMaker",
+        "Go",
+        "TypeScript",
+        "React",
+        "GraphQL",
+        "PostgreSQL",
+        "Kafka",
         "Docker",
         "Kubernetes",
         "Terraform",
-        "MLflow",
-        "Pandas",
-        "NumPy",
-        "Time Series Analysis"
+        "AWS",
+        "CI/CD",
+        "Technical Leadership",
+        "Observability",
+        "Performance Engineering",
+        "Open Source Development",
+        "REST API"
       ],
-      "employer_cv": "Volta Energy NV",
-      "cv_end": "2024-07",
+      "employer_cv": "Dovane",
+      "cv_end": null,
       "employer_total_duration": null,
-      "linkedin_dates": "December 2022 - July 2024 (1 year 8 months)",
-      "cv_dates": "December 2022 – July 2024"
+      "linkedin_dates": "July 2024 - Present (2 years 3 months)",
+      "cv_dates": "July 2024 – Present"
     },
     {
-      "employer": "Nexa Robotics",
-      "title": "AI Engineer",
-      "location": "Ghent, Belgium",
-      "start": "2020-06",
-      "end": "2022-11",
+      "employer": "Cyrel",
+      "title": "Backend Engineer",
+      "location": "Brussels, Belgium",
+      "start": "2021-08",
+      "end": "2024-06",
       "current": false,
-      "summary": "Joined a robotics spin-off to develop computer vision and NLP capabilities for autonomous warehouse robots.",
+      "summary": "Designed event-driven microservices for industrial IoT telemetry at a company digital division.",
       "achievements": [
-        "Built a real-time object detection system using YOLOv5 that improved picking accuracy by 22%.",
-        "Created a natural language interface for robot commands, enabling non-technical staff to operate robots.",
-        "Optimized model inference on edge devices, reducing latency from 200ms to 50ms."
+        "Created a Kafka ingestion pipeline handling 1.2M messages per minute with at-least-once delivery.",
+        "Reduced cloud spend by 32% by optimizing Kubernetes workloads and using spot capacity.",
+        "Mentored two engineers to senior positions, establishing an internal architecture review group."
       ],
       "technologies": [
-        "Python",
-        "PyTorch",
-        "OpenCV",
-        "YOLO",
-        "Transformers",
-        "ONNX",
-        "TensorRT",
-        "ROS",
-        "C++",
+        "Java",
+        "Spring Boot",
+        "Kotlin",
+        "Kafka",
+        "Redis",
+        "Microservices",
+        "Domain-Driven Design",
+        "Event-Driven Architecture",
+        "CQRS",
         "Docker",
         "Kubernetes",
-        "REST APIs",
-        "NLP",
-        "Computer Vision"
+        "Terraform",
+        "AWS",
+        "Technical Leadership",
+        "Mentoring"
       ],
-      "employer_cv": "Nexa Robotics",
-      "cv_end": "2022-11",
+      "employer_cv": "Cyrel NV",
+      "cv_end": "2024-06",
       "employer_total_duration": null,
-      "linkedin_dates": "June 2020 - November 2022 (2 years 6 months)",
-      "cv_dates": "June 2020 – November 2022"
+      "linkedin_dates": "August 2021 - June 2024 (2 years 11 months)",
+      "cv_dates": "August 2021 – June 2024"
     },
     {
-      "employer": "Dataflow Analytics",
-      "title": "Machine Learning Engineer",
+      "employer": "Braveng",
+      "title": "Full Stack Developer",
       "location": "Antwerp, Belgium",
-      "start": "2018-09",
-      "end": "2020-05",
+      "start": "2019-11",
+      "end": "2021-07",
       "current": false,
-      "summary": "Transitioned to building ML models for predictive maintenance and demand forecasting, taking ownership of the full ML lifecycle.",
+      "summary": "Built a real-time logistics dashboard and API across the full stack with React, Node.js, and GraphQL.",
       "achievements": [
-        "Developed a predictive maintenance model that reduced unplanned downtime by 18% for a major client.",
-        "Implemented a feature store that accelerated model development by 50%.",
-        "Led the deployment of real-time inference endpoints using Kubernetes, handling 10k requests per second."
+        "Delivered a dashboard adopted by 300+ dispatchers in less than 8 months.",
+        "Reduced average GraphQL payload size by 40%, improving mobile loading times.",
+        "Set up Playwright end-to-end tests, catching 35% more regressions before production."
       ],
       "technologies": [
-        "Python",
-        "scikit-learn",
-        "XGBoost",
-        "TensorFlow",
+        "TypeScript",
+        "JavaScript",
+        "React",
+        "Node.js",
+        "Express",
+        "PostgreSQL",
+        "MongoDB",
+        "GraphQL",
+        "Jest",
+        "Playwright",
+        "Docker",
         "Kubernetes",
-        "FastAPI",
+        "Terraform",
+        "AWS",
+        "CI/CD",
+        "Pair Programming"
+      ],
+      "employer_cv": "Braveng",
+      "cv_end": "2021-07",
+      "employer_total_duration": null,
+      "linkedin_dates": "November 2019 - July 2021 (1 year 9 months)",
+      "cv_dates": "November 2019 – July 2021"
+    },
+    {
+      "employer": "Atelicos",
+      "title": "Software Engineer",
+      "location": "Ghent, Belgium",
+      "start": "2017-09",
+      "end": "2019-10",
+      "current": false,
+      "summary": "Owned backend services in a Ruby on Rails monolith and helped modernize the frontend with TypeScript.",
+      "achievements": [
+        "Refactored 5 legacy modules into isolated services while maintaining 99.9% uptime.",
+        "Cut release pipeline time by 70% by introducing Docker Compose and CI parallelization.",
+        "Improved test coverage from 23% to 68% by pairing and promoting test-first practices."
+      ],
+      "technologies": [
+        "Ruby",
+        "Rails",
+        "TypeScript",
+        "JavaScript",
         "PostgreSQL",
         "Redis",
-        "MLflow",
-        "Docker",
-        "CI/CD",
-        "Feature Engineering"
-      ],
-      "employer_cv": "Dataflow Analytics",
-      "cv_end": "2020-05",
-      "employer_total_duration": "4 years 3 months",
-      "linkedin_dates": "September 2018 - May 2020 (1 year 9 months)",
-      "cv_dates": "September 2018 – May 2020"
-    },
-    {
-      "employer": "Dataflow Analytics",
-      "title": "Data Engineer",
-      "location": "Antwerp, Belgium",
-      "start": "2016-03",
-      "end": "2018-08",
-      "current": false,
-      "summary": "Built and maintained data pipelines for a logistics analytics platform, ensuring reliable data delivery for downstream reporting.",
-      "achievements": [
-        "Reduced pipeline runtime by 40% by optimizing Spark jobs and introducing incremental processing.",
-        "Designed a data quality monitoring system that cut data errors by 25%.",
-        "Migrated on-premise Hadoop cluster to AWS EMR, saving 30% in infrastructure costs."
-      ],
-      "technologies": [
-        "Python",
-        "SQL",
-        "Apache Spark",
-        "Hadoop",
-        "Airflow",
-        "AWS",
         "Docker",
         "Git",
-        "Agile",
-        "Data Warehousing",
-        "ETL"
+        "REST API",
+        "CI/CD",
+        "Test-Driven Development",
+        "Agile Development",
+        "Code Review",
+        "Scrum"
       ],
-      "employer_cv": "Dataflow Analytics",
-      "cv_end": "2018-05",
+      "employer_cv": "Atelicos",
+      "cv_end": "2019-10",
+      "employer_total_duration": "4 years 2 months",
+      "linkedin_dates": "September 2017 - October 2019 (2 years 2 months)",
+      "cv_dates": "September 2017 – October 2019"
+    },
+    {
+      "employer": "Atelicos",
+      "title": "Technical Support Engineer",
+      "location": "Ghent, Belgium",
+      "start": "2015-09",
+      "end": "2017-08",
+      "current": false,
+      "summary": "Acted as the primary technical contact for enterprise customers, solving complex issues and translating user feedback into engineering tickets.",
+      "achievements": [
+        "Reduced median ticket resolution time from 8 hours to 2.5 hours by introducing a shared debugging playbook.",
+        "Compiled SQL reports for 40+ enterprise accounts, leading to a 20% drop in billing query volume.",
+        "Logged and reproduced 130+ customer-reported bugs, 4 of which became high-severity fixes."
+      ],
+      "technologies": [
+        "SQL",
+        "PostgreSQL",
+        "JavaScript",
+        "HTML",
+        "CSS",
+        "Bash",
+        "Linux",
+        "REST API",
+        "Customer Support",
+        "Incident Management",
+        "Ticketing Systems"
+      ],
+      "employer_cv": "Atelicos",
+      "cv_end": "2017-05",
       "employer_total_duration": null,
-      "linkedin_dates": "March 2016 - August 2018 (2 years 6 months)",
-      "cv_dates": "March 2016 – May 2018"
+      "linkedin_dates": "September 2015 - August 2017 (2 years)",
+      "cv_dates": "September 2015 – May 2017"
     }
   ],
   "experience_order": "reverse_chronological",
   "education": [
     {
-      "school": "KU Leuven",
-      "degree": "Master of Science",
-      "field": "Computer Science",
-      "location": "Leuven, Belgium",
-      "start_year": 2011,
+      "school": "Soderberg University College",
+      "degree": "Professional Bachelor in Information Technology",
+      "field": "Applied Computer Science",
+      "location": "Ghent, Belgium",
+      "start_year": 2012,
       "end_year": 2015,
-      "linkedin_detail": "Master of Science, Computer Science · (2011 - 2015)",
-      "cv_dates": "2011 – 2015"
+      "linkedin_detail": "Professional Bachelor in Information Technology, Applied Computer Science · (2012 - 2015)",
+      "cv_dates": "2012 – 2015"
     }
   ],
   "certifications": [
     {
-      "title": "AWS Certified Machine Learning – Specialty",
-      "issuer": "Amazon Web Services",
+      "title": "Kubernetes Application Developer Certification",
+      "issuer": "Open Cloud Institute",
       "year": 2020
     },
     {
-      "title": "Deep Learning Specialization",
-      "issuer": "Coursera",
-      "year": 2019
+      "title": "Professional Go Programming Certification",
+      "issuer": "Arcadia Training",
+      "year": 2023
     },
     {
-      "title": "TensorFlow Developer Certificate",
-      "issuer": "Google",
-      "year": 2021
+      "title": "Certified Event-Driven Architect",
+      "issuer": "Benelux Open Academy",
+      "year": 2022
     }
   ],
   "languages": [
@@ -236,190 +241,182 @@
     },
     {
       "language": "English",
-      "proficiency": "Fluent"
+      "proficiency": "Full Professional"
     },
     {
       "language": "French",
-      "proficiency": "Professional working proficiency"
+      "proficiency": "Professional Working"
     }
   ],
   "skills": [
-    "Python",
+    "Go",
+    "TypeScript",
+    "JavaScript",
+    "Node.js",
     "SQL",
-    "Apache Spark",
-    "Airflow",
-    "AWS",
-    "Docker",
-    "Git",
-    "Agile",
-    "Data Warehousing",
-    "ETL",
-    "scikit-learn",
-    "XGBoost",
-    "TensorFlow",
-    "Kubernetes",
-    "FastAPI",
+    "React",
+    "Express",
     "PostgreSQL",
+    "MongoDB",
     "Redis",
-    "MLflow",
-    "PyTorch",
-    "OpenCV",
-    "Transformers",
-    "NLP",
-    "Computer Vision",
-    "LangChain",
-    "Pinecone",
-    "Prompt Engineering",
-    "RAG",
-    "LLMOps",
-    "Time Series Analysis",
-    "Reinforcement Learning"
+    "Kafka",
+    "Docker",
+    "Kubernetes",
+    "Terraform",
+    "AWS",
+    "Linux",
+    "Microservices",
+    "Event-Driven Architecture",
+    "Domain-Driven Design",
+    "REST API",
+    "GraphQL",
+    "CI/CD",
+    "Test-Driven Development",
+    "Agile Development",
+    "Code Review",
+    "Technical Leadership",
+    "Mentoring"
   ],
   "skill_groups": [
     {
-      "label": "Programming & Data",
+      "label": "Languages & Runtimes",
       "skills": [
-        "Python",
+        "Go",
+        "TypeScript",
+        "JavaScript",
+        "Node.js",
         "SQL"
       ]
     },
     {
-      "label": "Data Engineering",
+      "label": "Frameworks & Libraries",
       "skills": [
-        "Apache Spark",
-        "Airflow",
-        "Data Warehousing",
-        "ETL"
+        "React",
+        "Express"
       ]
     },
     {
-      "label": "Machine Learning & AI",
+      "label": "Data Stores & Streaming",
       "skills": [
-        "scikit-learn",
-        "XGBoost",
-        "TensorFlow",
-        "PyTorch",
-        "Transformers",
-        "NLP",
-        "Computer Vision",
-        "Time Series Analysis",
-        "Reinforcement Learning"
+        "PostgreSQL",
+        "MongoDB",
+        "Redis",
+        "Kafka"
       ]
     },
     {
-      "label": "LLM & GenAI",
-      "skills": [
-        "LangChain",
-        "Pinecone",
-        "Prompt Engineering",
-        "RAG",
-        "LLMOps"
-      ]
-    },
-    {
-      "label": "DevOps & MLOps",
+      "label": "Cloud & Infrastructure",
       "skills": [
         "Docker",
         "Kubernetes",
+        "Terraform",
         "AWS",
-        "Git",
-        "MLflow",
-        "FastAPI",
-        "PostgreSQL",
-        "Redis"
+        "Linux"
       ]
     },
     {
-      "label": "Practices",
+      "label": "Architecture & Integration",
       "skills": [
-        "Agile",
-        "OpenCV"
+        "Microservices",
+        "Event-Driven Architecture",
+        "Domain-Driven Design",
+        "REST API",
+        "GraphQL"
+      ]
+    },
+    {
+      "label": "Engineering Practices & Leadership",
+      "skills": [
+        "CI/CD",
+        "Test-Driven Development",
+        "Agile Development",
+        "Code Review",
+        "Technical Leadership",
+        "Mentoring"
       ]
     }
   ],
   "top_skills": [
-    "Python",
-    "PyTorch",
-    "LangChain",
-    "RAG",
-    "Kubernetes"
+    "Go",
+    "Kubernetes",
+    "Event-Driven Architecture",
+    "PostgreSQL",
+    "Technical Leadership"
   ],
   "publications": [
     {
-      "title": "Efficient Retrieval-Augmented Generation for Industrial Maintenance Manuals",
-      "venue": "NeurIPS Workshop on Efficient Natural Language Processing",
-      "year": 2025,
-      "kind": "paper"
-    },
-    {
-      "title": "From Data Pipelines to LLMs: A Practitioner's Journey",
-      "venue": "PyData Brussels",
-      "year": 2024,
+      "title": "Event Sourcing in Go: Lessons from an Industrial Telemetry Platform",
+      "venue": "North Sea Software Conference",
+      "year": 2023,
       "kind": "talk"
     },
     {
-      "title": "Real-Time Object Detection on Edge Devices for Warehouse Robotics",
-      "venue": "ICRA Workshop on Robotics and Automation",
+      "title": "Practical DDD for Connected-Hardware Systems",
+      "venue": "Benelux Architecture Forum",
       "year": 2022,
-      "kind": "paper"
+      "kind": "talk"
+    },
+    {
+      "title": "Cutting Cloud Waste with Kubernetes and Terraform",
+      "venue": "Schelde DevOps Days",
+      "year": 2021,
+      "kind": "talk"
     }
   ],
   "projects": [
     {
-      "name": "docchat",
-      "url": "https://github.com/lenav/docchat",
-      "description": "An open-source tool for chatting with PDF documents using RAG, built with LangChain and Streamlit.",
+      "name": "Eventkit",
+      "url": "https://example.com/eventkit",
+      "description": "A lightweight Go library for building event-driven services with outbox pattern support.",
       "technologies": [
-        "Python",
-        "LangChain",
-        "OpenAI API",
-        "Streamlit",
-        "FAISS"
+        "Go",
+        "PostgreSQL",
+        "Kafka"
       ]
     },
     {
-      "name": "mlops-starter",
-      "url": "https://github.com/lenav/mlops-starter",
-      "description": "A template repository for production-ready ML projects with CI/CD, Docker, and MLflow integration.",
+      "name": "Skylark",
+      "url": "https://example.com/skylark",
+      "description": "A React and TypeScript toolkit for building observable dashboards on Kubernetes.",
       "technologies": [
-        "Python",
-        "Docker",
-        "GitHub Actions",
-        "MLflow",
-        "FastAPI"
+        "TypeScript",
+        "React",
+        "Kubernetes"
       ]
     }
   ],
   "dream_job": {
-    "statement": "I want to keep building LLM systems that actually work in production, not just demos. The sweet spot for me is a role where I'm the technical lead for a small team of engineers, designing and shipping RAG pipelines, agentic workflows, and fine-tuned models that solve real business problems. Day to day, that means writing Python, wrestling with LangChain or raw APIs, tuning prompts, and debugging why a retrieval call is slow or returning garbage. I want to be deep in the code, but also setting the technical direction and mentoring others. The ideal company is one that already has data infrastructure and is serious about putting LLMs into customer-facing products—maybe in manufacturing, logistics, or energy, where I've built domain expertise. I want to work with a platform team that values MLOps and LLMOps, where we use MLflow, Kubernetes, and proper CI/CD. I'm done with being the guy who just wires up APIs without thinking about evaluation, cost, or latency. I want to stop doing endless stakeholder demos and slide decks. I want to stop maintaining legacy data pipelines that have nothing to do with AI. And I absolutely won't take a role that's just 'prompt engineer' with no engineering ownership. Deal-breakers: no real engineering ownership; no existing data infrastructure; no budget for GPU or cloud compute.",
+    "statement": "My next role is the one where I get to focus on the hard parts of event-driven systems: designing and running reliable data pipelines, building the tooling and APIs that other engineers depend on, and making Kafka and Kubernetes behave at scale. Day to day, that looks like sketching the topology for a new flow, sitting in front of my own logs and Grafana dashboards, maybe pairing with a backend engineer on a nasty concurrency bug, and then writing the small, brave Go service that holds the whole thing together. I want to work in a product company with a pragmatic cloud-native culture, where streaming is the default and batch is the exception. The team should be small but senior, with enough ownership to take services to production without a rewrite every quarter. I need to collaborate with platform engineers and SREs, not just be handed a ticket. What I want to stop doing: front-end work, chasing flaky CI, and being the last line of defense for production incidents that could have been prevented by better design. I won't take a role where I'm expected to write React or fix CSS. No more babysitting flaky CI pipelines whose failures we never investigate. And I need a team that owns its incidents end-to-end, not one that just pages me in the middle of the night.",
     "deal_breakers": [
       {
-        "constraint": "Must have real engineering ownership",
-        "quote": "no real engineering ownership",
+        "constraint": "No front-end work (writing React/CSS)",
+        "quote": "I won't take a role where I'm expected to write React or fix CSS.",
         "hard": true
       },
       {
-        "constraint": "Must have existing data infrastructure",
-        "quote": "no existing data infrastructure",
+        "constraint": "No unowned flaky CI",
+        "quote": "No more babysitting flaky CI pipelines whose failures we never investigate.",
         "hard": true
       },
       {
-        "constraint": "Must have budget for GPU or cloud compute",
-        "quote": "no budget for GPU or cloud compute",
+        "constraint": "Must own incidents end-to-end, not just be paged",
+        "quote": "I need a team that owns its incidents end-to-end, not one that just pages me in the middle of the night.",
         "hard": true
       }
     ],
     "target_roles": [
-      "Lead AI Engineer",
-      "Staff Machine Learning Engineer"
+      "Staff Backend Engineer",
+      "Principal Engineer (Event-Driven Systems)",
+      "Platform Architect"
     ],
     "must_haves": [
-      "Technical leadership of a small team",
-      "Production LLM systems",
-      "RAG pipelines",
-      "MLOps/LLMOps",
-      "Existing data infrastructure",
-      "Budget for compute"
+      "Go",
+      "Kubernetes",
+      "Kafka or similar streaming infrastructure",
+      "Small senior team with high ownership",
+      "Cloud-native, event-driven architecture as core",
+      "Hands-on technical leadership",
+      "No front-end responsibilities"
     ]
   },
   "planted_conflicts": [
@@ -429,11 +426,11 @@
       "expected_field_path": "experience.1.company",
       "role_index": 1,
       "anchor": {
-        "employer": "Volta Energy",
-        "title": "Senior AI Engineer"
+        "employer": "Cyrel",
+        "title": "Backend Engineer"
       },
-      "value_linkedin": "Volta Energy",
-      "value_cv": "Volta Energy NV",
+      "value_linkedin": "Cyrel",
+      "value_cv": "Cyrel NV",
       "why": "The CV states the legal entity, the export states the brand. The merge still pairs the role because company_variants strips the legal form, so the disagreement is reported rather than read as two separate jobs."
     },
     {
@@ -442,11 +439,11 @@
       "expected_field_path": "experience.4.end",
       "role_index": 4,
       "anchor": {
-        "employer": "Dataflow Analytics",
-        "title": "Data Engineer"
+        "employer": "Atelicos",
+        "title": "Technical Support Engineer"
       },
-      "value_linkedin": "2018-08",
-      "value_cv": "2018-05",
+      "value_linkedin": "2017-08",
+      "value_cv": "2017-05",
       "why": "The CV ends the role three months before the export does - the ordinary drift of a CV rewritten from memory. Both readings are month-precise, so _same_date reports a real disagreement rather than a rounding gap."
     }
   ]

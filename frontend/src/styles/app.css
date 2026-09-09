@@ -1984,3 +1984,69 @@ tr.seg-thin .seg-value { font-style: italic; }
 .int-bar.is-clear { fill: var(--hue, var(--accent)); }
 .int-threshold { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 4 3; }
 .int-threshold-label { fill: var(--warn); font-size: 10px; }
+
+/* ==========================================================================
+   Log view (NFR-701, FR-361)
+
+   The administration screen's window onto the server's own files. The columns
+   are the ones the formatter writes — timestamp, level, channel, correlation
+   id, message — kept in that order and in a monospace face, so what an
+   operator reads here is the same shape they would see in a terminal. Level is
+   carried by a coloured rail down the left as well as by the label, because
+   the first question asked of a log is "is any of this bad?" and that has to
+   be answerable by scanning rather than by reading.
+   ========================================================================== */
+
+.log-view {
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 0;
+  max-height: 560px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 1px 10px 1px 7px;
+  border-left: 3px solid transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log-line:hover { background: var(--surface); }
+
+.log-ts { color: var(--ink-4); flex: none; font-variant-numeric: tabular-nums; }
+.log-level { flex: none; width: 4.5em; font-weight: 650; color: var(--ink-3); }
+.log-channel { flex: none; width: 7em; color: var(--ink-3); }
+.log-cid { flex: none; width: 6em; color: var(--ink-4); }
+.log-msg { flex: 1; color: var(--ink-2); min-width: 0; }
+
+/* Severity, loudest first. A line with no level of its own — a traceback's
+   continuation — inherits the colour of the event above it, which is why the
+   parser carries the level down rather than leaving those rows grey. */
+.log-line.log-critical { border-left-color: var(--danger); background: var(--danger-soft); }
+.log-line.log-critical .log-level,
+.log-line.log-critical .log-msg { color: var(--danger); }
+
+.log-line.log-error { border-left-color: var(--danger); }
+.log-line.log-error .log-level { color: var(--danger); }
+.log-line.log-error .log-msg { color: var(--ink); }
+
+.log-line.log-warning { border-left-color: var(--warn); }
+.log-line.log-warning .log-level { color: var(--warn); }
+.log-line.log-warning .log-msg { color: var(--ink); }
+
+.log-line.log-info { border-left-color: var(--line-strong); }
+.log-line.log-debug { border-left-color: transparent; }
+.log-line.log-debug .log-msg { color: var(--ink-3); }
+
+/* The design system's chips are spans with an onClick. The file picker above
+   the tail is a real <button> so it can be reached from the keyboard, which
+   means it has to be told the font it would otherwise not inherit. */
+button.chip { font: inherit; font-size: 12px; cursor: pointer; }

@@ -192,6 +192,31 @@ def _drain_exception(future: asyncio.Future) -> None:
         future.exception()
 
 
+#: Crawl-delays a host publishes that a strict robots.txt parser will not
+#: attribute to any user-agent group, measured on the live file (FR-182).
+#:
+#: europa.eu states ``Crawl-delay: 10`` but puts a blank line between it and the
+#: ``User-agent: *`` it plainly belongs to.  A blank line ends a record, so
+#: ``urllib.robotparser`` drops the directive and ``crawl_delay()`` answers
+#: ``None`` - and the EURES sweep then ran at this product's own 2 s against a
+#: host asking for 10 s.  The site's stated intention is not ambiguous just
+#: because its file is malformed, so the measured value is a floor here.  A
+#: delay the parser *does* read still wins when it is slower.
+PUBLISHED_CRAWL_DELAY_SECONDS: dict[str, float] = {
+    "europa.eu": 10.0,
+}
+
+
+def published_crawl_delay(domain: str) -> float:
+    """The measured published delay for ``domain`` or one of its parents."""
+    host = (domain or "").strip().lower().rstrip(".")
+    while host:
+        if host in PUBLISHED_CRAWL_DELAY_SECONDS:
+            return PUBLISHED_CRAWL_DELAY_SECONDS[host]
+        _, _, host = host.partition(".")
+    return 0.0
+
+
 class DomainLimiter:
     """Per-domain token pacing with exponential back-off on 429/503.
 
@@ -236,7 +261,11 @@ class DomainLimiter:
         """Seconds between two requests to ``domain``, before any penalty."""
         if not self.honour_crawl_delay:
             return self.min_interval
-        return max(self.min_interval, self._crawl_delay.get(domain, 0.0))
+        return max(
+            self.min_interval,
+            self._crawl_delay.get(domain, 0.0),
+            published_crawl_delay(domain),
+        )
 
     async def acquire(self, domain: str) -> None:
         async with self._lock(domain):

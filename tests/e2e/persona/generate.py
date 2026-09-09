@@ -104,10 +104,46 @@ _SENIORITY_RANKS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (5, ("head", "manager", "director", "vp", "chief")),
 )
 
-_AI_TOKENS = (
-    "ai", "ml", "machine learning", "artificial intelligence", "deep learning",
-    "llm", "nlp", "mlops", "data science",
-)
+# The profession the persona is built around.  Kept as one table so the whole
+# generator - prompt, coherence check and skill vocabulary - moves together when
+# the role changes, instead of the discipline being spelled out in five places.
+ROLE_PROFILES: dict[str, dict[str, object]] = {
+    "it-developer": {
+        "label": "IT developer",
+        "final_role": "a software engineering role",
+        "arc": "someone who starts in support or QA and ends up building systems",
+        "avoid": (
+            "Do NOT make this an AI, ML, data-science or LLM career. The final "
+            "title must be a software engineering one - Senior Software "
+            "Engineer, Lead Developer, Backend Engineer, Full Stack Developer, "
+            "Software Architect. Machine learning may appear as one skill "
+            "among many, never as the discipline."
+        ),
+        "tokens": (
+            "software", "developer", "engineer", "backend", "frontend",
+            "full stack", "fullstack", "web", "api", "platform", "systems",
+            "application", "java", "python", "c#", ".net", "javascript",
+            "typescript", "devops", "cloud", "database", "integration",
+        ),
+    },
+    "ai-developer": {
+        "label": "AI developer",
+        "final_role": "an AI or machine-learning engineering role",
+        "arc": "someone who starts in data engineering and ends up in modelling",
+        "avoid": "",
+        "tokens": (
+            "ai", "ml", "machine learning", "artificial intelligence",
+            "deep learning", "llm", "nlp", "mlops", "data science",
+        ),
+    },
+}
+
+DEFAULT_ROLE = "it-developer"
+
+# Set by main(); the coherence check and the prompts read it.
+ROLE: dict[str, object] = ROLE_PROFILES[DEFAULT_ROLE]
+
+
 
 _CAREER_SYSTEM = """\
 You invent test data for a job-search product. Everything you return is
@@ -282,9 +318,22 @@ def _is_month(value: Any) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"\d{4}-\d{2}", value))
 
 
-def _is_ai_role(title: str) -> bool:
-    text = f" {re.sub(r'[^a-z ]+', ' ', title.lower())} "
-    return any(f" {token} " in text for token in _AI_TOKENS)
+def _is_ai_title(title: str) -> bool:
+    """A title that belongs to the AI/ML discipline rather than to software."""
+    text = re.sub(r"[^a-z0-9+# ]+", " ", title.lower())
+    return any(t in text for t in ROLE_PROFILES["ai-developer"]["tokens"])
+
+
+def _is_role_title(title: str) -> bool:
+    """Does this job title belong to the configured discipline?
+
+    Substring rather than whole-word matching, because the tokens include
+    compounds ("full stack", ".net") and titles glue words together
+    ("Fullstack Developer"); a whole-word test rejected "Senior Software
+    Engineer" for an IT-developer persona.
+    """
+    text = re.sub(r"[^a-z0-9+# ]+", " ", title.lower())
+    return any(token in text for token in ROLE["tokens"])
 
 
 def validate_career(data: Any, now: str) -> list[str]:
@@ -367,8 +416,16 @@ def validate_career(data: Any, now: str) -> list[str]:
                 f"the career spans {span:.1f} years, oldest role first; it must be "
                 f"{MIN_CAREER_YEARS}-{MAX_CAREER_YEARS}"
             )
-    if roles and not _is_ai_role(str(roles[-1].get("title") or "")):
-        problems.append("the last role listed must be the current AI/ML engineering one")
+    if roles:
+        last_title = str(roles[-1].get("title") or "")
+        if not _is_role_title(last_title):
+            problems.append(f"the last role listed must be the current {ROLE['label']} one")
+        elif ROLE.get("avoid") and _is_ai_title(last_title):
+            problems.append(
+                f"the last role {last_title!r} is an AI/ML title; this persona is "
+                f"a {ROLE['label']}, so the final role must be a software "
+                "engineering one"
+            )
 
     problems.extend(_validate_employers(roles))
     problems.extend(_validate_skills(data))
@@ -778,15 +835,17 @@ def _repair_note(problems: list[str], previous: Any) -> str:
 
 def _career_request(now: str, problems: list[str], previous: Any = None) -> str:
     retry = _repair_note(problems, previous)
+    role_label, role_final, role_arc = ROLE["label"], ROLE["final_role"], ROLE["arc"]
+    role_avoid = ROLE.get("avoid") or ""
     return f"""\
-Invent one fictional AI developer and the career behind them. Today is {now}.
+Invent one fictional {role_label} and the career behind them. Today is {now}.
 
 * They live in Belgium (preferred) or the Netherlands, in a real city, and the
   headline reads like a LinkedIn headline: role, "at" nothing in particular,
   and what they are known for.
 * {MIN_ROLES}-{MAX_ROLES} roles listed oldest first, spanning
-  {MIN_CAREER_YEARS}-{MAX_CAREER_YEARS} years and ending, today, in an AI or
-  machine-learning engineering role that is still running ("end": null).
+  {MIN_CAREER_YEARS}-{MAX_CAREER_YEARS} years and ending, today, in
+  {role_final} that is still running ("end": null).
   Employers are fictional but plausible for the Benelux technology scene:
   software houses, scale-ups, a research spin-off, an industrial group's
   digital arm.
@@ -806,7 +865,8 @@ Invent one fictional AI developer and the career behind them. Today is {now}.
   into exactly one family and stop: concatenating the families must give back
   "skills" with nothing added, nothing dropped and nothing renamed. Labels are
   what this person would write, not categories in general.
-* The arc has to make sense: someone who starts in data engineering and ends up
+{role_avoid}
+* The arc has to make sense: {role_arc}, and
   building LLM systems, not someone who does a different job every two years.
 
 Return JSON only.{retry}"""
@@ -814,13 +874,14 @@ Return JSON only.{retry}"""
 
 def _dream_request(persona_context: str, problems: list[str], previous: Any = None) -> str:
     retry = _repair_note(problems, previous)
+    role_label = ROLE["label"]
     return f"""\
 Here is the career you are speaking from:
 
 {persona_context}
 
 Write "statement": {STATEMENT_MIN_WORDS}-{STATEMENT_MAX_WORDS} words, first
-person, present tense, describing the AI developer role this person actually
+person, present tense, describing the {role_label} role this person actually
 wants next. Recognisably the same person as the career above - the same
 domains, the same tools, the same opinions about how software should be built.
 Say what the work looks like day to day, what kind of team and company it sits
@@ -862,7 +923,7 @@ def _generate(llm: LLMClient, *, strong: bool, attempts: int) -> dict[str, Any]:
     # The reasoning model charges its chain of thought against max_tokens, so a
     # budget that is comfortable for the cheap model leaves it with nothing to
     # answer with.
-    career_budget, dream_budget = (16000, 6000) if strong else (8000, 3000)
+    career_budget, dream_budget = (32000, 12000) if strong else (14000, 3000)
     problems: list[str] = []
     career: dict[str, Any] | None = None
     for attempt in range(1, attempts + 1):
@@ -975,7 +1036,15 @@ def main() -> int:
     parser.add_argument("--strong", action="store_true", help="use the reasoning model")
     parser.add_argument("--attempts", type=int, default=8, help="validation retries per call")
     parser.add_argument("--out", type=Path, default=PERSONA_PATH)
+    parser.add_argument(
+        "--role", choices=sorted(ROLE_PROFILES), default=DEFAULT_ROLE,
+        help="the profession the persona is built around",
+    )
     args = parser.parse_args()
+
+    global ROLE
+    ROLE = ROLE_PROFILES[args.role]
+    print(f"Role       : {ROLE['label']}")
 
     if args.out.exists() and not args.force:
         persona = json.loads(args.out.read_text(encoding="utf-8"))

@@ -20,6 +20,7 @@ import { HelpTip, ScreenIntro } from '../components/Help'
 import Icon from '../components/Icon'
 import WorkflowMap, { deriveJourney } from '../components/WorkflowMap'
 import { ErrorBox, Loading, useFetch } from '../components/ui'
+import { useSession } from '../session'
 import { DeleteDialog, DuplicateDialog, VersionsDialog } from './directives/dialogs'
 import DiscretionCard from './directives/discretion'
 import {
@@ -36,6 +37,7 @@ import { EditorHeader, StartState } from './directives/shell'
 /* --- Page ------------------------------------------------------------------ */
 
 export default function DirectivesPage() {
+  const { setSession } = useSession()
   const vocabQ = useFetch(() => api.get('/directives/vocabulary?locale=en'), [])
   const setsQ = useFetch(() => api.get('/directives/'), [])
 
@@ -154,12 +156,26 @@ export default function DirectivesPage() {
       setDraft(fromServer(saved))
       setSavedNote(`Saved as “${saved.name}” version ${saved.version}.`)
       setsQ.reload()
+      refreshSession()
     } catch (e) {
       // FR-148: a set a campaign has used is versioned rather than overwritten.
       if (e.status === 409) setNeedsVersion(true)
       setSaveError(e)
     } finally {
       setSaving(false)
+    }
+  }
+
+  /** FR-385: the shell marks every screen from `session.discretion_mode`, so a
+   *  change here has to reach the session and not only this editor. Re-read
+   *  rather than patched: which set is *in force* is the server's answer, not
+   *  this screen's. A failure is swallowed - the save itself succeeded, and the
+   *  indicator catches up on the next load. */
+  async function refreshSession() {
+    try {
+      setSession(await api.get('/auth/me'))
+    } catch {
+      /* the indicator is not worth failing a successful save over */
     }
   }
 
@@ -182,6 +198,7 @@ export default function DirectivesPage() {
       setDraft(fromServer(saved))
       setSavedNote('Discretion settings applied.')
       setsQ.reload()
+      refreshSession()
     } catch (e) {
       setSaveError(e)
     } finally {

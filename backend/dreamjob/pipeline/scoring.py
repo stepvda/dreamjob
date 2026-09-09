@@ -1428,18 +1428,18 @@ class ScoringReport:
     def note(self) -> str:
         """The same numbers as a sentence, for the places that show prose."""
         noun = "opportunity" if self.total == 1 else "opportunities"
-        parts = [
-            f"{self.pre_ranked} of {self.total} {noun} were ranked deterministically"
-        ]
-        if self.llm_limit <= 0:
-            parts.append(
-                "no model was used, so every score is arithmetic over the collected data"
-            )
-        elif self.llm_scored:
+        parts = [f"{self.pre_ranked} of {self.total} {noun} ranked deterministically"]
+        if self.llm_scored:
             parts.append(
                 f"the top {self.llm_scored} went to the model for the semantic dream-job "
                 "match and the written rationale"
             )
+        elif self.llm_limit <= 0:
+            parts.append(
+                "no model was used, so every score is arithmetic over the collected data"
+            )
+        else:
+            parts.append(f"no opportunity reached the model (the cut is {self.llm_limit})")
         if self.deterministic_only:
             parts.append(
                 f"the other {self.deterministic_only} carry deterministic scores only - "
@@ -1454,9 +1454,10 @@ class ScoringReport:
         if self.failed:
             parts.append(f"{self.failed} row(s) could not be scored at all")
         if self.not_scored:
+            left = "opportunity was" if self.not_scored == 1 else "opportunities were"
             parts.append(
-                f"{self.not_scored} {noun} were not looked at, because this run was capped "
-                f"at {self.prerank_limit}"
+                f"{self.not_scored} {left} not looked at, because this run was capped at "
+                f"{self.prerank_limit}"
             )
         return "; ".join(parts) + "."
 

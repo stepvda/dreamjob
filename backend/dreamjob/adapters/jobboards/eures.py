@@ -131,6 +131,18 @@ class EuresAdapter(VacancySourceAdapter):
     )
     base_confidence = 0.8
 
+    #: The native-query keys this adapter turns into search filters, declared so
+    #: the planner can tell a partitioned plan from a pointless one (N2).
+    #: ``discovery.reads_partitions`` refuses to emit one item per
+    #: (region x sector x period) unless the adapter says it reads those keys -
+    #: without this attribute the planner degraded to a single country-wide item
+    #: and the 126-partition sweep never existed.  ``nace_section`` is the
+    #: planner's spelling of ``sector_codes``; both are read by
+    #: :meth:`sector_codes`, so the two halves cannot drift apart again.
+    PARTITION_QUERY_KEYS: tuple[str, ...] = (
+        "nuts_codes", "sector_codes", "nace_section", "publication_period",
+    )
+
     # -- plan (FR-162, FR-164) ---------------------------------------------
     def plan(self, directives: dict, composite_profile: dict, caps: dict) -> list[PlanItem]:
         keywords = keywords_from(directives, composite_profile)
@@ -209,6 +221,13 @@ class EuresAdapter(VacancySourceAdapter):
             payload = json.loads(listing.text)
             page_items = self._results(payload)
             if not page_items:
+                # The service states its own total.  A partitioned sweep asks
+                # 126 narrow questions and some genuinely have no answer (BE1 x
+                # NACE A x last week is 0 today); reading that total is what
+                # separates "nothing was published" from "the parser broke",
+                # which the plan item's status then reports honestly (NFR-403).
+                if self._stated_total(payload) == 0:
+                    self.fetch_outcome.stated_empty += 1
                 break
             summaries.extend(page_items)
             records.append(
@@ -311,8 +330,21 @@ class EuresAdapter(VacancySourceAdapter):
 
     @staticmethod
     def sector_codes(query: dict[str, Any]) -> list[str]:
-        """``sectorCodes``: NACE sections, the second axis of a partition."""
-        raw = query.get("sector_codes") or query.get("sectorCodes") or []
+        """``sectorCodes``: NACE sections, the second axis of a partition.
+
+        ``nace_section`` is the planner's name for this axis
+        (``pipeline.discovery.EURES_PARTITION_KEYS``).  Reading only
+        ``sector_codes`` dropped it silently: every NACE section of one region
+        then sent byte-for-byte the same body, so eighteen plan items bought one
+        list eighteen times instead of eighteen disjoint slices of the register.
+        """
+        raw = (
+            query.get("sector_codes")
+            or query.get("sectorCodes")
+            or query.get("nace_section")
+            or query.get("nace_sections")
+            or []
+        )
         if isinstance(raw, str):
             raw = [raw]
         return [str(code).strip().upper() for code in raw if str(code).strip()]
@@ -371,6 +403,21 @@ class EuresAdapter(VacancySourceAdapter):
             if value not in (None, ""):
                 return str(value)
         return ""
+
+    @staticmethod
+    def _stated_total(payload: Any) -> int | None:
+        """The result count the service reports, or ``None`` if it reports none."""
+        if not isinstance(payload, dict):
+            return None
+        for key in ("numberRecords", "numberOfRecords", "totalRecords", "total"):
+            value = payload.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.strip().isdigit():
+                return int(value.strip())
+        return None
 
     @staticmethod
     def _results(payload: Any) -> list[dict]:

@@ -4,7 +4,9 @@ All SQL behind the administration screens lives here (CR-408).  Four groups:
 
 * ``app_setting`` accessors, which hold the administrator's LLM configuration
   and per-source caps as versioned key/value rows (FR-362, FR-363).
-* ``source_catalogue`` accessors, including the IR-101 acknowledgement stamp.
+* ``source_catalogue`` accessors, including the IR-101 acknowledgement stamp
+  and the reconciliation that keeps a row honest about what will actually
+  happen when the source is collected (FR-161, FR-185).
 * ``llm_call`` reads plus the retention sweep that nulls prompt and response
   text after a retention period (FR-364).
 * ``audit_event`` insert and read.  There is deliberately no update or delete
@@ -13,8 +15,11 @@ All SQL behind the administration screens lives here (CR-408).  Four groups:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from typing import Any
 
+from dreamjob.config import get_settings
 from dreamjob.db.connection import (
     from_json,
     insert_row,
@@ -25,6 +30,8 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # app_setting (FR-362, FR-363)
@@ -89,6 +96,173 @@ def update_source(adapter_key: str, values: dict[str, Any]) -> int:
         return conn.execute(
             f"UPDATE source_catalogue SET {sets} WHERE adapter_key = :__key", payload
         ).rowcount
+
+
+# ---------------------------------------------------------------------------
+# Catalogue honesty (FR-161, FR-164, FR-182, FR-185, IR-101)
+# ---------------------------------------------------------------------------
+#
+# ``SourceAdapter.register`` writes what an adapter says about itself.  Two
+# kinds of untruth survive that, and the FR-185 dashboard reads both:
+#
+# * **The rate a source asks for is not the rate it gets.**  The catalogue
+#   recorded ``rate_limit_rps = 1.0`` for the seven ATS hosts while
+#   ``DomainLimiter`` ran every one of them at the global 0.5, and
+#   ``planning.estimate()`` prices a plan off the catalogue value - so the
+#   duration the user approved was half the duration the run would take
+#   (docs/Data_Gathering_Plan.md section 2.2 and appendix A).  It cut the other
+#   way for EURES: europa.eu publishes ``Crawl-delay: 10``, so the row's 0.5
+#   promised twenty times the throughput the limiter will allow.
+# * **A row can outlive its adapter.**  ``broken_board`` and ``stub_board``
+#   were test fixtures that leaked into the installed database; source
+#   selection (FR-164) could not tell them from real sources and spent a plan
+#   item on each, every campaign (plan item C5).  Fourteen more had joined them
+#   by the time this was written.
+#
+# :func:`reconcile_catalogue` is the pass that fixes both.  It runs after
+# registration, from ``dreamjob.adapters.sync_catalogue``.
+
+#: ``Crawl-delay``, in seconds, published by the host an adapter reads, from
+#: robots.txt measured on 2026-09-09.  The egress layer honours whatever
+#: robots.txt says at run time (FR-182); the catalogue needs the number
+#: *before* the first request, because the estimate the user approves is
+#: computed from the catalogue and nothing else.
+PUBLISHED_CRAWL_DELAY_SECONDS: dict[str, float] = {
+    "board.eures": 10.0,   # europa.eu, under "User-agent: *"
+    "ats.lever": 1.0,      # api.lever.co (already met by the global 0.5)
+}
+
+#: Sources that stay off, with the reason a reader of the dashboard needs
+#: (IR-101, FR-182; docs/Data_Gathering_Plan.md section 6).  Both rows already
+#: *said* they were disabled in their legal notes while ``enabled`` was 1.
+#:
+#: The reconciliation is a floor, never a switch: it can turn a source off, an
+#: administrator who has a licence turns it on by acknowledging it (FR-363),
+#: and an acknowledged row is then left alone.
+FORBIDDEN_SOURCES: dict[str, str] = {
+    "board.indeed": (
+        "Indeed's terms of service prohibit automated access and scraping, so "
+        "the row is catalogued off as well as unacknowledged (IR-101)."
+    ),
+    "board.stepstone": (
+        "StepStone's terms of use prohibit automated access and systematic "
+        "copying; off until an administrator holds a licence (IR-101)."
+    ),
+}
+
+
+def effective_rate_limit_rps(adapter_key: str, declared: float | None = None) -> float:
+    """The rate the egress layer will actually apply to this source (FR-182).
+
+    Three numbers claim to be the rate limit and only one of them runs.  The
+    adapter's class attribute is a wish, ``DREAMJOB_PER_DOMAIN_RPS`` is the
+    ceiling ``DomainLimiter`` enforces on every host, and a published
+    ``Crawl-delay`` lowers that ceiling further for the hosts that ask.  The
+    limiter takes the slowest of them, so the catalogue records the slowest of
+    them too: it is the one number that can be believed, and the plan estimate
+    is built from it.
+
+    Never rounds *upward*: a source that asks to be read more slowly than the
+    global ceiling keeps its own rate, because politeness is allowed to exceed
+    the minimum.
+    """
+    ceiling = float(get_settings().per_domain_rps or 0.5)
+    delay = PUBLISHED_CRAWL_DELAY_SECONDS.get(adapter_key)
+    if delay and delay > 0:
+        ceiling = min(ceiling, 1.0 / delay)
+    if declared:
+        ceiling = min(ceiling, float(declared))
+    return round(ceiling, 4)
+
+
+def prune_unknown_sources(known_adapter_keys: Iterable[str]) -> list[str]:
+    """Delete catalogue rows whose adapter does not exist (FR-161, FR-164, C5).
+
+    A catalogued source that no module implements is planned like any other
+    and then collects nothing, which is the most expensive kind of lie: it
+    costs a plan item, reports ``done`` and can never be diagnosed from the
+    dashboard.
+
+    Three guards keep this from eating a real row.  Nothing is deleted when the
+    registry is empty (adapter discovery failed, and every row would look
+    orphaned).  A row an administrator acknowledged is never deleted, and
+    neither is one they switched off: both are decisions, and a decision
+    deserves a human.
+    """
+    known = {str(k) for k in known_adapter_keys}
+    if not known:
+        log.warning("Skipping catalogue prune: no adapters are registered")
+        return []
+    orphans = [
+        r["adapter_key"]
+        for r in query_all(
+            "SELECT adapter_key FROM source_catalogue "
+            "WHERE enabled = 1 AND acknowledged_at IS NULL ORDER BY adapter_key"
+        )
+        if r["adapter_key"] not in known
+    ]
+    if not orphans:
+        return []
+    marks = ", ".join("?" for _ in orphans)
+    with write_tx() as conn:
+        conn.execute(
+            f"DELETE FROM source_catalogue WHERE adapter_key IN ({marks})", tuple(orphans)
+        )
+    log.warning(
+        "Removed %d catalogue row(s) with no adapter: %s", len(orphans), ", ".join(orphans)
+    )
+    return orphans
+
+
+def reconcile_catalogue(known_adapter_keys: Iterable[str]) -> dict[str, list[str]]:
+    """Make every catalogue row say what will actually happen (FR-161, FR-185).
+
+    Runs after every adapter has registered, so it sees the values the adapters
+    wrote and corrects the two they cannot know:
+
+    1. rows with no adapter are removed (:func:`prune_unknown_sources`);
+    2. the sources section 6 of the gathering plan forbids are switched off,
+       unless an administrator has acknowledged them (IR-101);
+    3. ``rate_limit_rps`` is lowered to the rate the limiter will apply
+       (:func:`effective_rate_limit_rps`).
+
+    Returns what it changed, keyed ``pruned`` / ``disabled`` / ``slowed``, so
+    the caller can log it and a test can assert on it.
+    """
+    changed: dict[str, list[str]] = {
+        "pruned": prune_unknown_sources(known_adapter_keys),
+        "disabled": [],
+        "slowed": [],
+    }
+    for key, reason in FORBIDDEN_SOURCES.items():
+        row = get_source(key)
+        if row is None or row.get("acknowledged_at"):
+            continue
+        patch: dict[str, Any] = {}
+        if row.get("enabled"):
+            patch["enabled"] = 0
+        if not row.get("requires_ack"):
+            patch["requires_ack"] = 1
+        if not (row.get("legal_notes") or "").strip():
+            patch["legal_notes"] = reason
+        if patch:
+            update_source(key, patch)
+            changed["disabled"].append(key)
+            log.warning("Catalogued %s as disabled: %s", key, reason)
+
+    for row in list_sources():
+        key = row["adapter_key"]
+        current = row.get("rate_limit_rps")
+        honest = effective_rate_limit_rps(key, current)
+        if current is None or float(current) > honest + 1e-9:
+            update_source(key, {"rate_limit_rps": honest})
+            changed["slowed"].append(key)
+            log.info(
+                "Catalogue rate for %s corrected from %s to %.4f rps: the limiter "
+                "applies the slower of the global ceiling and any Crawl-delay",
+                key, current, honest,
+            )
+    return changed
 
 
 # ---------------------------------------------------------------------------

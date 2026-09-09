@@ -36,6 +36,11 @@ from dreamjob.db.connection import insert_row, query_one, update_row, utcnow
 
 log = logging.getLogger(__name__)
 
+#: Default answer budget for one call.  On a reasoning model this covers the
+#: private reasoning as well, so a task with a long structured answer has to ask
+#: for far more than the answer alone would need - see ``complete``.
+DEFAULT_MAX_TOKENS = 4096
+
 # Task identifiers, used for model routing (FR-362) and cost attribution.
 TASK_CHEAP = {
     "extract.vacancy", "extract.company", "extract.contact", "extract.table",
@@ -93,6 +98,14 @@ class LLMError(RuntimeError):
     pass
 
 
+class TruncatedResponse(LLMError):
+    """The model hit its token limit before producing an answer.
+
+    Distinct from a generic failure because the remedy is specific: raise
+    ``max_tokens``, or route the task to a non-reasoning model.
+    """
+
+
 class BudgetExhausted(LLMError):
     """Raised when a campaign's token budget (NFR-104) would be exceeded."""
 
@@ -102,12 +115,19 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_eur: float = 0.0
+    # A reasoning model bills its private reasoning as output tokens, so the
+    # cost is already counted; this records how much of the budget went there,
+    # which is what explains a short answer from an expensive call.
+    reasoning_chars: int = 0
+    truncated: bool = False
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
             self.input_tokens + other.input_tokens,
             self.output_tokens + other.output_tokens,
             self.cost_eur + other.cost_eur,
+            self.reasoning_chars + other.reasoning_chars,
+            self.truncated or other.truncated,
         )
 
 
@@ -358,7 +378,7 @@ class LLMClient:
         untrusted: dict[str, str] | None = None,
         prefer_strong: bool | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 4096,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         json_mode: bool = False,
         entity_type: str | None = None,
         entity_id: str | None = None,
@@ -425,31 +445,99 @@ class LLMClient:
                     raise LLMError(f"LLM call failed for task {task!r}: {exc}") from last_error
                 time.sleep(2 ** attempt * 2)
 
-        text = (data["choices"][0]["message"]["content"] or "").strip()
+        choice = data["choices"][0]
+        text = (choice["message"].get("content") or "").strip()
+        reasoning = choice["message"].get("reasoning_content") or ""
+        finish = choice.get("finish_reason")
         u = data.get("usage", {}) or {}
+
         usage = Usage(
             input_tokens=int(u.get("prompt_tokens", 0)),
             output_tokens=int(u.get("completion_tokens", 0)),
+            reasoning_chars=len(reasoning),
+            truncated=finish == "length",
         )
         usage.cost_eur = 0.0 if provider == "local" else self._price(
             usage.input_tokens, usage.output_tokens
         )
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        # A reasoning model spends `max_tokens` on its private reasoning *and*
+        # its answer.  When the reasoning is long it can consume the whole
+        # budget and return an empty answer with finish_reason "length" - a
+        # 200 response that looks like success and yields nothing.  Measured on
+        # deepseek-reasoner: max_tokens=4000 produced 18,202 characters of
+        # reasoning and zero characters of content.  Silently handing that back
+        # as an empty string is how a caller ends up reporting "the model
+        # returned nothing" with no idea the budget was the cause.
+        #
+        # The tokens were spent either way, so the call is debited and written
+        # to the FR-364 log before the failure is raised - and written as what
+        # it was.  Logging an answerless call as ``ok`` with an empty response
+        # is what made the call log say the call succeeded while the feature
+        # that made it produced nothing.
+        if not text:
+            if usage.truncated:
+                answerless = (
+                    f"{model} spent its whole {max_tokens}-token budget on reasoning "
+                    f"({usage.output_tokens} completion tokens, {usage.reasoning_chars} "
+                    f"characters of it reasoning) and returned no answer for task "
+                    f"{task!r}. Raise max_tokens, or use the chat model for this task."
+                )
+            else:
+                answerless = (
+                    f"{model} returned an empty answer for task {task!r} "
+                    f"(finish_reason={finish!r})."
+                )
+            self.budget.debit(usage)
+            self._log_call(
+                task, system, user, text, model, provider, usage, entity_type, entity_id,
+                prompt_template, prompt_version, latency_ms,
+                status="truncated" if usage.truncated else "empty",
+                error=answerless,
+            )
+            if usage.truncated:
+                raise TruncatedResponse(answerless)
+            raise LLMError(answerless)
+
         self.budget.debit(usage)
         self._log_call(
             task, system, user, text, model, provider, usage, entity_type, entity_id,
-            prompt_template, prompt_version, int((time.monotonic() - started) * 1000),
+            prompt_template, prompt_version, latency_ms,
         )
         return LLMResult(text=text, usage=usage, model=model, provider=provider, raw=data)
 
     def complete_json(
         self, task: str, system: str, user: str, *, schema_hint: str | None = None, **kw: Any
     ) -> Any:
-        """Complete and parse JSON, tolerating fenced or prose-wrapped output."""
+        """Complete and parse JSON, tolerating fenced or prose-wrapped output.
+
+        An answer cut off at the token budget is the other half of the problem
+        ``complete`` reports for an *empty* answer: the reply arrives with a
+        plausible few thousand characters in it and stops mid-object, and
+        ``parse_json`` can then only say "could not parse JSON" - which reads
+        like a badly behaved model rather than a budget that was too small.
+        Measured on ``profile.composite``: 23,999 of a 24,000-token budget
+        spent, the JSON ending at ``"text": "Cares``.  Naming the budget is
+        what turns that into a one-line fix instead of an investigation.
+        """
         if schema_hint:
             system = f"{system}\n\nRespond with JSON only, matching this shape:\n{schema_hint}"
         kw.setdefault("json_mode", True)
         result = self.complete(task, system, user, **kw)
-        return parse_json(result.text, task=task)
+        try:
+            return parse_json(result.text, task=task)
+        except LLMError:
+            if not result.usage.truncated:
+                raise
+            budget = kw.get("max_tokens", DEFAULT_MAX_TOKENS)
+            raise TruncatedResponse(
+                f"{result.model} was cut off at its {budget}-token budget for task "
+                f"{task!r} and returned incomplete JSON ({result.usage.output_tokens} "
+                f"completion tokens, {result.usage.reasoning_chars} characters of it "
+                f"reasoning, {len(result.text)} characters of answer). Raise "
+                "max_tokens, or use the chat model for this task."
+            ) from None
 
     # -- audit (FR-364) -----------------------------------------------------
     def _log_call(

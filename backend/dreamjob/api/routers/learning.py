@@ -89,7 +89,7 @@ def create_response(body: ResponseIn, seeker: CurrentSeeker = Depends(current_se
         "response.recorded",
         entity_type="incoming_reply",
         entity_id=result["incoming_reply_id"],
-        job_seeker_id=seeker.id,
+        seeker_id=seeker.id,
         detail={"channel": body.channel, "stated_outcome": body.stated_outcome},
     )
     return result
@@ -189,7 +189,7 @@ def apply(advice_id: str, seeker: CurrentSeeker = Depends(current_seeker)) -> di
         "advice.applied",
         entity_type="redirection_advice",
         entity_id=advice_id,
-        job_seeker_id=seeker.id,
+        seeker_id=seeker.id,
         detail={"directive_set_id": result["directive_set"].get("id")},
     )
     return result

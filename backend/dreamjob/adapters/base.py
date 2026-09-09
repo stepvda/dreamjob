@@ -258,7 +258,17 @@ def all_adapters() -> dict[str, type[SourceAdapter]]:
 
 
 def sync_catalogue(egress: EgressClient | None = None) -> int:
-    """Register every known adapter's metadata in the database (FR-161, FR-363)."""
+    """Register every known adapter's metadata in the database (FR-161, FR-363).
+
+    Registration writes what each adapter says about itself; the reconciliation
+    that follows corrects the two things an adapter cannot know - the rate the
+    egress layer will really apply to it, and whether a catalogued source still
+    has an adapter at all (FR-185, IR-101).  See
+    ``db.repositories.admin.reconcile_catalogue``.
+    """
+    from dreamjob.db.repositories import admin as admin_repo  # noqa: PLC0415
+
     for key in _REGISTRY:
         get_adapter(key, egress).register()
+    admin_repo.reconcile_catalogue(_REGISTRY)
     return len(_REGISTRY)

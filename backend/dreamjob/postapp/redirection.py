@@ -31,7 +31,7 @@ from typing import Any
 from dreamjob.db.connection import from_json, insert_row, update_row, utcnow
 from dreamjob.db.repositories import directives as directive_repo
 from dreamjob.db.repositories import learning as repo
-from dreamjob.llm.client import LLMClient
+from dreamjob.llm.client import LLMClient, TruncatedResponse
 from dreamjob.pipeline.directives import DirectiveSetPayload
 from dreamjob.postapp.segments import (
     DIMENSIONS,
@@ -43,6 +43,19 @@ from dreamjob.postapp.segments import (
 log = logging.getLogger(__name__)
 
 PROMPT_VERSION = "1.0"
+
+#: Room for the answer *and* the reasoning model's own tokens.
+#:
+#: ``score.opportunity`` is in ``TASK_STRONG``, so this call is routed to
+#: ``DREAMJOB_LLM_MODEL_STRONG`` - deepseek-reasoner by default - and a
+#: reasoning model bills its private chain of thought against the same
+#: ``max_tokens`` ceiling as the answer.  Five proposals with a rationale each
+#: is a few hundred tokens of JSON, so the old 4096 default looked generous;
+#: measured on this exact prompt, the reasoner spent all 4096 on reasoning and
+#: returned an empty answer, which took the whole advice step down.  The same
+#: ceiling as the other reasoning-model calls (composite profile, dream-job
+#: model) leaves room for both.
+ADVICE_MAX_TOKENS = 24_000
 
 SYSTEM = """You advise a job seeker on where to redirect their search, based on \
 measured outcome rates from applications they have already sent.
@@ -114,6 +127,29 @@ def _table(analysis: SegmentAnalysis) -> str:
     return "\n".join(lines)
 
 
+def _ask(
+    llm: LLMClient,
+    user: str,
+    job_seeker_id: str,
+    *,
+    prefer_strong: bool | None = None,
+) -> dict[str, Any]:
+    """One attempt at the advice call, so the retry differs only in its model."""
+    return llm.complete_json(
+        "score.opportunity",
+        SYSTEM,
+        user,
+        schema_hint=SCHEMA_HINT,
+        prompt_template="redirection_advice",
+        prompt_version=PROMPT_VERSION,
+        entity_type="job_seeker",
+        entity_id=job_seeker_id,
+        temperature=0.3,
+        max_tokens=ADVICE_MAX_TOKENS,
+        prefer_strong=prefer_strong,
+    )
+
+
 def generate_advice(
     job_seeker_id: str,
     *,
@@ -146,27 +182,31 @@ def generate_advice(
     directive_set = sets[0] if sets else None
     dream = repo.dream_job_summary(job_seeker_id)
 
+    user = (
+        "Measured outcomes:\n\n"
+        f"{_table(analysis)}\n\n"
+        "Current search directives (JSON):\n"
+        f"{_directives_digest(directive_set)}\n\n"
+        "Dream-job model (JSON):\n"
+        f"{dream}\n\n"
+        "Propose at most five redirections, strongest evidence first."
+    )
+
     llm = LLMClient(campaign_id=campaign_id, job_seeker_id=job_seeker_id)
     try:
-        result = llm.complete_json(
-            "score.opportunity",
-            SYSTEM,
-            (
-                "Measured outcomes:\n\n"
-                f"{_table(analysis)}\n\n"
-                "Current search directives (JSON):\n"
-                f"{_directives_digest(directive_set)}\n\n"
-                "Dream-job model (JSON):\n"
-                f"{dream}\n\n"
-                "Propose at most five redirections, strongest evidence first."
-            ),
-            schema_hint=SCHEMA_HINT,
-            prompt_template="redirection_advice",
-            prompt_version=PROMPT_VERSION,
-            entity_type="job_seeker",
-            entity_id=job_seeker_id,
-            temperature=0.3,
-        )
+        try:
+            result = _ask(llm, user, job_seeker_id)
+        except TruncatedResponse as exc:
+            # The room above was not enough, or an administrator has pinned a
+            # reasoning model to this task with a longer chain of thought than
+            # the ceiling allows (FR-362).  Nothing here needs a reasoning
+            # model: segments.py has already found the pattern and this call
+            # only turns the figures into sentences, so the chat model is the
+            # right second attempt rather than a degradation.
+            log.warning(
+                "Redirection advice was truncated (%s); retrying on the chat model", exc
+            )
+            result = _ask(llm, user, job_seeker_id, prefer_strong=False)
     except Exception as exc:  # noqa: BLE001 - advice is optional, figures are not
         log.exception("Redirection advice failed for %s", job_seeker_id)
         return {

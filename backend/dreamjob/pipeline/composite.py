@@ -446,8 +446,18 @@ def build_composite(
             language=language,
         )
 
+    generation = blocks.get("_generation") or {"mode": "llm"}
     if not persist:
         return blocks
+
+    # The mode travels with the row, not just with this response: a composite
+    # assembled without the synthesis reads like any other one on the screen,
+    # and the job seeker has to be told that what they are looking at is the
+    # degraded assembly (NFR-104, CR-405) rather than the synthesis they asked
+    # for.  ``evidence_refs._meta`` already round-trips as JSON, so this needs
+    # no new column.
+    refs = dict(blocks.get("evidence_refs") or {})
+    refs["_meta"] = {**(refs.get("_meta") or {}), "generation": generation}
 
     composite_id = repo.insert_composite(
         job_seeker_id,
@@ -465,12 +475,12 @@ def build_composite(
             "public_footprint": blocks.get("public_footprint"),
             "inferred_preferences": blocks.get("inferred_preferences"),
             "constraints": blocks.get("constraints"),
-            "evidence_refs": blocks.get("evidence_refs"),
+            "evidence_refs": refs,
             "edited_by_user": 0,
         },
     )
     stored = repo.get_composite(job_seeker_id, composite_id) or {}
-    stored["_generation"] = blocks.get("_generation", {"mode": "llm"})
+    stored["_generation"] = generation
     return stored
 
 
@@ -509,9 +519,16 @@ def _synthesise(
             entity_id=version["id"],
             prompt_template=prompt.name,
             prompt_version=prompt.version,
-            # Room for the reasoning model's own tokens as well as the answer;
-            # a truncated response loses every statement, not just the last one.
-            max_tokens=24_000,
+            # The reasoning model spends this budget on its private reasoning
+            # *and* on the answer, and this is the longest answer the product
+            # asks for: ten blocks of statements plus an evidence_refs entry
+            # for every one of them.  Measured over e2e runs, one synthesis of
+            # this profile spent 21k tokens reasoning and 6k answering, and a
+            # 24,000 budget truncated the JSON mid-statement - which is not a
+            # failed call but a *silent* one, because the fallback below then
+            # produces a composite with no narrative in it.  48,000 leaves the
+            # worst run seen so far at 55% of the budget.
+            max_tokens=48_000,
         )
     except (LLMError, BudgetExhausted) as exc:
         log.warning("Composite synthesis failed (%s); falling back to structural", exc)

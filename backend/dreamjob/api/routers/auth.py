@@ -17,6 +17,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from dreamjob.api.deps import SESSION_COOKIE, CurrentSeeker, current_seeker
 from dreamjob.config import get_settings
+from dreamjob.db.repositories import intelligence as directives_repo
 from dreamjob.db.repositories import seekers as repo
 from dreamjob.security import auth_service as auth
 from dreamjob.security.audit import record_audit
@@ -107,6 +108,11 @@ def _issue_session(response: Response, seeker_id: str, request: Request) -> dict
 
 
 def _public(row: dict) -> dict:
+    # FR-385 asks for discretion mode to be visible *throughout* the interface,
+    # and the one thing every screen already has is the session: the shell marks
+    # itself from this flag, so a job seeker searching while employed can see it
+    # on a screen that never asks about directives at all.
+    _, directives = directives_repo.directives_in_force(row["id"])
     return {
         "id": row["id"],
         "email": row["email"],
@@ -114,6 +120,7 @@ def _public(row: dict) -> dict:
         "locale": row["locale"],
         "is_admin": bool(row["is_admin"]),
         "created_at": row["created_at"],
+        "discretion_mode": bool((directives or {}).get("discretion_mode")),
     }
 
 

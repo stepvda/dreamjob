@@ -279,3 +279,102 @@ def test_response_requires_something_to_attach_to(db):
     seeker_id = _seed()
     with pytest.raises(ValueError, match="dispatch or an opportunity"):
         record_response(seeker_id, raw_text="orphan", classify_text=False)
+
+
+# ---------------------------------------------------------------------------
+# The intake route (FR-285, NFR-702)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def responses_api(db):
+    """Only the learning router, with authentication stubbed out."""
+    from dreamjob.api.deps import CurrentSeeker, current_seeker
+    from dreamjob.api.routers import learning as router_module
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    seeker_id = _seed()
+    app = FastAPI()
+    app.include_router(router_module.router, prefix="/api/learning")
+    app.dependency_overrides[current_seeker] = lambda: CurrentSeeker(
+        id=seeker_id, email="seeker@example.com", display_name="S", is_admin=False, locale="en"
+    )
+    with TestClient(app) as client:
+        yield client, seeker_id
+
+
+def _one_opportunity(seeker_id: str) -> str:
+    from dreamjob.db.connection import query_one
+
+    return query_one("SELECT id FROM opportunity WHERE job_seeker_id = ? LIMIT 1", (seeker_id,))[
+        "id"
+    ]
+
+
+def test_recording_a_response_answers_201_and_lands_in_the_audit_trail(responses_api):
+    """FR-285 plus NFR-702, pinned at the route.
+
+    The intake writes three rows before it audits, so anything that raises
+    *after* those writes leaves the caller unable to tell what landed.  The
+    route is exercised here rather than ``record_response`` alone because the
+    defect this guards against - the audit call and its declared signature
+    drifting apart - only exists at the call site.
+    """
+    from dreamjob.security.audit import trail_for_entity
+
+    client, seeker_id = responses_api
+    response = client.post(
+        "/api/learning/responses",
+        json={
+            "opportunity_id": _one_opportunity(seeker_id),
+            "channel": "phone",
+            "stated_outcome": "rejection",
+            "raw_text": "They rang to say no.",
+            "classify": False,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["effective_outcome"] == "rejection"
+
+    trail = trail_for_entity("incoming_reply", body["incoming_reply_id"])
+    assert [row["action"] for row in trail] == ["response.recorded"]
+    assert trail[0]["job_seeker_id"] == seeker_id
+
+
+def test_a_failing_audit_trail_does_not_lose_the_response(responses_api, monkeypatch):
+    """NFR-702 must never cost the record it is describing.
+
+    The response rows are written before the audit event, so an audit that
+    raises would answer 500 for work that is already durably done - and the
+    caller would have no way to know.  Auditing is best-effort by design.
+    """
+    from dreamjob.db.connection import query_one
+    from dreamjob.db.repositories import admin as admin_repo
+
+    def broken(**_kwargs):
+        raise sqlite3.OperationalError("audit_event is unavailable")
+
+    monkeypatch.setattr(admin_repo, "insert_audit", broken)
+
+    client, seeker_id = responses_api
+    response = client.post(
+        "/api/learning/responses",
+        json={
+            "opportunity_id": _one_opportunity(seeker_id),
+            "channel": "linkedin",
+            "stated_outcome": "interest",
+            "classify": False,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    manual = query_one(
+        "SELECT * FROM manual_response WHERE id = ?", (response.json()["manual_response_id"],)
+    )
+    assert manual["channel"] == "linkedin"
+    # The audit really did fail: without this the test would pass on a route
+    # that never audits at all.
+    assert query_one("SELECT COUNT(*) AS n FROM audit_event")["n"] == 0

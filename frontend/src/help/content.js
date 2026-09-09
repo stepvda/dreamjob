@@ -401,6 +401,7 @@ export const PAGE_HELP = {
       'Sources: enable the adapters you want and cap their pace. A source whose terms prohibit automated access cannot be switched on until an administrator acknowledges that in writing, and switching it on afterwards is a second, separate decision.',
       'Activity: job runs, records per source, errors, and tokens and cost over time — for the whole installation or for one campaign.',
       'Audit: the append-only trail. Filter it to applications to see who approved and sent each one, and which profile version went with it.',
+      'Logs: the server\u2019s own files. Read the level summary first \u2014 it says how many warnings and errors the installation has produced over the window \u2014 then open the file behind a count and read the end of it.',
       'Data: browse the AI call log, run the redaction sweep, export everything held about you, or erase your account.',
     ],
     tips: [
@@ -409,6 +410,9 @@ export const PAGE_HELP = {
       'Sources whose terms prohibit automated access are disabled until an administrator explicitly acknowledges the risk, and withdrawing that acknowledgement disables the source again.',
       'Prompts and responses are nulled from the call log after the retention period. Tokens, cost and model survive, because the cost reports need them and they are not personal data.',
       'Opening one call\u2019s prompt is itself written to the audit trail.',
+      'Every log line carries the correlation id of the request that caused it, so one click in the browser can be followed across the request, application and database files by searching for eight characters.',
+      'The errors file is a copy: every warning and worse is written both to the file it came from and to errors.log. That is why it is left out of the totals \u2014 counting it would double every warning.',
+      'The log summary reads the end of each file rather than all of it. A file that says \u201cpartial scan\u201d had more inside the window than the scan could afford; narrow the window to be sure of the counts.',
       'Erasure removes your account and everything private to it. The shared company knowledge base stays, because it belongs to no one.',
     ],
     caution:
@@ -1050,6 +1054,26 @@ export const GLOSSARY = {
     term: 'Dream-job fit threshold',
     body:
       'The dream-job fit score above which a role counts as somewhere you actually want to end up. It is yours to set, and it is the switch behind the stepping-stone paths: when nothing in the ranked list clears it, the useful answer stops being a better sort and becomes a route.',
+  },
+  log_level: {
+    term: 'Log level',
+    body:
+      'How serious the line is: DEBUG and INFO are the installation narrating itself, WARNING is something that coped, ERROR is something that did not, and CRITICAL is something that stopped. The counts over a window are the fastest honest answer to \u201cis anything wrong?\u201d \u2014 a handful of warnings an hour is ordinary; a jump in them is the thing to look at.',
+  },
+  log_tail: {
+    term: 'Tail',
+    body:
+      'The last N lines of one log file, read from the end backwards. Reading 200 lines of a 10 MB file touches the end of it rather than the whole thing, which is why the tail is instant and the window it can scan is bounded. \u201cOlder lines not read\u201d means the file continues above what is shown.',
+  },
+  correlation_id: {
+    term: 'Correlation id',
+    body:
+      'Eight characters attached to everything one request causes \u2014 the request line, the application lines, the database statements, and the browser\u2019s own report of it. Filtering every file by that one id reassembles a single click from the six places it was written down.',
+  },
+  log_channel: {
+    term: 'Channel',
+    body:
+      'Which slice of the application wrote the line \u2014 request, database, egress, mail, audit \u2014 taken from the logger name rather than the module, because that is the level at which somebody scanning a file wants to filter. Requests, database statements, browser reports and the audit trail each also have a file of their own.',
   },
   corpus_keyword: {
     term: 'Corpus keyword',

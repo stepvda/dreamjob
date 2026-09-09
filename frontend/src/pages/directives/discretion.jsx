@@ -137,25 +137,35 @@ export default function DiscretionCard({ value, onChange, vocab, savedId, onSave
         </Field>
 
         <ExclusionCheck savedId={savedId} />
+      </div>
 
-        <div className="row" style={{ marginTop: 14 }}>
-          <div className="spacer" />
-          <button
-            type="button"
-            className="btn btn-sm"
-            disabled={!savedId || saving}
-            title={savedId ? undefined : 'Save the directive set first'}
-            onClick={onSaveDiscretion}
-          >
-            {saving ? (
-              <span className="spinner" />
-            ) : (
-              <>
-                <Icon name="check" /> Apply discretion settings now
-              </>
-            )}
-          </button>
-        </div>
+      {/* Outside the inert block on purpose. The lists above are only editable
+          while the mode is on, but *switching it off* has to be saveable through
+          the same control — that is the half of FR-385 that matters when the job
+          seeker has changed employer, and a button inside a `pointerEvents:
+          none` wrapper would look enabled and swallow the click. */}
+      <div className="row" style={{ marginTop: 14 }}>
+        <span className="small muted">
+          {on
+            ? 'Applies to every campaign that runs under this directive set.'
+            : 'Applying now records that this search is no longer being kept quiet.'}
+        </span>
+        <div className="spacer" />
+        <button
+          type="button"
+          className="btn btn-sm"
+          disabled={!savedId || saving}
+          title={savedId ? undefined : 'Save the directive set first'}
+          onClick={onSaveDiscretion}
+        >
+          {saving ? (
+            <span className="spinner" />
+          ) : (
+            <>
+              <Icon name="check" /> Apply discretion settings now
+            </>
+          )}
+        </button>
       </div>
     </div>
   )

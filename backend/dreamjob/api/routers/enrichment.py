@@ -127,6 +127,11 @@ def _composite_view(row: dict) -> dict[str, Any]:
     refs = row.get("evidence_refs") or {}
     meta = refs.get("_meta") or {}
     view["unsupported_statements"] = meta.get("unsupported", [])
+    # How this version was produced (NFR-104, CR-405).  A composite the
+    # synthesis never wrote looks exactly like one it did, so the screen needs
+    # to be told which it is holding.  Rows written before this was recorded
+    # carry no mode, and are not claimed to be either.
+    view["generation"] = meta.get("generation") or {}
     return view
 
 

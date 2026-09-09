@@ -177,6 +177,46 @@ def expect_help(page, title: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# What this particular persona happens to be
+# ---------------------------------------------------------------------------
+#
+# The persona is regenerated, so nothing about *who* it is may be written down
+# here: a suite that names the employers or the industry of one generated
+# person stops testing the pipeline and starts testing that the generator has
+# not been run again.  These read the facts back out of ``persona.json`` and
+# assert that the pipeline carried them through.
+
+#: Words too common to identify anything, so useless for "did this survive".
+_NOISE = frozenset(
+    """a an and are as at be been but by can for from has have i in into is it its me my no
+    not of on or that the their them they this to with without you your work working role
+    roles job jobs team teams take taking real just more where want wants need needs
+    expected""".split()
+)
+
+
+def _employers(persona: Persona, limit: int = 3) -> list[str]:
+    """The persona's most recent employers, newest first, without repeats."""
+    out: list[str] = []
+    for entry in persona.get("experience", default=[]) or []:
+        name = str((entry or {}).get("employer") or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out[:limit]
+
+
+def _keywords(text: str) -> set[str]:
+    """The words in ``text`` that would identify it if they came back."""
+    words = re.findall(r"[A-Za-z][A-Za-z+#./-]{2,}", str(text).lower())
+    return {w.strip("./-") for w in words if w not in _NOISE and len(w) > 3}
+
+
+def _mentions(haystack: str, wanted: str) -> bool:
+    """Does ``haystack`` carry any of the identifying words of ``wanted``?"""
+    return bool(_keywords(wanted) & _keywords(haystack))
+
+
+# ---------------------------------------------------------------------------
 # The account this file walks through
 # ---------------------------------------------------------------------------
 
@@ -685,7 +725,9 @@ def test_the_composite_profile_is_built_and_every_line_carries_a_source(page, pe
 
     with step(page, "Check the profile reads as this person's career"):
         body = " ".join(page.locator("#root").inner_text().split())
-        for employer in ("Cortexa AI", "Volta Energy", "Dataflow Analytics"):
+        employers = _employers(persona)
+        assert employers, f"{harness.PERSONA_PATH} has no employment history to look for"
+        for employer in employers:
             assert employer in body, f"the composite never mentions {employer}: {body[:400]}"
 
     with step(page, "Check every statement names the source that supports it (FR-125)"):

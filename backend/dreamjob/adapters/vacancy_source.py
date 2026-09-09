@@ -83,6 +83,13 @@ class FetchOutcome:
     blocked: list[str] = field(default_factory=list)          # robots.txt (FR-182)
     rate_limited: list[str] = field(default_factory=list)     # 429/503 after back-off
     failures: list[tuple[str, str]] = field(default_factory=list)
+    #: Answers in which the source itself stated a result count of zero.
+    #: This is positive evidence of emptiness, not absence of evidence: only an
+    #: adapter that can read a total off a well-formed response may set it.  A
+    #: partitioned sweep asks many narrow questions and some have no answer -
+    #: "no agriculture vacancies were published in Brussels last week" is a
+    #: correct reading of the register, not a layout change (NFR-403).
+    stated_empty: int = 0
 
     def summary(self) -> str:
         reasons = sorted({reason for _, reason in self.failures})
@@ -958,6 +965,12 @@ class VacancySourceAdapter(SourceAdapter):
             raise UnusableQuery(
                 f"[{self.key}] {nothing_to_fetch or 'the plan item names nothing to fetch'}"
             )
+        if outcome.stated_empty and outcome.stated_empty >= outcome.ok:
+            # Every answer this item got said, in the source's own words, that
+            # it holds nothing for this query.  Charging that to the extraction
+            # rate would report a working parser as broken, and at the scale of
+            # a partitioned sweep it buries the real breakages in false ones.
+            return records
         # NFR-403: pages were fetched and parsed to nothing.  Counting that as an
         # attempt with no success is what makes a layout change visible; without
         # it the rate stays None and the detector can never fire.

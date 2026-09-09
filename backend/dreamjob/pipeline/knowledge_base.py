@@ -44,6 +44,12 @@ DEFAULT_STALENESS_DAYS: dict[str, int] = {
     "hiring_signal": 30,
     "competitor_link": 180,
     "event": 30,
+    # A board slug is a fact about the world that decays: of the slugs seen in
+    # the current Common Crawl 87.5% still answered, against 27.5% of the ones
+    # only Wayback remembered (docs/Data_Gathering_Plan.md section 2.3).  A
+    # month is short enough to keep the registry honest and long enough that
+    # liveness is re-verified in the monthly refresh, not in a campaign.
+    "board_registry": 30,
 }
 
 # Which entity a source of each type contributes to the knowledge base.

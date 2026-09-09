@@ -184,6 +184,29 @@ export default function CompaniesPage() {
     }
   }
 
+  /* Why this list is empty — a different question from whether the knowledge
+     base is. Saying "606 companies are on record" under a search that matched
+     none of them would report the wrong problem. */
+  function emptyReason() {
+    if (total === 0) {
+      return (
+        'Nothing in the shared knowledge base matches this search. Try a broader one — the ' +
+        'full-text index covers the business summary, products and markets, not only the name.'
+      )
+    }
+    if (stage || trajectory) {
+      return (
+        `${total} ${total === 1 ? 'company matches' : 'companies match'} the search, but none of ` +
+        'the rows on this page has the stage and trajectory you narrowed to. Those two filter ' +
+        'this page only — clear them, or page through the rest.'
+      )
+    }
+    return (
+      `${total} ${total === 1 ? 'company is' : 'companies are'} on record for this search, but ` +
+      'this page of results is empty. Go back a page.'
+    )
+  }
+
   return (
     <div className="content-wide">
       <WorkflowMap journey={{}} compact current="companies" />
@@ -300,9 +323,11 @@ export default function CompaniesPage() {
       {loading && <Loading rows={6} />}
       {error && <ErrorBox error={error} onRetry={reload} />}
 
-      {/* Three distinct states: nothing collected yet is a different problem
-          from a filter that matched nothing. */}
-      {!loading && !error && total === 0 && !filtered && (
+      {/* Three distinct states, and every one of them has to say something:
+          rows, a filter that matched nothing, or a knowledge base that has
+          never been filled. The empty screen is only the last of those, so it
+          is the only one that teaches (FR-345). */}
+      {!loading && !error && items.length === 0 && total === 0 && !filtered && (
         <FirstRun
           pathname="/companies"
           action={
@@ -317,14 +342,13 @@ export default function CompaniesPage() {
         </FirstRun>
       )}
 
-      {!loading && !error && total > 0 && items.length === 0 && (
+      {!loading && !error && items.length === 0 && (filtered || total > 0) && (
         <Empty title="No company matches these filters" action={
           <button className="btn" onClick={clearAll}>
-            Clear the filters
+            Show every company
           </button>
         }>
-          {total} companies are on record. Try a broader search — the full-text index covers the
-          business summary, products and markets, not only the name.
+          {emptyReason()}
         </Empty>
       )}
 
