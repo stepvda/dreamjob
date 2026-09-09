@@ -81,9 +81,25 @@ EMAIL_RE = re.compile(
 _MAILTO_RE = re.compile(r"mailto:([^\"'?>\s]+)", re.IGNORECASE)
 
 # "name (at) example (dot) com" and friends, the usual anti-harvesting spelling.
+#
+# The two runs are **bounded**, and it is not cosmetic.  ``at`` is not anchored
+# to a word boundary - it cannot be, because the spelling being caught is
+# "jan(at)acme.be" - so every occurrence of those two letters anywhere in the
+# document is a place this pattern starts trying.  With an unbounded ``+`` in
+# front of it, each attempt first swallows the whole surrounding run of
+# local-part characters and then gives it back one character at a time, which is
+# quadratic in the length of that run: a 40 kB base64 data: URI - one image
+# inlined in a page - took 66 seconds, and a 400 kB one would have taken close
+# to two hours.  It froze a contacts pass mid-crawl, and because
+# :func:`collect_from_site` runs inside the event loop it froze every other
+# company with it.
+#
+# 64 and 255 are the RFC 5321 maxima for a local part and a domain, which is the
+# same bound :data:`EMAIL_RE` above already applies, so no address that could
+# exist is lost - only the backtracking is.
 _OBFUSCATED_RE = re.compile(
-    r"([A-Za-z0-9._%+\-]+)\s*(?:\(|\[|&#40;)?\s*(?:at|apenstaartje|arobase)\s*"
-    r"(?:\)|\]|&#41;)?\s*([A-Za-z0-9.\-]+)\s*(?:\(|\[)?\s*(?:dot|punt|point)\s*"
+    r"([A-Za-z0-9._%+\-]{1,64})\s*(?:\(|\[|&#40;)?\s*(?:at|apenstaartje|arobase)\s*"
+    r"(?:\)|\]|&#41;)?\s*([A-Za-z0-9.\-]{1,255})\s*(?:\(|\[)?\s*(?:dot|punt|point)\s*"
     r"(?:\)|\])?\s*([A-Za-z]{2,24})",
     re.IGNORECASE,
 )

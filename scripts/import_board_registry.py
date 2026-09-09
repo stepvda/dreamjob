@@ -124,7 +124,15 @@ DEFAULT_CRAWLS = ("CC-MAIN-2026-34", "CC-MAIN-2026-25")
 SOURCE_COMMONCRAWL = "commoncrawl"
 SOURCE_WAYBACK = "wayback"
 SOURCE_HN = "hackernews"
-SOURCES = (SOURCE_COMMONCRAWL, SOURCE_WAYBACK, SOURCE_HN)
+
+#: A board resolved from a named employer's own careers page by
+#: ``scripts/resolve_employer_seed.py``.  This importer never produces one - the
+#: URL indexes it reads do not name these employers, which is the whole reason
+#: the seed exists - but the registry file holds them, so the shape has to be
+#: legal here: one provenance vocabulary, one file.
+SOURCE_EMPLOYER_SEED = "employer_seed"
+
+SOURCES = (SOURCE_COMMONCRAWL, SOURCE_WAYBACK, SOURCE_HN, SOURCE_EMPLOYER_SEED)
 
 #: C8: the registry is re-verified monthly, so the file records the policy it
 #: was written under and a reader can tell how stale it is allowed to be.
@@ -728,11 +736,11 @@ def write_registry(path: Path, document: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Optional: liveness state in the database (migration 092)
+# Optional: liveness state in the database (migrations 092, 131)
 # ---------------------------------------------------------------------------
 
 _DB_COLUMNS = (
-    "id, vendor, slug, name, source, first_seen, last_verified, liveness, "
+    "id, vendor, slug, name, source, first_seen, last_verified, state, "
     "last_status, job_count, consecutive_failures, updated_at"
 )
 
@@ -745,9 +753,10 @@ def board_row_id(vendor: str, slug: str) -> str:
 def load_into_db(boards: list[Board], db_path: Path | None = None) -> dict[str, int]:
     """Upsert the registry into ``board_registry`` (migration 092).
 
-    The liveness columns belong to the nightly job, so they are read back and
-    preserved: an import must never reset ``last_verified``, or the next
-    nightly run re-verifies every board it verified yesterday.
+    The liveness columns belong to the nightly job and to ``mark_gone``, so they
+    are read back and preserved: an import must never reset ``last_verified``
+    (the next nightly run would re-verify every board it verified yesterday) and
+    must never resurrect a board this installation retired (migration 131).
     """
     from dreamjob.db.connection import query_all, upsert_row, utcnow
 
@@ -770,7 +779,7 @@ def load_into_db(boards: list[Board], db_path: Path | None = None) -> dict[str, 
                 or [now[:10]]
             ),
             "last_verified": (prior or {}).get("last_verified") or board.last_verified,
-            "liveness": (prior or {}).get("liveness") or "unverified",
+            "state": (prior or {}).get("state") or "unverified",
             "last_status": (prior or {}).get("last_status"),
             "job_count": (prior or {}).get("job_count"),
             "consecutive_failures": (prior or {}).get("consecutive_failures") or 0,

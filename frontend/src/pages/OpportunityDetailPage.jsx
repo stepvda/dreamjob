@@ -34,6 +34,8 @@ import {
   formatPercent,
   useFetch,
 } from '../components/ui'
+import EmployerKindBadge from '../components/EmployerKindBadge'
+import { PostingOnBehalfNote, UndisclosedEmployer } from './employers'
 
 const TIMING_LABELS = { apply_now: 'Apply now', favourable: 'Favourable window' }
 
@@ -287,6 +289,14 @@ export default function OpportunityDetailPage() {
         <div className="row row-wrap" style={{ gap: 8 }}>
           <h3 style={{ margin: 0, fontSize: 18 }}>{o.title}</h3>
           <KindBadge kind={o.kind} />
+          {/* FR-143: a different axis from KindBadge - who is hiring, not how
+              the opening was found. */}
+          <EmployerKindBadge
+            tag={o.employer}
+            companyId={o.company_id}
+            companyName={o.company_name}
+            onChange={reload}
+          />
           {o.timing_flag && (
             <Badge tone="warn">{TIMING_LABELS[o.timing_flag] || human(o.timing_flag)}</Badge>
           )}
@@ -460,6 +470,13 @@ export default function OpportunityDetailPage() {
         </div>
       </div>
 
+      {/* FR-143/FR-281: when the employer is not the poster, the company card
+          below is about the agency.  This says so, in words, before the reader
+          gets there - and offers the questions that would make the employer
+          knowable. */}
+      <UndisclosedEmployer tag={o.employer} />
+      <PostingOnBehalfNote tag={o.employer} />
+
       <div className="grid grid-2" style={{ marginTop: 14 }}>
         {/* --- Company (FR-222) ---------------------------------------------- */}
         <div className="card">
@@ -515,8 +532,9 @@ export default function OpportunityDetailPage() {
           </div>
           {o.comp_max == null ? (
             <p className="small muted">
-              No range has been estimated for this role yet. The compensation pass on the
-              campaign fills this in from posted ranges and market observations.
+              No range has been estimated for this role yet. Recalculating the campaign fills
+              this in from comparable posted ranges and market observations; “Rescore” on this
+              page does the same for this role alone.
             </p>
           ) : (
             <>

@@ -20,10 +20,12 @@ one when they are done.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
-from dreamjob.config import get_settings
+from dreamjob.config import REPO_ROOT, get_settings
 from dreamjob.db.migrator import migrate
 
 
@@ -40,3 +42,83 @@ def scratch_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]
     yield
     patch.undo()
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_connection_cache() -> Iterator[None]:
+    """Never hand a test a connection another test opened.
+
+    ``db.connection`` caches one SQLite connection per thread per path string,
+    and ``pyproject`` sets ``tmp_path_retention_policy = "failed"``, so a
+    passing test's ``tmp_path`` is deleted and pytest hands the *same numbered
+    path* to a later test.  The path string matches, the cache hits, and the
+    second test writes into the first one's deleted inode - which still holds
+    the first one's rows.  The symptom is a mystery ``UNIQUE constraint
+    failed: job_seeker.email`` in a module that isolates itself properly and
+    passes when run alone (tests/unit/test_mail_dispatch.py).
+
+    Forgetting the cache around every test costs microseconds - SQLite opens a
+    file - and removes the whole class.  The connections are dropped rather
+    than closed first, so a test that is still holding one keeps working.
+    """
+    from dreamjob.db import connection as _c
+
+    def _forget() -> None:
+        for key in [k for k in vars(_c._local) if k.startswith("conn_")]:
+            conn = getattr(_c._local, key, None)
+            delattr(_c._local, key)
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - a connection still in use is not ours to break
+                pass
+
+    _forget()
+    yield
+    _forget()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _installed_database_is_out_of_reach(scratch_database: None) -> Iterator[None]:
+    """Make the leak impossible, not merely unlikely (plan item C5).
+
+    Pointing ``DREAMJOB_DB_PATH`` at a scratch file is enough right up until
+    something resolves a path of its own, or reads the setting before the patch
+    lands, and then the suite writes into ``data/dreamjob.db`` again and nobody
+    notices for weeks.  That is not hypothetical: it is how ``stub_board`` and
+    ``broken_board`` were catalogued as real sources, and the 104 plan items
+    naming test stubs that migration 132 had to delete are what it cost.
+
+    ``sqlite3.connect`` is the one door every database access goes through, so
+    the rule is enforced at the door: no unit test may open a database inside
+    the repository's ``data/`` directory, whatever it thinks its settings say.
+    A test that genuinely needs the installed data is not a unit test.
+    """
+    installed = (REPO_ROOT / "data").resolve()
+    real_connect = sqlite3.connect
+
+    def _is_installed(database: object) -> bool:
+        text = str(database)
+        if not text or text == ":memory:":
+            return False
+        if str(installed) in text:  # absolute path, or a file: URI naming one
+            return True
+        try:
+            return installed in Path(text).resolve().parents
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    def guarded(database, *args, **kwargs):  # noqa: ANN001, ANN202 - sqlite3's own signature
+        if _is_installed(database):
+            raise RuntimeError(
+                f"A unit test tried to open the installed database ({database!r}). "
+                "Unit tests run against the scratch file this conftest creates; writing "
+                "to data/ is how test fixtures were catalogued as real sources (C5). "
+                "Use tmp_path, or read the installed data from a script instead."
+            )
+        return real_connect(database, *args, **kwargs)
+
+    sqlite3.connect = guarded
+    try:
+        yield
+    finally:
+        sqlite3.connect = real_connect

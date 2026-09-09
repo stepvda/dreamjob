@@ -68,6 +68,20 @@ def format_period(
 # ---------------------------------------------------------------------------
 
 
+def _same_address(value: str) -> str:
+    """Fold two spellings of one address together, for the contact line only.
+
+    An export writes the same profile as ``linkedin.com/in/x`` in one field and
+    ``www.linkedin.com/in/x`` in another; the header should print it once.  The
+    fold is for display and is never applied to a stored value.
+    """
+    key = str(value or "").strip().casefold().rstrip("/")
+    for prefix in ("https://", "http://"):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    return key.removeprefix("www.")
+
+
 @dataclass
 class CvContact:
     name: str = ""
@@ -79,10 +93,21 @@ class CvContact:
     websites: list[str] = field(default_factory=list)
 
     def lines(self) -> list[str]:
-        out = [v for v in (self.location, self.email, self.phone) if v]
-        if self.linkedin_url:
-            out.append(self.linkedin_url)
-        out.extend(self.websites)
+        """The contact line under the name, each address printed once.
+
+        ``linkedin_url`` is *taken from* ``websites`` upstream - the LinkedIn
+        export labels one of the sites and ``linkedin_pdf`` copies its url into
+        the dedicated field - so without the fold the header prints the same
+        profile address twice.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in (self.location, self.email, self.phone, self.linkedin_url, *self.websites):
+            text = str(value or "").strip()
+            key = _same_address(text)
+            if text and key not in seen:
+                seen.add(key)
+                out.append(text)
         return out
 
 

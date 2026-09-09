@@ -89,6 +89,15 @@ _TLD = (
 _SCHEME_URL_RE = re.compile(r"https?://([a-z0-9.-]+)", re.I)
 _BARE_DOMAIN_RE = re.compile(r"\b((?:[a-z0-9-]+\.)+" + _TLD + r")\b", re.I)
 _PHONE_RE = re.compile(r"(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?){2,5}\d{2,4}")
+#: A span of years - "2015-2017", "(2015–2017)" - which ``_PHONE_RE`` otherwise
+#: reads as an eight-digit telephone number.  Every CV and motivation document
+#: dates its experience that way, and a leak_phone finding is ``high``, which
+#: makes ``leak_scan_status`` fail and blocks approval with *no* override
+#: (NFR-206, FR-324) - so a date would permanently bar the package it appears
+#: in.  Written narrowly: two four-digit years in a plausible range, a dash
+#: between them, nothing else.  A real number keeps its separators and its
+#: digit groups and does not match this.
+_YEAR_SPAN_RE = re.compile(r"^(?:19|20)\d{2}\s*[-–—]\s*(?:19|20)\d{2}$")
 _WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 _CAP_TOKEN = re.compile(r"[A-ZÀ-ÖØ-Þ][\w&'’.\-]*", re.UNICODE)
 _SENTENCE_START = re.compile(r"(?:^|[.!?:;\n]\s*)$")
@@ -682,6 +691,11 @@ def scan_leakage(
                     )
                 )
         for match in _PHONE_RE.finditer(masked):
+            # Strip the bracket the phone pattern may have swallowed from
+            # "(2015-2017)" before deciding what the span actually is.
+            span = match.group(0).strip("()[] \t")
+            if _YEAR_SPAN_RE.match(span):
+                continue
             number = re.sub(r"\D", "", match.group(0))
             if len(number) >= 8 and number not in provenance.phones:
                 findings.append(
@@ -753,12 +767,27 @@ JUDGE_SCHEMA = (
 
 
 def judge(
-    document_text: str, facts: ProfileFacts, llm: LLMClient, *, entity_id: str | None = None
+    document_text: str,
+    facts: ProfileFacts,
+    llm: LLMClient,
+    *,
+    allow: set[str] | None = None,
+    language: str = "en",
+    entity_id: str | None = None,
 ) -> tuple[list[Finding], str | None]:
     """Ask a model for claims the profile does not support.
 
     Every returned claim is re-checked against the profile text before it is
     recorded, so a judge hallucination cannot fail a document either.
+
+    ``allow`` is the same set :func:`check_free_text` is given for this CV - the
+    company and the role this application is *for*.  Both checks have to agree
+    about the same document: a tailored CV names its target ("...the platform
+    at Berliner Verlag"), the deterministic check permits that name explicitly,
+    and without the same set here the escalation test below would read it as an
+    invented employer and fail the package on a name the sibling check just
+    allowed.  That would also break this module's own rule that the judge
+    "can never fail a document on its own" (FR-322, RK-03).
     """
     try:
         response = complete_json(
@@ -797,7 +826,7 @@ def judge(
         # the quoted claim is itself absent from the profile - which is a
         # deterministic test.  Everything else it reports is advisory, so a
         # model that dislikes the tone cannot block a dispatch on its own.
-        unsupported = unsupported_tokens(quote, facts)
+        unsupported = unsupported_tokens(quote, facts, allow=allow, language=language)
         severity = "high" if unsupported else min(severity, "medium", key=_SEVERITY.get)
         detail = str(item.get("why") or "The profile does not support this claim.")[:500]
         if unsupported:
@@ -811,17 +840,29 @@ def judge(
 _SEVERITY = {"high": 0, "medium": 1, "low": 2}
 
 
-def unsupported_tokens(text: str, facts: ProfileFacts) -> list[str]:
-    """Figures and names in a passage that the profile does not contain."""
+def unsupported_tokens(
+    text: str, facts: ProfileFacts, *, allow: set[str] | None = None, language: str = "en"
+) -> list[str]:
+    """Figures and names in a passage that the profile does not contain.
+
+    ``allow`` names that are legitimately in the document without being in the
+    profile - the company and role this application is for - and is folded the
+    same way :func:`check_free_text` folds its own, so the two checks cannot
+    disagree about one name.
+    """
     out: list[str] = []
     years = {m.group(0) for m in _YEAR_RE.finditer(text)}
     out += sorted(years - facts.years)
     out += sorted(digits(text) - years - facts.figures)
-    for phrase in capitalised_phrases(text):
+    allowed_entities = {fold_org(a) for a in (allow or set()) if a}
+    allowed_words = {word for entity in allowed_entities for word in entity.split()}
+    for phrase in capitalised_phrases(text, language):
         key = fold_org(phrase)
-        if not key or matches_any(phrase, facts.employers) or facts.has_text(phrase):
+        if not key or key in allowed_entities:
             continue
-        if all(word in facts.words for word in key.split()):
+        if matches_any(phrase, facts.employers) or facts.has_text(phrase):
+            continue
+        if all(word in facts.words or word in allowed_words for word in key.split()):
             continue
         out.append(phrase)
     return out
@@ -896,7 +937,10 @@ def run_checks(
     )
 
     if llm is not None and use_judge:
-        judged, error = judge(document.plain_text(), facts, llm, entity_id=entity_id)
+        judged, error = judge(
+            document.plain_text(), facts, llm,
+            allow=allow, language=document.language, entity_id=entity_id,
+        )
         report.findings = dedupe(report.findings + judged)
         report.judge_ran = error is None
         report.judge_error = error

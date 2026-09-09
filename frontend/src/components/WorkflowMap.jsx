@@ -48,7 +48,8 @@ export const PHASES = [
     caption: 'What the market actually holds',
     stages: [
       { key: 'companies', icon: 'companies', label: 'Company profiles', to: '/companies', hint: 'Standardised profiles and five-year financials' },
-      { key: 'opportunities', icon: 'opportunities', label: 'Opportunities', to: '/opportunities', hint: 'Vacancies and speculative openings', term: 'speculative_opening' },
+      { key: 'opportunities', icon: 'opportunities', label: 'Opportunities', to: '/opportunities', hint: 'Advertised vacancies, normalised and de-duplicated' },
+      { key: 'speculative', icon: 'speculative', label: 'Unadvertised roles', to: '/opportunities?kind=speculative', hint: 'Roles a company is likely to need but has not advertised', term: 'speculative_opening' },
       { key: 'scoring', icon: 'chart', label: 'Ranking', to: '/opportunities', hint: 'Explainable scores you can override' },
     ],
   },

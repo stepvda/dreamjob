@@ -94,20 +94,67 @@ NUTS1_REGIONS: dict[str, tuple[str, ...]] = {
     "LU": ("LU0",),
 }
 
-#: NACE Rev.2 sections used as the sector dimension.
+#: **NACE Rev 2.1** sections, which is the vocabulary EURES's sector facet
+#: actually uses - not Rev 2, and the difference is not cosmetic.
 #:
-#: N (administrative and support service activities) is *excluded*: it is where
-#: the staffing agencies sit, and they are 86,014 of Belgium's 232,496 EURES
-#: rows, with a single agency supplying 208 of 1,000 sampled vacancies.  Those
-#: rows carry the agency as the employer, so they cost requests and yield almost
-#: no new company identities.  T (households as employers) and U
-#: (extraterritorial bodies) are omitted for the same reason of yield, which is
-#: what makes BE+NL 7 regions x 18 sections = 126 partitions.
+#: Rev 2.1 splits Rev 2's J into J (publishing, broadcasting, content) and K
+#: (telecommunications, computing), so every later letter shifts by one:
+#:
+#:     N = professional, scientific and technical activities (69-75)
+#:     O = administrative and support services (77-82), **including 78,
+#:         employment activities - the staffing agencies**
+#:     P = public administration
+#:
+#: The raw search response's ``NACE_CODE`` facet carries 22 letters a-v where
+#: Rev 2 has 21 (A-U), which is the tell; and for the 24 employers whose KBO
+#: entity resolved, Rev 2.1 letters explain 72% of the sections their rows were
+#: fetched under against 18% for Rev 2 (docs/Interim_Agencies_Proposal.md
+#: section 2.5).
+#:
+#: This list used to exclude N "because that is where the staffing agencies
+#: sit".  Under the letters EURES uses, that skipped engineering consultancies,
+#: law firms and architects - a live Flanders sweep puts 31,609 of 68,190 rows
+#: (46%) in N - and removed **zero** agency rows, while the O partition was
+#: collected to its 500-record cap and turned out to be 29 agencies out of 36
+#: employers.  N is restored here.
+#:
+#: O is *not* excluded either, and swapping the letters would be the same
+#: mistake with better spelling.  A vacancy is filed under every section on its
+#: employer's NACE list, so excluding O would lose whole legitimate sectors
+#: (cleaning, facility management, security - CleanLease, ISS, Petit
+#: Forestier) and would still not remove agencies: NOEL FRANKLIN's 56 rows
+#: arrive under C, F, N and O, and 55 of them under C alone.  **Agency
+#: membership is a per-employer tag** (``company_employer_kind``, migration
+#: 110), established downstream by ``pipeline/employer_resolver.py``, never a
+#: partition exclusion.  Refusing to fetch a section is not a way of not
+#: employing an agency; it is a way of not seeing an employer.
+#:
+#: What is left out is left out for yield alone: T (households as employers of
+#: domestic personnel), U (extraterritorial bodies) and V (the 22nd letter the
+#: Rev 2.1 facet carries and the taxonomy does not name) have no employers a
+#: campaign can act on.  BE+NL is therefore 7 regions x 19 sections = 133
+#: partitions.
 NACE_SECTIONS: tuple[str, ...] = (
     "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
-    "K", "L", "M", "O", "P", "Q", "R", "S",
+    "K", "L", "M", "N", "O", "P", "Q", "R", "S",
 )
-EXCLUDED_NACE_SECTIONS = frozenset({"N", "T", "U"})
+EXCLUDED_NACE_SECTIONS = frozenset({"T", "U", "V"})
+
+#: How much of a partition's page allocation a section gets.  1.0 unless a
+#: measurement says otherwise, and there is exactly one such measurement.
+#:
+#: O holds 59,241 of last week's 68,190 Flanders rows (86%), which makes it the
+#: one partition that is not narrow: it behaves like the *unpartitioned* list
+#: this whole scheme exists to avoid, and the unpartitioned list runs at 205
+#: distinct employers in its first 1,000 rows and 4 in its next 300.  The
+#: corpus bears that out - the O partition ran to its 500-record cap and
+#: yielded 36 employers, 7% distinct against the ~20% the narrow partitions
+#: sustain.  Half the pages is where the marginal request stops buying
+#: identities, not a quota on a sector: O still runs, its employers still
+#: arrive, and they also arrive under their other sections.  This is a *yield*
+#: lever and nothing else - it is not an agency control, it does not know what
+#: an agency is, and it must never be used as one.
+SECTION_PAGE_WEIGHT: dict[str, float] = {"O": 0.5}
 
 #: Freshness window of one sweep.  Campaign A sweeps LAST_MONTH; a repeat run
 #: inside the vacancy staleness window asks for LAST_WEEK instead.
@@ -124,7 +171,7 @@ EURES_RESULTS_PER_PAGE = 50
 
 #: An adapter that partitions its sweep says so by listing the query keys it
 #: reads.  Until the EURES adapter declares them (plan item N2), the planner
-#: would be emitting 126 items that all fetch the same country-wide list, so it
+#: would be emitting 133 items that all fetch the same country-wide list, so it
 #: degrades to one item per country and period instead - fewer targets, but no
 #: request is spent twice.
 EURES_PARTITION_KEYS: tuple[str, ...] = ("nuts_codes", "nace_section", "publication_period")
@@ -412,6 +459,17 @@ def eures_partitions(
     each item, and the whole sweep is bounded by
     :data:`EURES_REQUEST_BUDGET` requests, which at europa.eu's stated
     ``Crawl-delay: 10`` is 100 minutes of the campaign's four hours.
+
+    One partition is not like the others and is sized accordingly.  O carries
+    86% of the region's rows, so its pages behave like the deep pages of an
+    unpartitioned list; :data:`SECTION_PAGE_WEIGHT` gives it half the
+    allocation, which is the lever the arithmetic actually offers.  Restoring N
+    costs 7 partitions and 28 requests at four pages each; halving O gives 14
+    of them back, so the corrected sweep is 518 requests against the previous
+    504 - 2.3% more, and it stops discarding professional services.  A campaign
+    that wants a different shape passes ``eures_section_page_weights``; the
+    honest way to spend less on agency-heavy rows is fewer pages there, never
+    a section the sweep refuses to look at.
     """
     codes = [c.upper()[:2] for c in countries if c] or ["BE"]
     periods = _periods(caps)
@@ -436,10 +494,14 @@ def eures_partitions(
         EURES_MAX_PAGES_PER_PARTITION,
         max(1, int(caps.get("max_pages_per_source") or EURES_MAX_PAGES_PER_PARTITION)),
     )
-    pages = max(1, min(ceiling, budget // len(partitions)))
+    weights = _section_weights(caps)
+    # The budget buys "weighted partitions": a section worth half a partition's
+    # pages consumes half a partition's share of it.
+    unit = budget / max(1e-9, sum(weights.get(p[2], 1.0) for p in partitions))
 
     items: list[PlanItem] = []
     for country, region, section, period in partitions:
+        pages = max(1, min(ceiling, int(unit * weights.get(section, 1.0))))
         native: dict[str, Any] = {
             # ISO-2 is what the adapter searches with today; the NUTS-1 code is
             # the partition it will narrow to once it reads the key (N2).
@@ -473,6 +535,29 @@ def eures_partitions(
             )
         )
     return items
+
+
+def _section_weights(caps: dict) -> dict[str, float]:
+    """Per-section page weights, with a campaign's override on top of the default.
+
+    Read defensively, like every other cap: an override that is not a number, or
+    is negative, is ignored rather than silently zeroing a section's pages - a
+    weight of 0 would be an exclusion wearing a number, and exclusions are the
+    thing this module got wrong for a year.  The floor of one page per partition
+    in :func:`eures_partitions` enforces that too.
+    """
+    weights = dict(SECTION_PAGE_WEIGHT)
+    stated = caps.get("eures_section_page_weights")
+    if isinstance(stated, dict):
+        for section, value in stated.items():
+            try:
+                weight = float(value)
+            except (TypeError, ValueError):
+                log.warning("Ignoring non-numeric EURES page weight %r=%r", section, value)
+                continue
+            if weight > 0:
+                weights[str(section).upper()[:1]] = weight
+    return weights
 
 
 def _periods(caps: dict) -> tuple[str, ...]:
@@ -549,6 +634,19 @@ def discover(
             "pages_each": items[0].estimated_pages if items else 0,
             "partitioned": partitioned,
             "excluded_nace_sections": sorted(EXCLUDED_NACE_SECTIONS),
+            # What the sweep will actually spend, so the cost of including a
+            # section is visible in the plan rather than only in the clock:
+            # every request is ten seconds of the campaign's four hours.
+            "requests": sum(i.estimated_pages for i in items),
+            "pages_by_section": {
+                section: pages
+                for section, pages in sorted(
+                    {
+                        str(i.native_query.get("nace_section") or "-"): i.estimated_pages
+                        for i in items
+                    }.items()
+                )
+            },
         }
 
     found.stats["targets"] = found.target_count

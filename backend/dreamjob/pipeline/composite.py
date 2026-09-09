@@ -526,8 +526,9 @@ def _synthesise(
             # this profile spent 21k tokens reasoning and 6k answering, and a
             # 24,000 budget truncated the JSON mid-statement - which is not a
             # failed call but a *silent* one, because the fallback below then
-            # produces a composite with no narrative in it.  48,000 leaves the
-            # worst run seen so far at 55% of the budget.
+            # produces a composite with no narrative in it.  Syntheses of the
+            # same profile have spent 17,012, 23,693 and 26,481 tokens; 48,000
+            # leaves the worst of those at 55% of the budget.
             max_tokens=48_000,
         )
     except (LLMError, BudgetExhausted) as exc:

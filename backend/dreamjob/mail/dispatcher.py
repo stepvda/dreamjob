@@ -38,7 +38,6 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dreamjob.config import get_settings
-from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import contacts as contacts_repo
 from dreamjob.db.repositories import dispatch as repo
 from dreamjob.mail import composer
@@ -505,6 +504,7 @@ def send_package(
             # record of how this message came to be sent.
             "window_overridden": bool(ignore_window),
         },
+        now=moment,
     )
 
 
@@ -518,8 +518,19 @@ def _deliver(
     approved_by: str,
     follow_up_after_days: int | None,
     settings_snapshot: dict,
+    now: datetime | None = None,
 ) -> dict:
-    """Hand the message to the backend and write the FR-326 log entry."""
+    """Hand the message to the backend and write the FR-326 log entry.
+
+    ``now`` is the moment the FR-325 rails were evaluated at, not a second
+    reading of the clock.  Stamping ``sent_at`` from ``datetime.now()`` instead
+    made the pacing ledger disagree with the guard that had just passed: the
+    row said the message went out now, while the 90-second interval and the
+    daily cap had been measured against ``now``.  In production the two are the
+    same instant; anywhere a caller supplies the moment - the queue drain, a
+    test, a replay - they were not, and the next send was refused as
+    ``rate_limited`` against a time nobody had sent at.
+    """
     try:
         result: SendResult = backend.send(message)
     except MailBackendError as exc:
@@ -538,7 +549,8 @@ def _deliver(
         )
         raise
 
-    sent_at = utcnow()
+    moment = now or datetime.now(UTC)
+    sent_at = moment.isoformat(timespec="seconds")
     values: dict[str, Any] = {
         "message_id": result.message_id or message.message_id,
         "thread_id": result.thread_id,
@@ -551,7 +563,7 @@ def _deliver(
     }
     if follow_up_after_days:
         values["follow_up_due_at"] = (
-            datetime.now(UTC) + timedelta(days=follow_up_after_days)
+            moment + timedelta(days=follow_up_after_days)
         ).isoformat(timespec="seconds")
     repo.update_dispatch(dispatch_id, values)
 
@@ -711,9 +723,13 @@ def process_queue(job_seeker_id: str, *, limit: int = 25, now: datetime | None =
                 approved_by=row.get("approved_by") or "system",
                 follow_up_after_days=None if is_follow_up else follow_up_days(),
                 settings_snapshot={"timezone": decision.timezone, "from_queue": True},
+                now=moment,
             )
             if is_follow_up and parent:
-                repo.update_dispatch(parent["id"], {"follow_up_sent_at": utcnow()})
+                repo.update_dispatch(
+                    parent["id"],
+                    {"follow_up_sent_at": moment.isoformat(timespec="seconds")},
+                )
             results.append(outcome)
         except MailBackendError as exc:
             results.append({"dispatch_id": row["id"], "status": "failed", "reason": str(exc)})
@@ -979,6 +995,9 @@ def send_follow_up(
         approved_by=approved_by,
         follow_up_after_days=None,
         settings_snapshot={"timezone": decision.timezone, "kind": "follow_up"},
+        now=moment,
     )
-    repo.update_dispatch(dispatch_id, {"follow_up_sent_at": utcnow()})
+    repo.update_dispatch(
+        dispatch_id, {"follow_up_sent_at": moment.isoformat(timespec="seconds")}
+    )
     return outcome

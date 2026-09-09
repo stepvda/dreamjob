@@ -1306,6 +1306,13 @@ def test_administration_models_sources_activity_and_audit(signed_in, page):
         assert "Append-only" in page.inner_text("body"), (
             "the audit trail does not say it is append-only (NFR-702)"
         )
+        # The heading is part of the tab, not of its answer: switching tabs
+        # renders the card immediately and fetches the entries afterwards, and
+        # a skeleton has neither rows nor an empty state. Asserting on either
+        # before the fetch lands reads "no rows and nothing said" off a card
+        # that is still loading, so wait for the screen to settle first — as
+        # the Activity step above and the Data step below already do.
+        wait_for_ready(page)
         # It opens on approvals and dispatches. Either there are some, or the
         # empty state has to say that the filter is what emptied it — an
         # unexplained blank table is the failure this is looking for.

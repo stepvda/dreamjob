@@ -45,6 +45,7 @@ DEFAULT_MAX_TOKENS = 4096
 TASK_CHEAP = {
     "extract.vacancy", "extract.company", "extract.contact", "extract.table",
     "classify.reply", "normalise.skill", "summarise.page",
+    "classify.employer_kind",
 }
 TASK_STRONG = {
     "profile.composite", "profile.dreamjob", "plan.campaign", "company.speculative",
@@ -155,6 +156,19 @@ _INJECTION_PATTERNS = [
         r"\bBEGIN (SYSTEM|INSTRUCTION)",
     )
 ]
+
+
+def find_injection_markers(text: str | None) -> list[str]:
+    """Instruction-shaped fragments in untrusted text, verbatim (NFR-205).
+
+    :func:`wrap_untrusted` annotates these before a model sees them.  Callers
+    that never reach a model - the free employer signals read scraped
+    advertisements with regexes only - use this to *report* the attempt, which
+    is the other half of NFR-205: the planted instruction changes nothing, and
+    somebody is told it was there.
+    """
+    return [m.group(0) for pat in _INJECTION_PATTERNS for m in pat.finditer(text or "")]
+
 
 _UNTRUSTED_OPEN = "<<<UNTRUSTED_DATA id={id}>>>"
 _UNTRUSTED_CLOSE = "<<<END_UNTRUSTED_DATA id={id}>>>"

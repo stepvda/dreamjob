@@ -418,6 +418,31 @@ export const PAGE_HELP = {
     caution:
       'Two actions on this screen cannot be undone. The redaction sweep destroys prompt and response text older than the cutoff rather than archiving it, and erasing a job seeker deletes the account and every private row behind it.',
   },
+  '/apply': {
+    title: 'Apply browser',
+    purpose:
+      'The whole application, one job at a time: the letter that goes out, the CV that is attached to it, the two documents that are yours alone, and the checks that stand between them and a recipient. Nothing is sent from here while the machine is in dry run \u2014 the banner at the top says which it is.',
+    steps: [
+      'Pick a job on the left. The list shows every job you selected with its company, its contact and how far its package has got.',
+      'If nothing has been generated, generate the four documents \u2014 the tailored CV, the briefing, the motivation document and the email.',
+      'Read the Email tab. It is the letter that will be sent and it refers to the CV; edit it in place, or ask for a rewrite with an instruction like \u201cshorter\u201d or \u201clead with the platform work\u201d.',
+      'Open the CV tab and read the actual PDF. This is the file that gets attached, and it is the only one that does.',
+      'Read the Briefing and the Motivation tabs if you want them. Both are for you and neither can be attached to anything.',
+      'Work through Checks: every claim, whether your profile supports it, and what it was matched against. A failure here blocks dispatch.',
+      'Approve, then press Send. In dry run the whole path runs and the finished message is written to disk instead of being sent, and you are told exactly what it contained.',
+    ],
+    tips: [
+      'The two send buttons are never greyed out. Press one: it runs the whole path and reports where it stopped, which is more useful than a button that will not respond.',
+      'Only the tailored CV is ever attached. The briefing and the motivation document are refused by the code that builds an outgoing message, not merely left out of it.',
+      'The first three rows of filter chips narrow the whole selection on the server, so the count is true. The row labelled \u201cthis page\u201d narrows only the rows on screen.',
+      'Approving and sending are two decisions. Approval authorises dispatch; the send window, the pacing rule and the daily cap decide when a message may actually go.',
+      'Changing the CV template re-renders the same facts in another layout and costs nothing. Changing the language rewrites all four documents and withdraws the approval.',
+      'Editing the email re-opens an approved package as a draft, because the consistency check has to read the words you actually wrote.',
+      '\u201cSend all with attachment\u201d always shows a table of exactly who receives what before it will run, however many are in it.',
+    ],
+    caution:
+      'Read the CV before you approve it. The consistency check catches invented employers, dates and titles, but you are the last line of defence against something that is technically true and still wrong for this audience. And these are real people who did not ask to hear from you: every message carries a way to object, and an objection blocks the address permanently for everyone on this installation.',
+  },
 }
 
 /**
@@ -1081,6 +1106,71 @@ export const GLOSSARY = {
       'A term counted across the vacancies this campaign collected, recommended when it appears in at least 15% of them. It is what recruiters in your market are typing, not generic profile advice \u2014 which is why the list is empty rather than invented when no vacancies have been collected yet.',
   },
 
+  // --- The Apply Browser's send guard (RK-05, FR-325) ---------------------
+  dry_run: {
+    term: 'Dry run',
+    body:
+      'The state this installation is in while no message may leave it. Everything up to the finished e-mail runs for real \u2014 the approval rule, the consistency gate, the guard rails in the recipient\u2019s time zone, the message composed with your tailored CV attached \u2014 and the assembled message is then written to disk as an .eml file instead of being handed to a mailbox. It is on by default, and pressing Send while it is on tells you exactly what would have gone out.',
+  },
+  send_guard: {
+    term: 'Where the guard lives',
+    body:
+      'In the mail layer on the server, not in this interface. While the dry run is on, every shipped mail backend refuses to carry a message before the provider is touched, so no screen, no API client and no future code path in this process can send one. That is why the send buttons are left enabled: the button is not what is holding the message back, and pretending otherwise would teach you the wrong thing about your own installation.',
+  },
+
+  // --- Who is actually hiring (FR-143, FR-341, NFR-402) -------------------
+  interim_agency: {
+    term: 'Interim or staffing agency',
+    body:
+      'A staffing, interim or recruitment agency advertises a real vacancy on behalf of an employer it does not name in the advert. About one posting in five here is one, and a third of the Belgian public-service rows. Everything we normally say about a company — its accounts, its trajectory, its values, what it is likely to hire for next — is marked “cannot assess” on these postings rather than computed against the agency, because the agency is not the company you would work for. A consultancy whose staff work at client sites is not an agency: it employs them itself.',
+  },
+  employer_not_disclosed: {
+    term: 'Employer not disclosed',
+    body:
+      'What an agency posting leaves out. Four rows in five name no end client anywhere, and the description they do give — “an international machine-builder near Roeselare” — does not identify one company: the eight richest such descriptions here matched between zero and twenty registered companies each. So the employer is shown as not disclosed, the company-related parts of the score are left uncomputed rather than estimated, and nothing generated for you ever names a guessed employer. Asking the recruiter who the client is settles it — then the briefing can be regenerated against the real company.',
+  },
+  resolution_rung: {
+    term: 'Resolution rung',
+    body:
+      'Which step of the ladder answered “is this organisation the employer?”. Cheapest and most certain first: what is already on record, the pattern of the employer’s own postings, the company register (a Belgian NACE 78.2 is a licensed temporary-employment activity and settles it), how EURES files the employer, and last the company’s own website, read and quoted. A rung either answers or hands down with a reason, and the rung travels with the verdict because a registered activity code and a sentence on a home page are not the same kind of evidence.',
+  },
+
+  // --- What a source ended on, on the live dashboard (FR-185, FR-361) ------
+  collection_outcome: {
+    term: 'What each source did',
+    body:
+      'Every source in the plan ends on one of six answers, and only one of them is a defect. This screen used to add them up into a single “errors” figure, and that figure was useless: of 538, some 308 were job boards that no longer exist, 192 were sources this product declined to read on principle, and about a dozen were things somebody had to fix. Separating them is what makes the dozen findable. The rule is worth stating plainly, because the opposite mistake was made here first: a source that fetched nothing used to be recorded as finished with no errors, and that hid a total collection failure. Nothing is quietened here — an answer nobody recognises counts as a failure, not as a success.',
+  },
+  outcome_succeeded: {
+    term: 'Collected',
+    body:
+      'The source was read and records were written to the knowledge base. This is the only state that means data arrived. A source that answered correctly and simply holds nothing for your query is counted under “skipped” instead, because it produced no record — saying it succeeded would make an empty result look like a full one.',
+  },
+  outcome_blocked: {
+    term: 'Blocked',
+    body:
+      'We declined to read the source, and we were right to. Its robots.txt disallows the path (FR-182), it answered a 403 bot wall, or its terms of service prohibit automated access and no administrator has acknowledged an exception (IR-101). This is not a failure and it is not something to fix: it is a decision, and it is listed source by source with the reason so that it can be defended to anyone who asks how this product collects. Where a source is one that needs an administrator’s acknowledgement, whether that has been given is shown beside it.',
+  },
+  outcome_gone: {
+    term: 'Gone',
+    body:
+      'The target is no longer there: the board answered 404 or 410 for a slug the registry believed was live. Expect a steady number of these. The board registry is harvested from Common Crawl, the Wayback Machine and Hacker News, and liveness was measured at 87.5% for fresh crawl entries and 27.5% for Wayback-only ones — so a dead slug is a fact about the world, not a bug, and the registry learns it once and stops offering it. One thing here is not decay: if an adapter comes back gone for every slug it tries, its URL shape has probably broken, and that is called out separately (NFR-403).',
+  },
+  outcome_failed: {
+    term: 'Failed',
+    body:
+      'Something actually went wrong: a 5xx from the server, a transport error, a parse crash, an adapter exception, or a fetch that produced pages but no record at all. This is the only number on the dashboard that asks anything of you, which is why it is the only one shown in red and the only one given the top of the block. Everything else — declined sources, dead boards, work the page budget has not reached — is an expected outcome and is deliberately kept quiet so that this figure stays legible.',
+  },
+  outcome_skipped: {
+    term: 'Skipped',
+    body:
+      'There was nothing to do. Either you excluded the source when you reviewed the plan (FR-163), or the source was read successfully and stated that it holds nothing matching this query. The second case is a real answer and not an empty one: a partitioned sweep asks narrow questions on purpose, and some of them have no answer. It is kept out of “collected” because no record was written, and out of “failed” because nothing went wrong.',
+  },
+  outcome_capped: {
+    term: 'Not started: page budget',
+    body:
+      'Not an outcome at all, which is why it sits on its own below the rule. These plan items were never asked anything: the run reached its page cap first (FR-186) and stopped, leaving them runnable. Raising the cap and resuming continues them from the checkpoint rather than starting over. A large number here is normal on a broad plan and means only that the campaign is bounded — it says nothing about whether the sources work.',
+  },
 }
 
 

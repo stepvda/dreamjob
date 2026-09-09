@@ -301,7 +301,12 @@ function CreateCampaign({ directives, versions, onClose, onCreated }) {
   const [directiveSetId, setDirectiveSetId] = useState(directives[0]?.id || '')
   const [versionId, setVersionId] = useState(versions[0]?.id || '')
   const [budget, setBudget] = useState('')
-  const [maxPages, setMaxPages] = useState('200')
+  // FR-186: left empty the backend's own ceiling applies (planning.DEFAULT_CAPS,
+  // 10,000 pages).  This field used to default to '200' and was always sent,
+  // which silently overrode that ceiling on every campaign ever created here -
+  // and 200 request-charged pages are spent by the first paginating job board,
+  // so the ATS harvest stage never started.
+  const [maxPages, setMaxPages] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
@@ -401,12 +406,16 @@ function CreateCampaign({ directives, versions, onClose, onCreated }) {
         </Field>
 
         {/* FR-186: hard ceilings are set before anything is fetched. */}
-        <Field label="Maximum pages" hint="A ceiling across every source in the plan.">
+        <Field
+          label="Maximum pages"
+          hint="A ceiling across every source in the plan. Leave empty for the default (10,000)."
+        >
           <input
             type="number"
             min="1"
             step="10"
             value={maxPages}
+            placeholder="default"
             onChange={(e) => setMaxPages(e.target.value)}
           />
         </Field>

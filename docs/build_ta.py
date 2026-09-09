@@ -62,6 +62,20 @@ SH_KEYCOL = "F0EDFB"      # key column fill in the control table
 RULE_LIGHT = "DCE0E7"
 RULE_ACCENT = "5A44C4"
 
+# The five phase hues, in journey order, drawn as the stripe under the cover
+# title. Same values and order as the Functional Design and the SRS, so the
+# three documents present one cover.
+PHASES = ["6D54D8",   # 1 profile
+          "2D6BC8",   # 2 plan
+          "0B7B73",   # 3 discover
+          "9F6011",   # 4 apply
+          "BC3D66"]   # 5 follow up
+
+COVER_LABEL = RGBColor(0x6B, 0x72, 0x80)   # cover metadata labels
+
+PRODUCT = "Dream Job"
+TAGLINE = "AI-assisted job discovery and application platform"
+
 BODY_FONT = "Calibri"
 HEAD_FONT = "Calibri Light"
 MONO_FONT = "Consolas"
@@ -826,47 +840,65 @@ def blank_header_footer(section):
 # Title page
 # --------------------------------------------------------------------------
 
-def build_title_page(b, meta, doc_title):
-    """Lockup, title, the status as subtitle, then the control fields.
+def colour_rule(doc, width_in=3.4, height_pt=6):
+    """The five phase hues butted together into one flat stripe.
 
-    The lockup already reads "Dream Job", so the subtitle line carries the
-    document's status rather than repeating the product name.
+    A one-row table rather than a paragraph border, because each segment
+    needs its own fill. Borders are painted in each segment's own colour so
+    no hairline shows between them.
+    """
+    t = doc.add_table(rows=1, cols=len(PHASES))
+    t.style = "Table Grid"
+    fixed_layout(t)
+    table_cell_margins(t, top=0, bottom=0, left=0, right=0)
+    for cell, colour in zip(t.rows[0].cells, PHASES):
+        shade_cell(cell, colour)
+        cell_borders(cell, top=(2, colour), left=(2, colour),
+                     right=(2, colour), bottom=(2, colour))
+        cp = cell.paragraphs[0]
+        cp.paragraph_format.space_after = Pt(0)
+        cp.paragraph_format.line_spacing = Pt(height_pt)
+        cp.add_run().font.size = Pt(2)
+    set_widths(t, [width_in / len(PHASES)] * len(PHASES))
+    return t
+
+
+def build_title_page(b, meta, doc_title):
+    """Lockup, document name, phase stripe, then the control fields.
+
+    Shared with the Functional Design and the SRS: same lockup width, same
+    stripe, same metadata block. The lockup already reads "Dream Job", so the
+    title below it is the document's own name rather than a second wordmark,
+    and the product name returns only in the tagline.
     """
     doc = b.doc
-    b.spacer(30)
+    spacer = doc.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(72)
 
     if LOCKUP.exists():
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.space_after = Pt(0)
-        p.add_run().add_picture(str(LOCKUP), width=Inches(2.30))
-
-    b.spacer(150)
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(58)
+        p.add_run().add_picture(str(LOCKUP), width=Inches(3.1))
 
     p = doc.add_paragraph()
-    p.paragraph_format.space_after = Pt(0)
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(10)
     p.paragraph_format.line_spacing = 1.0
-    style_run(p.add_run("Technical Architecture"), size=36, color=INK,
-              bold=False)
-    for r in p.runs:
-        r.font.name = HEAD_FONT
+    r = style_run(p.add_run("Technical Architecture"), size=34, color=INK,
+                  bold=True)
+    r.font.name = BODY_FONT
+
+    colour_rule(doc, width_in=3.4, height_pt=6)
+
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(16)
+    p.paragraph_format.space_after = Pt(200)
+    style_run(p.add_run("%s · %s" % (PRODUCT, TAGLINE)), size=12, color=SLATE)
 
     status = strip_md(meta.get("Status", ""))
-    if status:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(4)
-        p.paragraph_format.space_after = Pt(16)
-        style_run(p.add_run(status), size=16, color=VIOLET, bold=False)
-        for r in p.runs:
-            r.font.name = HEAD_FONT
-
-    rule = doc.add_paragraph()
-    rule.paragraph_format.space_before = Pt(0)
-    rule.paragraph_format.space_after = Pt(30)
-    para_borders(rule, bottom=(18, RULE_ACCENT))
-
     fields = [
-        ("Document", strip_md(meta.get("Document", "Technical Architecture"))),
         ("Version", strip_md(meta.get("Version", ""))),
         ("Date", strip_md(meta.get("Date", ""))),
         ("Author", AUTHOR),
@@ -875,39 +907,23 @@ def build_title_page(b, meta, doc_title):
     fields = [(k, v) for k, v in fields if v]
 
     t = doc.add_table(rows=len(fields), cols=2)
-    t.style = "Table Grid"
-    set_widths(t, [1.25, 4.05])
-    table_cell_margins(t, top=50, bottom=50, left=0, right=80)
+    fixed_layout(t)
+    table_cell_margins(t, top=30, bottom=30, left=0, right=90)
     for ri, (k, v) in enumerate(fields):
         for ci, text in enumerate((k, v)):
             cell = t.cell(ri, ci)
             cell.text = ""
             cp = cell.paragraphs[0]
-            cp.paragraph_format.space_after = Pt(0)
+            cp.paragraph_format.space_after = Pt(2)
             if ci == 0:
-                r = cp.add_run(text.upper())
-                style_run(r, size=8, color=FAINT, bold=True)
+                r = style_run(cp.add_run(text.upper()), size=8,
+                              color=COVER_LABEL, bold=True)
                 r.font.name = BODY_FONT
-                rPr = r._r.get_or_add_rPr()
-                rPr.append(_el("w:spacing", val="24"))   # letter-spaced label
             else:
-                add_inline(cp, text, size=10.5, color=INK)
+                add_inline(cp, text, size=10, color=INK)
             cell_borders(cell, top="none", bottom="none", left="none",
                          right="none")
-
-    b.spacer(16)
-    specifies = strip_md(meta.get("Specifies", ""))
-    if specifies:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(22)
-        para_borders(p, top=(4, RULE_LIGHT))
-        add_inline(p, "Specifies " + specifies, size=9, color=MUTED)
-    companion = strip_md(meta.get("Companion", ""))
-    if companion:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        add_inline(p, "Companion documents: " + companion, size=9,
-                   color=MUTED)
+    set_widths(t, [1.15, 5.12])
 
 
 # --------------------------------------------------------------------------

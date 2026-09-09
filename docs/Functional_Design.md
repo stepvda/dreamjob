@@ -90,11 +90,11 @@ throughout the product:
 Cool at the start (working out what you want), warm at the end (where messages
 actually leave the building).
 
-**The "Where I am" screen** renders this as a live map. Each of the fifteen
+**The "Where I am" screen** renders this as a live map. Each of the sixteen
 stages reports one of five states — done, running, ready, **blocked and why**,
 or not started — with real counts, and links to the screen that advances it.
 A blocked stage never just says "not done"; it says what would unblock it,
-because the commonest way to get lost in a fifteen-stage pipeline is not knowing
+because the commonest way to get lost in a sixteen-stage pipeline is not knowing
 the next move. A one-line version of the same map sits at the top of every
 working screen.
 

@@ -207,8 +207,10 @@ def _employers(persona: Persona, limit: int = 3) -> list[str]:
 
 def _keywords(text: str) -> set[str]:
     """The words in ``text`` that would identify it if they came back."""
-    words = re.findall(r"[A-Za-z][A-Za-z+#./-]{2,}", str(text).lower())
-    return {w.strip("./-") for w in words if w not in _NOISE and len(w) > 3}
+    # Hyphens, dots and plus signs are part of the word ("front-end",
+    # "Node.js", "C++"); a slash separates two of them ("React/CSS").
+    words = re.findall(r"[A-Za-z][A-Za-z+#.-]{2,}", str(text).lower())
+    return {w.strip(".-") for w in words if w not in _NOISE and len(w) > 3}
 
 
 def _mentions(haystack: str, wanted: str) -> bool:
@@ -824,25 +826,40 @@ def test_the_dream_job_statement_becomes_a_model_the_seeker_confirms(page, perso
         expect(page.get_by_text("Not confirmed")).to_be_visible()
         screenshot(page, "dream job — model extracted")
 
-    with step(page, "Check the target roles are about an AI developer"):
+    with step(page, "Check the target roles are the ones the statement asks for"):
         roles = _card_for(page, "Target roles")
         text = " ".join(roles.inner_text().split())
-        assert re.search(r"\b(AI|ML|LLM|Machine Learning)\b", text), (
-            f"the target roles do not look like an AI developer's: {text}"
+        wanted = [str(r) for r in (persona.get("dream_job.target_roles", default=[]) or [])]
+        assert wanted, f"{harness.PERSONA_PATH} names no target roles to look for"
+        missed = [r for r in wanted if not _mentions(text, r)]
+        assert not missed, (
+            f"the statement asks for {wanted}; nothing in the extracted roles answers "
+            f"{missed}: {text}"
         )
-        assert re.search(r"Lead|Staff|Principal|Senior", text), (
+        # The seniority is the model's own word, so it is matched without
+        # regard to case; only its presence is the product's business.
+        seniority = r"lead|staff|principal|senior|head|director|architect|chief"
+        assert re.search(seniority, " ".join(wanted), re.IGNORECASE), (
+            f"this persona does not ask for seniority, so this check does not apply: {wanted}"
+        )
+        assert re.search(seniority, text, re.IGNORECASE), (
             f"the statement asks for technical leadership; the roles say: {text}"
         )
 
     with step(page, "Check the deal-breakers came back, and as hard vetoes"):
         breakers = _card_for(page, "Deal-breakers")
-        text = " ".join(breakers.inner_text().split()).lower()
-        wanted = ["engineering ownership", "data infrastructure", "gpu"]
-        found = [w for w in wanted if w in text]
-        assert len(found) >= 2, (
-            f"the statement names three deal-breakers; the model kept {found}: {text}"
+        text = " ".join(breakers.inner_text().split())
+        stated = [
+            str((d or {}).get("constraint") or "")
+            for d in (persona.get("dream_job.deal_breakers", default=[]) or [])
+        ]
+        stated = [s for s in stated if s.strip()]
+        assert stated, f"{harness.PERSONA_PATH} names no deal-breakers to look for"
+        found = [s for s in stated if _mentions(text, s)]
+        assert len(found) >= min(2, len(stated)), (
+            f"the statement names {len(stated)} deal-breakers; the model kept {found}: {text}"
         )
-        assert "hard veto" in text, f"no deal-breaker is a hard veto: {text}"
+        assert "hard veto" in text.lower(), f"no deal-breaker is a hard veto: {text}"
 
     with step(page, "Check the values it read out of the prose"):
         values = _card_for(page, "Culture and values")

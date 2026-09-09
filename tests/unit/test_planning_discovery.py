@@ -306,16 +306,27 @@ def test_a_query_naming_three_boards_becomes_three_plan_items(db, tmp_path, monk
 # ---------------------------------------------------------------------------
 
 
-def test_eures_is_partitioned_and_skips_the_staffing_agencies():
-    """Section 5.2 N2: width buys employers, depth buys duplicates."""
+def test_eures_is_partitioned_over_every_sector_a_campaign_can_act_on():
+    """Section 5.2 N2: width buys employers, depth buys duplicates.
+
+    The sector letters are NACE Rev 2.1, which is what the EURES facet uses:
+    N is professional services and O is administrative and support, including
+    the staffing agencies.  Both are swept.  Agencies are handled by the
+    per-employer tag (``company_employer_kind``), never by declining to fetch
+    a section - a vacancy is filed under every section on its employer's list,
+    so an exclusion loses whole legitimate sectors and still removes no
+    agencies (docs/Interim_Agencies_Proposal.md section 2.5).
+    """
     items = discovery.eures_partitions(
         countries=["BE", "NL"], caps={"max_pages_per_source": 20}, partitioned=True
     )
 
-    assert len(items) == 126, "7 NUTS-1 regions x 18 NACE sections"
+    assert len(items) == 133, "7 NUTS-1 regions x 19 NACE Rev 2.1 sections"
     sections = {i.native_query["nace_section"] for i in items}
-    assert "N" not in sections, "staffing agencies are 86,014 of Belgium's 232,496 rows"
+    assert "N" in sections, "N is professional services; excluding it removed no agency row"
+    assert "O" in sections, "O is where staffing sits, and the tag - not the sweep - handles it"
     assert sections == set(discovery.NACE_SECTIONS)
+    assert discovery.EXCLUDED_NACE_SECTIONS == {"T", "U", "V"}
     assert {i.native_query["nuts_codes"][0] for i in items} == {
         "BE1", "BE2", "BE3", "NL1", "NL2", "NL3", "NL4"
     }
@@ -324,11 +335,36 @@ def test_eures_is_partitioned_and_skips_the_staffing_agencies():
     # it (FR-182), so the sweep is sized in requests, not in pages.
     requests = sum(i.estimated_pages for i in items)
     assert requests <= discovery.EURES_REQUEST_BUDGET
+    assert requests == 518, "restoring N costs 28 requests; halving O gives 14 of them back"
     assert all(1 <= i.estimated_pages <= 20 for i in items)
     assert all(i.native_query["fetch_details"] is False for i in items)
 
 
-def test_an_unpartitioned_eures_adapter_is_not_asked_for_the_same_page_126_times():
+def test_the_broadest_section_gets_fewer_pages_rather_than_none():
+    """O carries 86% of the region's rows, so its deep pages are duplicates.
+
+    The lever for an agency-heavy partition is the page budget, not exclusion:
+    every section still runs, and no section can be weighted down to nothing.
+    """
+    items = discovery.eures_partitions(
+        countries=["BE"], caps={"max_pages_per_source": 20}, partitioned=True
+    )
+    pages = {i.native_query["nace_section"]: i.estimated_pages for i in items}
+
+    assert pages["O"] < pages["C"], "the widest partition buys the fewest new employers per page"
+    assert pages["O"] >= 1, "fewer pages, never no pages"
+    assert pages["N"] == pages["C"], "professional services is an ordinary partition"
+
+    # A campaign may re-weight; it may not zero a section out through the cap.
+    zeroed = discovery.eures_partitions(
+        countries=["BE"],
+        caps={"max_pages_per_source": 20, "eures_section_page_weights": {"O": 0}},
+        partitioned=True,
+    )
+    assert all(i.estimated_pages >= 1 for i in zeroed)
+
+
+def test_an_unpartitioned_eures_adapter_is_not_asked_for_the_same_page_133_times():
     """The planner only partitions a sweep the adapter can actually execute."""
     items = discovery.eures_partitions(
         countries=["BE", "NL"], caps={"max_pages_per_source": 20}, partitioned=False
@@ -352,7 +388,7 @@ def test_generate_plan_partitions_eures_when_the_adapter_reads_the_keys(
 
     summary = planning.generate_plan(campaign_id, seeker, use_llm=False)
 
-    assert summary["discovery"]["eures"]["partitions"] == 126
+    assert summary["discovery"]["eures"]["partitions"] == 133
     assert summary["discovery"]["eures"]["partitioned"] is True
     assert summary["totals"]["estimated_cost_eur"] == 0.0, "EURES parses without an LLM"
 

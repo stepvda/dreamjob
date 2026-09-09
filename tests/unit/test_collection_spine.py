@@ -817,6 +817,10 @@ def test_the_progress_total_counts_only_the_sources_that_can_run(db):
         campaign_id,
         {"adapter_key": "no_adapter_here", "native_query": {"queries": ["data"]},
          "estimated_pages": 5, "created_at": utcnow()},
+        # A stored plan outlives the code that ran it, so this state is real -
+        # but nothing may *plan* a source with neither adapter nor catalogue
+        # row (C5), so writing one takes the explicit keyword.
+        allow_unimplemented=True,
     )
 
     job_id = _run(campaign_id, seeker)

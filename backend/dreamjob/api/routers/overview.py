@@ -122,6 +122,20 @@ def journey(seeker: CurrentSeeker = Depends(current_seeker)) -> dict:
             f"{counts['speculative']} speculative" if counts["speculative"] else None
         ),
     )
+    # FR-262/FR-149: the spontaneous-application track is its own stage.  It was
+    # only ever a detail line on "opportunities", which is why a search whose
+    # whole point was unadvertised roles looked finished with none of them.
+    stage(
+        "speculative",
+        done=counts["speculative"] > 0,
+        count=counts["speculative"],
+        blocked_by=None if counts["companies"] else "company profiles",
+        detail=(
+            None
+            if counts["speculative"]
+            else "run “Find unadvertised roles” on the opportunities screen"
+        ),
+    )
     stage("scoring", done=counts["scored"] > 0, count=counts["scored"],
           blocked_by=None if counts["opportunities"] else "opportunities")
 
@@ -178,6 +192,7 @@ def _next_action(j: dict[str, dict]) -> dict | None:
         ("directives", "Set your search directives", "/directives"),
         ("plan", "Generate a campaign plan", "/campaigns"),
         ("collection", "Launch collection", "/campaigns"),
+        ("speculative", "Find roles nobody has advertised", "/opportunities?kind=speculative"),
         ("scoring", "Review the ranked opportunities", "/opportunities"),
         ("contacts", "Find hiring contacts", "/contacts"),
         ("documents", "Generate application packages", "/applications"),

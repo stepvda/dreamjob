@@ -20,11 +20,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
+import Icon from '../components/Icon'
 import WorkflowMap from '../components/WorkflowMap'
+import { EmployerCompanyLine } from './employers'
 import {
   Badge,
   Empty,
@@ -357,7 +359,17 @@ function OpportunityRow({
           </div>
 
           <div className="opp-company">
-            {item.company_name || 'Company not identified'}
+            {/*
+              FR-143/FR-263: who is actually hiring, on the line that names the
+              company.  An agency row says so where the employer's name would
+              have been, and a row nobody has researched says *that* rather than
+              reading as a direct employer.
+            */}
+            <EmployerCompanyLine
+              tag={item.employer}
+              companyId={item.company_id}
+              companyName={item.company_name || 'Company not identified'}
+            />
             {item.location ? ` · ${item.location}` : ''}
             {item.work_arrangement ? ` · ${human(item.work_arrangement)}` : ''}
             {item.comp_max != null
@@ -625,9 +637,17 @@ function CompareModal({ result, onClose }) {
 
 export default function OpportunitiesPage() {
   const navigate = useNavigate()
+  // The workflow map links straight to the unadvertised roles (?kind=speculative),
+  // so the screen opens on the filter it was asked for rather than on everything.
+  const [searchParams] = useSearchParams()
 
   const [campaignId, setCampaignId] = useState('')
-  const [filters, setFilters] = useState(EMPTY_FILTERS)
+  const [filters, setFilters] = useState(() => {
+    const kind = searchParams.get('kind')
+    return kind === 'speculative' || kind === 'vacancy'
+      ? { ...EMPTY_FILTERS, kind }
+      : EMPTY_FILTERS
+  })
   const [debouncedQ, setDebouncedQ] = useState('')
   const [sort, setSort] = useState('score')
   const [manualOrder, setManualOrder] = useState(true)
@@ -846,6 +866,41 @@ export default function OpportunitiesPage() {
     }
   }
 
+  /**
+   * FR-262: the spontaneous-application track. For every interesting company
+   * with no matching vacancy, propose the roles it is likely to need. Nothing
+   * called this before, so the whole track existed only in the API - which is
+   * why a `spontaneous_only` campaign (FR-149) produced an empty list.
+   */
+  async function findUnadvertised() {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const res = await api.post('/opportunities/speculative', {
+        campaign_id: campaignId,
+        background: true,
+      })
+      if (res?.error === 'consent_required') {
+        setActionError(
+          new Error(
+            'Generating unadvertised roles sends profile data to the model provider, and that ' +
+              'consent has not been recorded yet (CR-410). Record it on the Composite profile ' +
+              'screen, then try again.',
+          ),
+        )
+        return
+      }
+      setNotice(
+        'Looking for roles these companies have not advertised. They appear here marked ' +
+          '“Speculative opening”. Reload in a moment.',
+      )
+    } catch (e) {
+      setActionError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // The scoring pass runs as a background job. There is no job-status route to
   // poll, so the screen watches the one thing that does change - the campaign's
   // last_scored_at - and refreshes the list when it moves (NFR-502, best effort).
@@ -1045,6 +1100,20 @@ export default function OpportunitiesPage() {
           </span>
           <div className="spacer" />
           <span className="small muted">{selected.length} on the shortlist</span>
+          {/* FR-262: the spontaneous track, reachable rather than API-only. */}
+          <button
+            className="btn btn-sm"
+            disabled={busy || !campaignId}
+            title={
+              campaignId
+                ? 'Propose roles these companies have not advertised, from their finances, ' +
+                  'hiring signals and department map'
+                : 'Pick a campaign first'
+            }
+            onClick={findUnadvertised}
+          >
+            <Icon name="speculative" /> Find unadvertised roles
+          </button>
           <button
             className="btn btn-sm"
             disabled={selected.length < 2 || selected.length > 6}
@@ -1115,8 +1184,8 @@ export default function OpportunitiesPage() {
               }
             >
               Nothing has been ranked yet. Opportunities appear here once a campaign has collected
-              vacancies and the synthesis pass has normalised them — speculative openings are
-              generated in the same run and are marked as such everywhere.
+              vacancies and the synthesis pass has normalised them. Roles nobody advertised are a
+              separate pass — “Find unadvertised roles” — and are marked as speculative everywhere.
             </FirstRun>
           </div>
         )}

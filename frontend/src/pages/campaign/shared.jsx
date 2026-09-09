@@ -26,6 +26,37 @@ export const ITEM_TONE = {
   done: 'ok',
   failed: 'danger',
   skipped: 'info',
+  // FR-185: a plan item ends on one of six answers, and only ``failed`` is a
+  // defect. Declining a source on principle and finding a board gone are not
+  // red, because colouring them red is how a dozen real failures went missing
+  // among five hundred expected outcomes.
+  blocked: 'info',
+  gone: undefined,
+  capped: undefined,
+}
+
+/**
+ * FR-185: the measured outcome of a source, as a badge class. Same rule as
+ * above - the failure states carry the danger hue and nothing else does, so
+ * that scanning a long per-source list finds the failures.
+ */
+export const OUTCOME_BADGE = {
+  succeeded: 'badge-ok',
+  no_matches: '',
+  no_work: '',
+  skipped: '',
+  blocked: 'badge-info',
+  refused: 'badge-info',
+  robots_disallowed: 'badge-info',
+  tos_prohibited: 'badge-info',
+  gone: '',
+  not_found: '',
+  retired: '',
+  capped: '',
+  failed: 'badge-danger',
+  rejected: 'badge-danger',
+  normalised_nothing: 'badge-danger',
+  extracted_nothing: 'badge-danger',
 }
 
 export const ACTION_TONE = { collect: undefined, collect_partial: 'info', skip: 'ok' }

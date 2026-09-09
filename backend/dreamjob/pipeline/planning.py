@@ -1542,6 +1542,35 @@ def _plan_key(adapter_key: str, native_query: Any) -> tuple[str, str]:
     return adapter_key, digest
 
 
+ATS_ADAPTER_PREFIX = "ats."
+
+
+def target_key(adapter_key: str, native_query: Any, board: tuple[str, str] | None = None) -> str:
+    """A stable name for the thing one plan item reads (N4, FR-342).
+
+    This is the key the fetch ledger is written under, and therefore the key
+    anything asking "was *this* target read recently" must ask with.  It lives
+    here, next to :func:`_plan_key` it is built on, because two callers need the
+    identical answer and had grown separate ones: collection wrote ledger rows
+    under the board slug while the reuse assessment counted rows per adapter, so
+    the two never met and one fresh board stood for every board of its vendor.
+
+    ``board`` is the ``(vendor, slug)`` an already-loaded adapter resolved, which
+    is authoritative.  Without one - the reuse assessment loads no adapters - an
+    ATS item is named from its own key and slug, which agrees with it because
+    every ATS adapter key is ``ats.<vendor>``.
+    """
+    if board is None:
+        payload = native_query if isinstance(native_query, dict) else {}
+        slug = str(payload.get("slug") or "").strip()
+        if slug and adapter_key.startswith(ATS_ADAPTER_PREFIX):
+            board = (adapter_key[len(ATS_ADAPTER_PREFIX):].lower(), slug)
+    if board:
+        return f"{board[0]}/{board[1]}"
+    _, digest = _plan_key(adapter_key, native_query)
+    return digest or adapter_key
+
+
 def aggregate_by_adapter(items: list[dict], catalogue: dict[str, dict]) -> list[dict]:
     """One row per source, whatever the plan holds behind it (FR-163).
 

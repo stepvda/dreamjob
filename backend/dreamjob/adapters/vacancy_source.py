@@ -104,26 +104,58 @@ class FetchOutcome:
 # ---------------------------------------------------------------------------
 
 _TAG_RE = re.compile(r"<[^>]+>")
+#: Tags that end a line of prose.  Everything absent here - ``strong``, ``em``,
+#: ``span``, ``a``, ``b``, ``i``, ``code`` - is inline and must not.
+_BLOCK_TAG_RE = re.compile(
+    r"</?(?:p|div|br|li|ul|ol|h[1-6]|tr|table|thead|tbody|section|article"
+    r"|header|footer|blockquote|pre|hr|dl|dt|dd|figure|figcaption|form)\b[^>]*>",
+    re.IGNORECASE,
+)
 _SCRIPT_RE = re.compile(r"<(script|style)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
 _WS_RE = re.compile(r"[ \t\r\f\v]+")
 _NL_RE = re.compile(r"\n{3,}")
 
 
+#: How many times an escaped document is decoded before it is treated as text.
+#: Boards serve HTML-escaped HTML (Greenhouse documents it; arbeitnow and EURES
+#: do it); a doubly-escaped one exists and a hall of mirrors does not.
+_MAX_UNESCAPE_ROUNDS = 3
+
+
 def html_to_text(markup: str | None) -> str:
-    """Flatten HTML to readable text, keeping block boundaries as newlines."""
+    """Flatten HTML to readable text, keeping block boundaries as newlines.
+
+    Unescaping is done *before* the "is this markup?" decision, not instead of
+    it.  ``&lt;div&gt;...`` contains no ``<``, so the fast path used to unescape
+    it - which produced ``<div>...`` - and return that as if it were text.  The
+    tags then travelled all the way into the stored vacancy and out again in the
+    middle of a generated briefing PDF, between two correctly rendered sections.
+    """
     if not markup:
         return ""
+    for _ in range(_MAX_UNESCAPE_ROUNDS):
+        if "<" in markup:
+            break
+        decoded = html_lib.unescape(markup)
+        if decoded == markup:
+            return _tidy(markup)
+        markup = decoded
     if "<" not in markup:
-        return _tidy(html_lib.unescape(markup))
+        return _tidy(markup)
+    # Mark the block boundaries in the markup itself, so both routes below agree
+    # on where a line ends.  ``text(separator="\n")`` breaks on *every* node,
+    # inline ones included, which turned "the <strong>FinTech</strong> connects
+    # consumers" into three lines and shattered every emphasised sentence in the
+    # middle of a briefing.  Emphasis is not a paragraph.
+    marked = _BLOCK_TAG_RE.sub(lambda m: "\n" + m.group(0), markup)
     if HTMLParser is not None:
-        tree = HTMLParser(markup)
+        tree = HTMLParser(marked)
         for node in tree.css("script, style, noscript"):
             node.decompose()
-        text = tree.body.text(separator="\n") if tree.body else tree.text(separator="\n")
+        text = tree.body.text(separator="") if tree.body else tree.text(separator="")
         return _tidy(text)
-    stripped = _SCRIPT_RE.sub(" ", markup)
-    stripped = re.sub(r"<(br|/p|/div|/li|/h[1-6]|/tr)\s*/?>", "\n", stripped, flags=re.IGNORECASE)
-    return _tidy(html_lib.unescape(_TAG_RE.sub(" ", stripped)))
+    stripped = _SCRIPT_RE.sub(" ", marked)
+    return _tidy(html_lib.unescape(_TAG_RE.sub("", stripped)))
 
 
 def _tidy(text: str) -> str:

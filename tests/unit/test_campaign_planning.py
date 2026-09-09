@@ -26,6 +26,7 @@ from dreamjob.db.connection import insert_row, query_all, query_one, upsert_row,
 from dreamjob.db.migrator import migrate
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import knowledge as kb_repo
+from dreamjob.egress import client as egress_client
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import collection, dedup, knowledge_base, planning
 
@@ -504,6 +505,89 @@ def test_reuse_report_skips_fresh_sources_and_reports_the_saving(db):
     assert [i["adapter_key"] for i in skipped] == ["vdab"]
 
 
+def test_reuse_assesses_per_target_not_per_adapter(db):
+    """FR-342 / N4: one fresh ATS board must not skip every other board.
+
+    The reuse assessment used to compare a single plan item's expectation
+    against the *whole corpus* of fresh records for its adapter.  ATS and EURES
+    sources are planned one item per target, so the first board that returned a
+    page of vacancies made every other board of that vendor look already
+    collected - and the ATS harvest never fetched a second company again.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue(
+        "ats.greenhouse",
+        source_type="ats",
+        query_capabilities={"max_results_per_query": 100, "pagination": False},
+    )
+
+    boards = ["acme", "globex", "initech"]
+    for slug in boards:
+        campaign_repo.insert_plan_item(
+            campaign_id,
+            {
+                "adapter_key": "ats.greenhouse",
+                "native_query": {"slug": slug},
+                "rationale": f"{slug} board",
+                "caps": {"planned_pages": 1, "records_per_page": 100},
+                "estimated_pages": 1,
+                "estimated_seconds": 8,
+                "estimated_cost_eur": 0.0,
+            },
+        )
+
+    # One board was read, and it returned a full page of vacancies.
+    egress_client.record_fetch(
+        "ats.greenhouse",
+        "greenhouse/acme",
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs",
+        http_status=200,
+        record_count=150,
+    )
+    for n in range(150):
+        vacancy_id = kb_repo.insert_vacancy(
+            {
+                "title": f"Engineer {n}",
+                "company_name_raw": "Acme NV",
+                "country": "BE",
+                "source_adapter": "ats.greenhouse",
+                "collected_at": _iso(1),
+            }
+        )
+        kb_repo.record_provenance("vacancy", vacancy_id, adapter_key="ats.greenhouse")
+
+    knowledge_base.assess_reuse(campaign_id, countries=["BE", "NL"])
+    by_slug = {
+        (i["native_query"] or {}).get("slug"): i
+        for i in campaign_repo.list_plan_items(campaign_id)
+        if i["adapter_key"] == "ats.greenhouse"
+    }
+    # The board that was actually read is the only one skipped.
+    assert by_slug["acme"]["status"] == "skipped"
+    assert by_slug["globex"]["status"] == "planned"
+    assert by_slug["initech"]["status"] == "planned"
+    assert by_slug["globex"]["estimated_pages"] == 1
+    assert by_slug["initech"]["estimated_pages"] == 1
+
+
+def test_reuse_per_target_key_matches_the_ledger_key_collection_writes(db):
+    """The two sides of N4 must agree, or per-target reuse silently reverts."""
+    assert planning.target_key("ats.greenhouse", {"slug": "acme"}) == "greenhouse/acme"
+    # An explicit (vendor, slug) from a loaded adapter is the same key.
+    assert (
+        planning.target_key("ats.greenhouse", {"slug": "acme"}, ("greenhouse", "acme"))
+        == "greenhouse/acme"
+    )
+    # Two EURES partitions are two targets, and a re-plan of one is the same one.
+    a = {"nuts_codes": ["BE1"], "nace_section": "J", "publication_period": "LAST_MONTH"}
+    b = {"nuts_codes": ["BE2"], "nace_section": "J", "publication_period": "LAST_MONTH"}
+    assert planning.target_key("board.eures", a) != planning.target_key("board.eures", b)
+    assert planning.target_key("board.eures", a) == planning.target_key(
+        "board.eures", {**a, "page": 4}
+    )
+
+
 # ---------------------------------------------------------------------------
 # FR-181..186 collection
 # ---------------------------------------------------------------------------
@@ -612,6 +696,126 @@ def test_collection_resumes_from_its_checkpoint(db):
     )
     asyncio.run(collection.collection_worker(ctx))
     assert _StubBoard.pages_fetched == [3], "pages already checkpointed are not refetched"
+
+
+@register_adapter
+class _GreedyBoard(SourceAdapter):
+    """A discovery-stage board that spends a page every time it is asked."""
+
+    key = "greedy_board"
+    display_name = "Greedy Board"
+    source_type = SourceType.JOB_BOARD
+    coverage_countries = ["BE", "NL"]
+    pages_fetched: list[int] = []
+
+    def plan(self, directives: dict, composite_profile: dict, caps: dict) -> list[PlanItem]:
+        return [PlanItem(adapter_key=self.key, native_query={"keywords": ["data"]})]
+
+    async def fetch(self, item: PlanItem) -> list[RawRecord]:
+        page = int(item.native_query.get("page", 1))
+        type(self).pages_fetched.append(page)
+        return [RawRecord(url=f"https://greedy.test/jobs?p={page}", content="<html/>",
+                          meta={"page": page})]
+
+    def parse(self, raw: RawRecord) -> list[dict]:
+        return [{"title": f"Role {raw.meta['page']}", "company_name_raw": "Greedy NV",
+                 "location": "Gent", "country": "BE", "posted_at": "2026-09-01"}]
+
+    def normalise(self, parsed: dict, raw: RawRecord) -> NormalisedRecord:
+        return NormalisedRecord(entity_type="vacancy", data=dict(parsed, source_url=raw.url))
+
+
+@register_adapter
+class _StubAts(SourceAdapter):
+    """A harvest-stage ATS board, which is what the reservation protects."""
+
+    key = "ats.stubvendor"
+    display_name = "Stub ATS"
+    source_type = SourceType.ATS
+    vendor = "stubvendor"
+    coverage_countries = ["BE", "NL"]
+    slugs_fetched: list[str] = []
+
+    def plan(self, directives: dict, composite_profile: dict, caps: dict) -> list[PlanItem]:
+        return []
+
+    async def fetch(self, item: PlanItem) -> list[RawRecord]:
+        slug = str(item.native_query.get("slug") or "")
+        type(self).slugs_fetched.append(slug)
+        return [RawRecord(url=f"https://ats.test/{slug}", content="<html/>",
+                          meta={"slug": slug})]
+
+    def parse(self, raw: RawRecord) -> list[dict]:
+        return [{"title": "Platform Engineer", "company_name_raw": f"{raw.meta['slug']} BV",
+                 "location": "Gent", "country": "BE", "posted_at": "2026-09-01"}]
+
+    def normalise(self, parsed: dict, raw: RawRecord) -> NormalisedRecord:
+        return NormalisedRecord(entity_type="vacancy", data=dict(parsed, source_url=raw.url))
+
+
+def test_a_crowded_discovery_stage_cannot_starve_the_ats_harvest(db):
+    """FR-186: the harvest stage is reserved a share of the page budget.
+
+    The budget used to be first-come-first-served in stage order, and the floor
+    pass hands every *unit* a page, so a plan with more discovery items than
+    pages spent the whole budget before the harvest stage was reached. That is
+    the real shape: one run settled 4,429 planned ATS boards as "not started:
+    max_pages" without issuing a single request to any of them. The reservation
+    is what makes a company's own board reachable in the run that found it.
+    """
+    _GreedyBoard.pages_fetched = []
+    _StubAts.slugs_fetched = []
+    seeker = _seeker()
+    campaign_id = _campaign(seeker, caps={"max_pages": 6, "max_pages_per_source": 20})
+    _catalogue("greedy_board", query_capabilities=AdapterCapabilities().__dict__)
+    _catalogue("ats.stubvendor", source_type="ats",
+               query_capabilities={"max_results_per_query": 100, "pagination": False})
+    planning.generate_plan(campaign_id, seeker, use_llm=False, assess_knowledge_base=False)
+
+    # Ten discovery targets against a six-page budget: more items than pages is
+    # what the floor pass turns into "stage one takes everything".
+    for n in range(10):
+        campaign_repo.insert_plan_item(
+            campaign_id,
+            {
+                "adapter_key": "greedy_board",
+                "native_query": {"keywords": [f"data-{n}"]},
+                "rationale": f"discovery slice {n}",
+                "caps": {"planned_pages": 1},
+                "estimated_pages": 1,
+                "estimated_seconds": 3,
+                "estimated_cost_eur": 0.0,
+            },
+        )
+
+    # Three ATS boards, planned per target as the board registry plans them.
+    for slug in ("alpha", "beta", "gamma"):
+        campaign_repo.insert_plan_item(
+            campaign_id,
+            {
+                "adapter_key": "ats.stubvendor",
+                "native_query": {"slug": slug},
+                "rationale": f"{slug} board",
+                "caps": {"stage": campaign_repo.STAGE_HARVEST, "planned_pages": 1},
+                "estimated_pages": 1,
+                "estimated_seconds": 8,
+                "estimated_cost_eur": 0.0,
+            },
+        )
+
+    job_id = runner.create(collection.JOB_KIND, campaign_id=campaign_id, job_seeker_id=seeker)
+    ctx = JobContext(job_id=job_id, campaign_id=campaign_id, job_seeker_id=seeker)
+    asyncio.run(collection.collection_worker(ctx))
+
+    assert _GreedyBoard.pages_fetched, "the discovery stage still runs"
+    assert _StubAts.slugs_fetched, (
+        "FR-186: the harvest stage must get its reservation, not the leftovers "
+        f"(discovery took {len(_GreedyBoard.pages_fetched)} of 6 pages)"
+    )
+    # The reservation is a share, not the whole budget: discovery is not starved
+    # either, and the run's own ceiling still holds.
+    assert _GreedyBoard.pages_fetched
+    assert len(_GreedyBoard.pages_fetched) + len(_StubAts.slugs_fetched) <= 6
 
 
 def test_caps_stop_the_run(db):

@@ -1,7 +1,12 @@
 /**
- * The live dashboard (FR-361, NFR-502): per-adapter progress, records, errors,
+ * The live dashboard (FR-361, NFR-502): per-adapter progress, records, outcomes,
  * token consumption, cost, elapsed and estimated remaining, with pause, resume
  * and cancel on the run itself.
+ *
+ * The headline used to carry an "Errors" tile, and it counted 538 things of
+ * which about a dozen were failures. What replaced it is <CollectionOutcomes>,
+ * which separates the six answers a source can end on so that the failures are
+ * findable rather than buried (FR-185).
  */
 
 import { HelpTip } from '../../components/Help'
@@ -17,7 +22,8 @@ import {
   formatDuration,
 } from '../../components/ui'
 
-import { Stat, cost, num, secondsBetween } from './shared'
+import CollectionOutcomes from './CollectionOutcomes'
+import { OUTCOME_BADGE, Stat, cost, num, secondsBetween } from './shared'
 
 export default function LiveDashboard({ live, plan, campaign, busy, onPause, onResume, onCancel }) {
   if (!live) return <Loading rows={4} />
@@ -28,7 +34,6 @@ export default function LiveDashboard({ live, plan, campaign, busy, onPause, onR
   )
   const collected = live.collected || {}
   const records = Object.values(collected).reduce((a, b) => a + b, 0)
-  const errors = (live.sources || []).reduce((a, s) => a + (s.error_count || 0), 0)
   const budget = live.budget || {}
   const llm = live.llm || {}
   const ran = secondsBetween(live.started_at || campaign.started_at, live.finished_at)
@@ -43,8 +48,8 @@ export default function LiveDashboard({ live, plan, campaign, busy, onPause, onR
           </>
         }
       >
-        Progress, records, errors, token consumption and cost appear here the moment collection
-        starts. Review the plan first.
+        Progress, records, what each source did, token consumption and cost appear here the
+        moment collection starts. Review the plan first.
       </Empty>
     )
   }
@@ -61,12 +66,6 @@ export default function LiveDashboard({ live, plan, campaign, busy, onPause, onR
               .map(([k, v]) => `${v} ${k}`)
               .join(' · ') || 'none yet'
           }
-        />
-        <Stat
-          icon="warning"
-          label="Errors"
-          value={num(errors)}
-          note={errors ? 'a failed page is retried, then skipped' : 'no failures'}
         />
         <Stat
           icon="sparkle"
@@ -104,6 +103,10 @@ export default function LiveDashboard({ live, plan, campaign, busy, onPause, onR
           }
         />
       </div>
+
+      {/* FR-185: the six answers a source can end on, with the one that means
+          something went wrong given the colour and the top of the block. */}
+      <CollectionOutcomes outcomes={live.outcomes} />
 
       {/* NFR-403: an adapter whose extraction rate has collapsed is reported
           rather than quietly returning less. */}
@@ -221,6 +224,13 @@ function SourceProgress({ source, estimate }) {
       <JobProgress job={job} />
       <div className="row row-wrap small muted" style={{ marginTop: 4 }}>
         {source.excluded_by_user && <span className="badge">excluded by you</span>}
+        {/* FR-185: the source's own row says which of the six answers it ended
+            on, so a line here and the ledger above can never disagree. */}
+        {source.outcome && (
+          <span className={`badge ${OUTCOME_BADGE[source.outcome] ?? ''}`}>
+            {source.outcome.replace(/_/g, ' ')}
+          </span>
+        )}
         <span>records against an estimate of {num(expected)}</span>
         {source.extraction_success_rate != null && (
           <span>· extraction {Math.round(source.extraction_success_rate * 100)}%</span>

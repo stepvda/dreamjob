@@ -18,6 +18,36 @@ cannot meet is worse than useless in an interview room.
 Without an LLM the whole document is still produced: requirements are matched
 to profile skills and positions by term overlap, the dream-job links come from
 the stored model, and the objections come from the gaps the mapping found.
+
+**When the employer is not named** (17-20% of the corpus: an interim, staffing
+or selection agency posting for a client it does not identify), the third part
+cannot be written truthfully.  "Why I fit the company" is built today from
+``company.values_culture``, ``stage``, ``sector``, ``trajectory``, ``size`` and
+``ownership`` - all of which then describe the *agency*.  That is exactly how
+one approved package came to praise a staffing firm for a Roeselare
+machine-builder's "no-nonsense culture and short communication lines", quoted
+out of a paragraph headed *"Onze klant: een internationale en vooruitstrevende
+machinebouwer"*.
+
+So for an agency row that section is replaced, not softened, by two blocks
+that are true:
+
+* **What the posting says about the employer** - the advert's own sentences,
+  verbatim, with nothing inferred from them.  No name is guessed: the eight
+  richest client descriptions in the corpus were mapped to a NACE code and a
+  postcode and run against the Belgian register, and 0 of 8 resolved to one
+  company.  A fabricated employer in a letter is read by the recruiter who
+  knows the client, and is the same class of error as an invented e-mail
+  address (proposal section 5.1).
+* **Questions for the recruiter** - who the employer is, why the role is open,
+  temp-to-hire or direct placement, when the name is disclosed.  This is
+  genuinely the most useful page of the document for an agency application,
+  and it is the mechanism by which the missing half becomes knowable.
+
+The model is not asked to be tactful about this.  It is given no company
+record, told the employer is not named, and its ``why_fit_company`` output is
+discarded if it produces one anyway - a prompt instruction is a request, and
+this has to be a guarantee.
 """
 
 from __future__ import annotations
@@ -39,6 +69,7 @@ from dreamjob.documents.pdf_builder import (
     normalise_language,
 )
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError
+from dreamjob.pipeline import employer_product as emp_mod
 from dreamjob.pipeline.enrichment import load_prompt
 
 log = logging.getLogger(__name__)
@@ -54,6 +85,155 @@ TEMPLATES: dict[str, tuple[str, ...]] = {
 DEFAULT_TEMPLATE = "full"
 
 STRENGTH_ORDER = {"strong": 0, "partial": 1, "gap": 2}
+
+#: The strings of the undisclosed-employer path.  They live here rather than in
+#: ``pdf_builder.LABELS`` because they belong to this one document and to this
+#: one case; ``label()`` is still used for everything the document already had.
+INTERMEDIARY_LABELS: dict[str, dict[str, str]] = {
+    "en": {
+        "posting_says": "What the posting says about the employer",
+        "employer_not_named": (
+            "The employer is not named in this posting. It was placed by {agency}, "
+            "an intermediary, for a client it does not identify. Nothing below is "
+            "inferred about that employer: the sentences are the posting's own."
+        ),
+        "nothing_said": (
+            "The posting says nothing about the employer beyond the role itself. "
+            "The questions on the next page are how to find out."
+        ),
+        "what_is_known": "What is known about the assignment",
+        "recruiter_questions": "Questions for the recruiter",
+        "questions_intro": (
+            "Ask these before an interview. The answers turn this from an "
+            "application to an unknown company into an application to a known one - "
+            "and the briefing can then be regenerated against the real employer."
+        ),
+        "quoted": "quoted from the posting",
+        "objection_unknown_employer": (
+            "You are applying to a company whose name you do not know."
+        ),
+        "objection_answer": (
+            "Say so plainly: you are applying for the role, you have asked who the "
+            "employer is, and you will judge the fit once you know. Do not pretend "
+            "to know the company."
+        ),
+    },
+    "nl": {
+        "posting_says": "Wat de vacature over de werkgever zegt",
+        "employer_not_named": (
+            "De werkgever wordt in deze vacature niet genoemd. Ze is geplaatst door "
+            "{agency}, een tussenpersoon, voor een klant die niet bij naam genoemd "
+            "wordt. Hieronder staat niets dat wij zelf hebben afgeleid: het zijn de "
+            "zinnen van de vacature zelf."
+        ),
+        "nothing_said": (
+            "De vacature zegt niets over de werkgever behalve de functie zelf. "
+            "De vragen op de volgende pagina zijn de manier om daarachter te komen."
+        ),
+        "what_is_known": "Wat over de opdracht bekend is",
+        "recruiter_questions": "Vragen voor de recruiter",
+        "questions_intro": (
+            "Stel deze vóór een gesprek. De antwoorden maken van een sollicitatie "
+            "bij een onbekend bedrijf een sollicitatie bij een bekend bedrijf - en "
+            "daarna kan de briefing opnieuw worden gemaakt."
+        ),
+        "quoted": "letterlijk uit de vacature",
+        "objection_unknown_employer": "U solliciteert bij een bedrijf waarvan u de naam niet kent.",
+        "objection_answer": (
+            "Zeg het gewoon: u solliciteert voor de functie, u hebt gevraagd wie de "
+            "werkgever is en u beoordeelt de match zodra u dat weet. Doe niet alsof "
+            "u het bedrijf kent."
+        ),
+    },
+    "fr": {
+        "posting_says": "Ce que l'annonce dit de l'employeur",
+        "employer_not_named": (
+            "L'employeur n'est pas nommé dans cette annonce. Elle a été publiée par "
+            "{agency}, un intermédiaire, pour un client qu'elle n'identifie pas. Rien "
+            "ci-dessous n'est déduit : ce sont les phrases de l'annonce elle-même."
+        ),
+        "nothing_said": (
+            "L'annonce ne dit rien de l'employeur au-delà du poste lui-même. Les "
+            "questions de la page suivante sont le moyen de le savoir."
+        ),
+        "what_is_known": "Ce que l'on sait de la mission",
+        "recruiter_questions": "Questions pour le recruteur",
+        "questions_intro": (
+            "Posez-les avant un entretien. Les réponses transforment une candidature "
+            "auprès d'une entreprise inconnue en une candidature auprès d'une "
+            "entreprise connue - le briefing peut alors être regénéré."
+        ),
+        "quoted": "cité de l'annonce",
+        "objection_unknown_employer": (
+            "Vous postulez auprès d'une entreprise dont vous ignorez le nom."
+        ),
+        "objection_answer": (
+            "Dites-le simplement : vous postulez pour le poste, vous avez demandé qui "
+            "est l'employeur et vous jugerez l'adéquation une fois que vous le saurez. "
+            "Ne faites pas semblant de connaître l'entreprise."
+        ),
+    },
+}
+
+#: The questions.  Ordered by what unlocks the most: the name first, because
+#: everything the product normally does becomes possible the moment it is said.
+#: Phrased to open with a question word rather than with "Which company", which
+#: the NFR-206 leak scan reads as the start of an organisation name (a
+#: capitalised token followed by a corporate word) and reports as untraceable.
+RECRUITER_QUESTIONS: dict[str, tuple[str, ...]] = {
+    "en": (
+        "Who is the employer, and may I know the name before the interview?",
+        "Why is the role open - growth, a replacement, or a new position?",
+        "Is this a temp-to-hire assignment or a direct placement with the employer?",
+        "Who employs me on paper, on what contract, and for how long?",
+        "At what point in the process is the employer's name disclosed?",
+        "Who conducts the interviews - you, or the employer?",
+    ),
+    "nl": (
+        "Wie is de werkgever, en mag ik de naam kennen vóór het gesprek?",
+        "Waarom staat de functie open - groei, vervanging, of een nieuwe functie?",
+        "Is dit een uitzendopdracht met optie vast, of een rechtstreekse aanwerving?",
+        "Wie is mijn werkgever op papier, met welk contract en voor hoe lang?",
+        "Op welk moment in de procedure wordt de naam van de werkgever gedeeld?",
+        "Wie voert de gesprekken - u, of de werkgever?",
+    ),
+    "fr": (
+        "Qui est l'employeur, et puis-je en connaître le nom avant l'entretien ?",
+        "Pourquoi le poste est-il ouvert - croissance, remplacement, ou création ?",
+        "S'agit-il d'une mission d'intérim avec option ou d'un recrutement direct ?",
+        "Qui est mon employeur sur le contrat, sous quel type de contrat, et pour "
+        "combien de temps ?",
+        "À quel moment de la procédure le nom de l'employeur est-il communiqué ?",
+        "Qui mène les entretiens - vous, ou l'employeur ?",
+    ),
+}
+
+
+def _ilabel(lang: str, key: str) -> str:
+    table = INTERMEDIARY_LABELS.get((lang or "en")[:2].lower()) or INTERMEDIARY_LABELS["en"]
+    return table.get(key) or INTERMEDIARY_LABELS["en"][key]
+
+
+def _questions(lang: str) -> tuple[str, ...]:
+    return RECRUITER_QUESTIONS.get((lang or "en")[:2].lower()) or RECRUITER_QUESTIONS["en"]
+
+
+def employer_tag(inputs: dict[str, Any]) -> emp_mod.EmployerTag:
+    """Who is the employer on this opportunity?
+
+    Taken from ``inputs`` when the caller already read it, so a package that
+    generates four artefacts does not resolve the same company four times;
+    otherwise read here.
+    """
+    given = inputs.get("employer_tag")
+    if isinstance(given, emp_mod.EmployerTag):
+        return given
+    return emp_mod.tag_for_opportunity(
+        inputs.get("opportunity") or {},
+        job_seeker_id=(inputs.get("seeker") or {}).get("id"),
+        company=inputs.get("company") or {},
+        vacancy=inputs.get("vacancy") or {},
+    )
 _STOPWORDS = {
     "and", "or", "the", "a", "an", "of", "in", "with", "for", "to", "en", "de", "het",
     "een", "van", "met", "voor", "et", "des", "les", "und", "mit", "der", "die", "das",
@@ -80,6 +260,10 @@ class MotivationResult:
             "generated_at": self.generated_at,
             "motivation_used_llm": self.used_llm,
             "notes": self.notes,
+            # FR-282/CR-405: the package records that this document was written
+            # without an employer, so nothing downstream has to infer it from
+            # the absence of a section.
+            "employer_disclosed": bool(self.content.get("employer_disclosed", True)),
             "gaps": [
                 row.get("requirement")
                 for row in self.content.get("why_fit_job") or []
@@ -99,6 +283,13 @@ class MotivationResult:
             ]
         for row in self.content.get("why_fit_company") or []:
             chunks += [str(row.get("text") or ""), str(row.get("evidence") or "")]
+        # The undisclosed-employer blocks are text in the document like any
+        # other, so they are scanned like any other (NFR-206).
+        for row in self.content.get("posting_says_about_employer") or []:
+            chunks += [str(row.get("text") or ""), str(row.get("evidence") or "")]
+        chunks += [str(q) for q in self.content.get("recruiter_questions") or []]
+        if self.content.get("intermediary_note"):
+            chunks.append(str(self.content["intermediary_note"]))
         for row in self.content.get("objections") or []:
             chunks += [
                 str(row.get("objection") or ""), str(row.get("answer") or ""),
@@ -162,10 +353,14 @@ def _terms(text: str) -> set[str]:
     return {w for w in fold(text).split() if len(w) > 2 and w not in _STOPWORDS}
 
 
-def derive_content(inputs: dict[str, Any], lang: str) -> dict[str, Any]:
+def derive_content(
+    inputs: dict[str, Any], lang: str, tag: emp_mod.EmployerTag | None = None
+) -> dict[str, Any]:
     """The document without a model: matching, not writing (CR-405)."""
     opportunity = inputs.get("opportunity") or {}
     company = inputs.get("company") or {}
+    if tag is None:
+        tag = employer_tag(inputs)
     dream = inputs.get("dream_job") or {}
     composite = inputs.get("composite") or {}
     version = inputs.get("profile_version") or {}
@@ -200,20 +395,28 @@ def derive_content(inputs: dict[str, Any], lang: str) -> dict[str, Any]:
         )
 
     # -- why I fit the company ----------------------------------------------
+    # Every line here comes from ``company.*``.  When the employer is not the
+    # company on the row, that is the agency's culture, stage and trajectory,
+    # and the section is replaced rather than written (FR-330, CR-405).
     fit_company: list[dict[str, str]] = []
-    for value in _statements(company.get("values_culture"))[:4]:
-        fit_company.append({"text": value, "evidence": "company.values_culture"})
-    for key, label_key, source in (
-        ("stage", "stage", company.get("stage")),
-        ("sector_codes", "sector", ", ".join(_statements(company.get("sector_codes"))[:3])),
-        ("trajectory", "trajectory", company.get("trajectory")),
-        ("size_band", "size", company.get("size_band")),
-        ("ownership", "ownership", company.get("ownership")),
-    ):
-        if source:
-            fit_company.append(
-                {"text": f"{label(lang, label_key)}: {source}", "evidence": f"company.{key}"}
-            )
+    posting_says: list[dict[str, str]] = []
+    recruiter_questions: list[str] = []
+    if not tag.employer_disclosed:
+        posting_says, recruiter_questions = _undisclosed_employer(inputs, lang, tag)
+    else:
+        for value in _statements(company.get("values_culture"))[:4]:
+            fit_company.append({"text": value, "evidence": "company.values_culture"})
+        for key, label_key, source in (
+            ("stage", "stage", company.get("stage")),
+            ("sector_codes", "sector", ", ".join(_statements(company.get("sector_codes"))[:3])),
+            ("trajectory", "trajectory", company.get("trajectory")),
+            ("size_band", "size", company.get("size_band")),
+            ("ownership", "ownership", company.get("ownership")),
+        ):
+            if source:
+                fit_company.append(
+                    {"text": f"{label(lang, label_key)}: {source}", "evidence": f"company.{key}"}
+                )
 
     # -- objections: the gaps the mapping found -----------------------------
     objections: list[dict[str, str]] = []
@@ -235,6 +438,17 @@ def derive_content(inputs: dict[str, Any], lang: str) -> dict[str, Any]:
                 "evidence": "dream_job_model.deal_breakers",
             }
         )
+    if not tag.employer_disclosed:
+        # The real objection in an agency interview, and the honest answer to
+        # it.  It is put first because it is the one that will actually come up.
+        objections.insert(
+            0,
+            {
+                "objection": _ilabel(lang, "objection_unknown_employer"),
+                "answer": _ilabel(lang, "objection_answer"),
+                "evidence": "employer_kind.verdict",
+            },
+        )
 
     talking_points = [
         row["talking_point"] for row in fit_job if row["strength"] == "strong"
@@ -244,10 +458,63 @@ def derive_content(inputs: dict[str, Any], lang: str) -> dict[str, Any]:
         "why_this_job": why_job[:6],
         "why_fit_job": fit_job,
         "why_fit_company": fit_company[:8],
+        "posting_says_about_employer": posting_says,
+        "recruiter_questions": recruiter_questions,
+        "employer_disclosed": tag.employer_disclosed,
+        "intermediary_note": tag.disclosure_note(lang),
         "objections": objections[:6],
         "talking_points": talking_points,
         "opportunity_title": opportunity.get("title"),
     }
+
+
+def _undisclosed_employer(
+    inputs: dict[str, Any], lang: str, tag: emp_mod.EmployerTag
+) -> tuple[list[dict[str, str]], list[str]]:
+    """The replacement for "why I fit the company" when there is no company.
+
+    Two lists, both true: the posting's own sentences about the employer, and
+    the questions that would make the employer knowable.  No name is guessed
+    and no enthusiasm is written for an organisation nobody has identified -
+    a sector-and-town guess is a fabricated company in a document a recruiter
+    who knows the client will read (proposal section 5.1).
+    """
+    opportunity = inputs.get("opportunity") or {}
+    vacancy = inputs.get("vacancy") or {}
+    rows: list[dict[str, str]] = [
+        {
+            "text": _ilabel(lang, "employer_not_named").format(
+                agency=tag.company_name or "an agency"
+            ),
+            "evidence": "employer_kind.verdict",
+        }
+    ]
+    for sentence in tag.descriptors[:4]:
+        rows.append({"text": sentence, "evidence": _ilabel(lang, "quoted")})
+    if not tag.descriptors:
+        rows.append({"text": _ilabel(lang, "nothing_said"), "evidence": ""})
+
+    # What *is* known, and is a fact about the assignment rather than about an
+    # employer: the region, the contract as the posting states it, the working
+    # arrangement.  These are the interview's real ground.
+    for label_key, value, source in (
+        ("location", opportunity.get("location") or vacancy.get("location"), "vacancy.location"),
+        (
+            "contract",
+            opportunity.get("contract_type") or vacancy.get("contract_type"),
+            "vacancy.contract_type",
+        ),
+        (
+            "work_arrangement",
+            opportunity.get("work_arrangement") or vacancy.get("work_arrangement"),
+            "vacancy.work_arrangement",
+        ),
+    ):
+        if value:
+            rows.append(
+                {"text": f"{label(lang, label_key)}: {value}", "evidence": source}
+            )
+    return rows, list(_questions(lang))
 
 
 def _statements(value: Any) -> list[str]:
@@ -326,12 +593,31 @@ def _best_evidence(
 
 
 def _llm_content(
-    inputs: dict[str, Any], lang: str, llm: LLMClient, instructions: str | None
+    inputs: dict[str, Any],
+    lang: str,
+    llm: LLMClient,
+    instructions: str | None,
+    tag: emp_mod.EmployerTag | None = None,
 ) -> dict[str, Any]:
     import json  # noqa: PLC0415 - only on the LLM path
 
     opportunity = inputs.get("opportunity") or {}
     company = inputs.get("company") or {}
+    disclosed = tag is None or tag.employer_disclosed
+    if not disclosed:
+        # The prompt's hard rule 2 is "every statement about the company must be
+        # traceable to the supplied company record".  That rule is exactly what
+        # licensed a letter praising a staffing firm for its client's culture.
+        # The fix is not a softer rule: it is to supply no company record.
+        company = {
+            "name": None,
+            "note": (
+                "The employer is NOT named in this posting. It was placed by "
+                f"{(tag.company_name if tag else None) or 'an intermediary'}, an "
+                "agency, on behalf of an employer it does not identify."
+            ),
+            "posting_says_about_employer": list(tag.descriptors) if tag else [],
+        }
     composite = inputs.get("composite") or {}
     version = inputs.get("profile_version") or {}
     dream = inputs.get("dream_job") or {}
@@ -357,14 +643,20 @@ def _llm_content(
         language=lang,
         role_title=opportunity.get("title") or "",
         company_name=company.get("name") or "",
-        speculative_note=(
-            ", a speculative opening that has not been advertised"
-            if str(opportunity.get("kind")) == "speculative"
-            else ""
-        ),
+        # The intermediary note travels through the same slot as the
+        # speculative one: both say what this opening is not.
+        speculative_note=_opening_note(opportunity, tag),
         profile_json=json.dumps(profile_payload, ensure_ascii=False, default=str)[:20_000],
         requirements_json=json.dumps(requirements(inputs), ensure_ascii=False),
     )
+    if not disclosed:
+        user += (
+            "\n\nHARD RULE, overriding rule 2 above: the employer is NOT named. There is "
+            "no company record. Make no statement about the employing organisation "
+            "beyond what the posting itself says, name no company as the employer, and "
+            "return an empty `why_fit_company`. Write about the role, the assignment "
+            "and the questions to ask the recruiter instead."
+        )
     if instructions:
         user += f"\n\nThe job seeker asked for this revision:\n{str(instructions)[:2000]}"
 
@@ -396,10 +688,32 @@ def _llm_content(
     )
 
 
-def _merge(derived: dict[str, Any], generated: dict[str, Any]) -> dict[str, Any]:
+def _opening_note(opportunity: dict[str, Any], tag: emp_mod.EmployerTag | None) -> str:
+    """What this opening is not, in one clause the prompt already has a slot for."""
+    if tag is not None and not tag.employer_disclosed:
+        return (
+            f", posted by {tag.company_name or 'an agency'} on behalf of an employer "
+            "it does not name"
+        )
+    if str(opportunity.get("kind")) == "speculative":
+        return ", a speculative opening that has not been advertised"
+    return ""
+
+
+def _merge(
+    derived: dict[str, Any], generated: dict[str, Any], *, employer_disclosed: bool = True
+) -> dict[str, Any]:
     """Keep the model's prose, but never lose a requirement it skipped."""
     out = dict(derived)
-    for key in ("why_this_job", "why_fit_company", "objections", "talking_points"):
+    mergeable = ["why_this_job", "why_fit_company", "objections", "talking_points"]
+    if not employer_disclosed:
+        # A prompt instruction is a request; this is the guarantee.  Whatever
+        # the model wrote about the employer is discarded, and the derived
+        # blocks - the posting's own sentences and the recruiter questions -
+        # stand.  Nothing generated can name a company nobody has identified.
+        mergeable.remove("why_fit_company")
+        out["why_fit_company"] = []
+    for key in mergeable:
         if generated.get(key):
             out[key] = generated[key]
 
@@ -436,12 +750,22 @@ def generate_motivation(
     lang = normalise_language(language or opportunity.get("language") or seeker.get("locale"))
     sections = TEMPLATES.get(template or DEFAULT_TEMPLATE, TEMPLATES[DEFAULT_TEMPLATE])
 
-    content = derive_content(inputs, lang)
+    tag = employer_tag(inputs)
+    content = derive_content(inputs, lang, tag)
     notes: list[str] = []
+    if not tag.employer_disclosed:
+        notes.append(
+            "The employer is not named in this posting; the company section is what "
+            "the posting says plus the questions to ask the recruiter (FR-330)."
+        )
     used_llm = False
     if llm is not None:
         try:
-            content = _merge(content, _llm_content(inputs, lang, llm, instructions) or {})
+            content = _merge(
+                content,
+                _llm_content(inputs, lang, llm, instructions, tag) or {},
+                employer_disclosed=tag.employer_disclosed,
+            )
             used_llm = True
         except BudgetExhausted:
             notes.append("Token budget exhausted; the document is the derived mapping.")
@@ -460,11 +784,23 @@ def generate_motivation(
         seeker_only=True,
     )
     builder = PdfBuilder(meta)
+    # The cover names the agency *as the agency*.  Putting its name where the
+    # employer's belongs is the first sentence of the same mistake the rest of
+    # this module exists to prevent.
+    employer_line = (
+        company.get("name")
+        if tag.employer_disclosed
+        else f"{tag.badge(lang)} ({company.get('name') or ''})".strip()
+    )
     cover_page(
         builder,
         heading=label(lang, "motivation_title"),
-        subheading=f"{opportunity.get('title', '')} · {company.get('name', '')}".strip(" ·"),
-        facts=[(label(lang, "motivation_subtitle"), company.get("name"))],
+        subheading=(
+            f"{opportunity.get('title', '')} · {company.get('name', '')}".strip(" ·")
+            if tag.employer_disclosed
+            else f"{opportunity.get('title', '')} · {tag.badge(lang)}".strip(" ·")
+        ),
+        facts=[(label(lang, "motivation_subtitle"), employer_line)],
     )
 
     renderers = {
@@ -525,6 +861,15 @@ def _fit_job(builder: PdfBuilder, content: dict, lang: str) -> None:
 
 
 def _fit_company(builder: PdfBuilder, content: dict, lang: str) -> None:
+    """FR-330's third part - or its honest replacement.
+
+    There is no version of "why I fit the company" that can be written about a
+    company nobody has named.  What replaces it is not a shorter version of the
+    same section: it is two different sections that are true.
+    """
+    if not content.get("employer_disclosed", True):
+        _posting_says(builder, content, lang)
+        return
     builder.h1(label(lang, "why_fit_company"))
     rows = content.get("why_fit_company") or []
     if not rows:
@@ -534,6 +879,22 @@ def _fit_company(builder: PdfBuilder, content: dict, lang: str) -> None:
         builder.para(str(row.get("text") or ""))
         if row.get("evidence"):
             builder.note(f"{label(lang, 'evidence')}: {row['evidence']}")
+
+
+def _posting_says(builder: PdfBuilder, content: dict, lang: str) -> None:
+    """What the posting says about the employer, and what to ask the recruiter."""
+    builder.h1(_ilabel(lang, "posting_says"))
+    for row in content.get("posting_says_about_employer") or []:
+        builder.para(str(row.get("text") or ""))
+        if row.get("evidence"):
+            builder.note(f"{label(lang, 'evidence')}: {row['evidence']}")
+
+    questions = [str(q) for q in content.get("recruiter_questions") or [] if str(q).strip()]
+    if not questions:
+        return
+    builder.h1(_ilabel(lang, "recruiter_questions"))
+    builder.para(_ilabel(lang, "questions_intro"))
+    builder.bullets(questions)
 
 
 def _objections(builder: PdfBuilder, content: dict, lang: str) -> None:

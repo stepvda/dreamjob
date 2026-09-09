@@ -18,6 +18,15 @@ design:
    adapter or the browser slice has collected them into
    ``compensation_observation``.  They are market-wide rather than
    company-specific, so they anchor rather than decide.
+
+   Glassdoor is a second case of the same rank.  What its browser run collects
+   is opinion gathered under restrictive terms, so - by the deliberate choice
+   documented in :mod:`dreamjob.browser.glassdoor` - it is *not* promoted into
+   the shared ``compensation_observation`` base.  It is read back per campaign
+   instead, through :func:`campaign_advisory`, and enters an estimate as an
+   advisory source with its own low weight.  A Glassdoor page is only ever
+   matched to an opportunity on company *and* role: what an employer pays its
+   warehouse staff says nothing about what it would pay a data director.
 4. **A coarse built-in band prior**, used only when nothing above exists.  It is
    labelled as a prior, not as survey data, and capped at low confidence: it
    says "a director in this family in this country is not paid like a junior",
@@ -344,6 +353,44 @@ def posted_range_sources(
     return found[:2]
 
 
+#: FR-264: which survey occupation groups speak for a given seniority.
+#:
+#: National earnings surveys are published per ISCO-08 occupation group, not per
+#: the product's own function families, so a row can only be found through the
+#: occupation it was published under.  The mapping is deliberately coarse - it
+#: is the honest resolution of the source - and it is why these rows anchor a
+#: range rather than setting one.
+#: An occupation group is a *kind of work*, not a career stage, so a seniority is
+#: mapped only where the group genuinely speaks for it.  ``intern`` and
+#: ``junior`` map to nothing on purpose: the published figure for
+#: "Professionals" is a whole-career mean and would price a first job far above
+#: what it pays, and the built-in band prior describes those two far better
+#: (CR-405).  An unmapped seniority therefore falls through to that prior.
+SURVEY_OCCUPATIONS: dict[str, tuple[str, ...]] = {
+    "intern": (),
+    "junior": (),
+    "medior": ("OC2",),
+    "senior": ("OC2",),
+    "principal": ("OC2", "OC1"),
+    "lead": ("OC1", "OC2"),
+    "manager": ("OC1",),
+    "director": ("OC1",),
+    "vp": ("OC1",),
+    "c_level": ("OC1",),
+    "board": ("OC1",),
+}
+
+
+def survey_occupations(seniority: str | None) -> list[str]:
+    """The occupation codes worth reading for this seniority, best match first."""
+    key = (seniority or "").lower()
+    if key in SURVEY_OCCUPATIONS:
+        return list(SURVEY_OCCUPATIONS[key])
+    # An unrecognised seniority is not a licence to guess a band: read the two
+    # white-collar groups and let the blend sit between them.
+    return ["OC1", "OC2"]
+
+
 def observation_sources(opportunity: dict, *, currency: str) -> list[SourceContribution]:
     """Salary surveys and Glassdoor/Levels rows collected by other slices (FR-264)."""
     country = opportunity.get("country")
@@ -352,7 +399,22 @@ def observation_sources(opportunity: dict, *, currency: str) -> list[SourceContr
         seniority=opportunity.get("seniority"),
         country=country,
     )
-    rows += repo.compensation_observations(company_id=opportunity.get("company_id"))
+    # Guarded: an unfiltered call returns the whole table, so an opportunity
+    # with no company linked would be priced off every observation ever
+    # collected, for every country and occupation.
+    if opportunity.get("company_id"):
+        rows += repo.compensation_observations(company_id=opportunity["company_id"])
+    # National survey rows carry an occupation rather than a function family, so
+    # they are unreachable by the lookup above and are asked for by occupation.
+    # Only the best-matching occupation is taken: two groups from one survey are
+    # one source read twice, and would weigh on the blend as if they were two.
+    for occupation in survey_occupations(opportunity.get("seniority")):
+        survey_rows = repo.compensation_observations(
+            country=country, normalised_titles=[occupation], market_wide=True
+        )
+        if survey_rows:
+            rows += survey_rows
+            break
 
     seen: set[str] = set()
     out: list[SourceContribution] = []
@@ -404,6 +466,100 @@ def observation_sources(opportunity: dict, *, currency: str) -> list[SourceContr
     return out
 
 
+def campaign_advisory(campaign_id: str | None) -> dict[str, Any]:
+    """The campaign's Glassdoor snapshots, or empty when there has been no run.
+
+    Imported lazily and defensively: the estimator is pure corpus work and must
+    stay importable, and usable, on an installation where the optional browser
+    slice cannot load at all.
+    """
+    if not campaign_id:
+        return {"employers": [], "salaries": []}
+    try:
+        from dreamjob.browser import glassdoor  # noqa: PLC0415
+
+        snapshots = glassdoor.snapshots_for_campaign(campaign_id)
+    except Exception:  # pragma: no cover - the browser slice is optional
+        log.debug("no Glassdoor snapshots available for campaign %s", campaign_id)
+        return {"employers": [], "salaries": []}
+    return {
+        "employers": snapshots.get("employers") or [],
+        "salaries": snapshots.get("salaries") or [],
+    }
+
+
+def _same_company(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    from dreamjob.pipeline.dedup import normalise_company_name  # noqa: PLC0415
+
+    a, b = normalise_company_name(left), normalise_company_name(right)
+    return bool(a) and a == b
+
+
+def advisory_sources(
+    opportunity: dict, *, currency: str, advisory: dict[str, Any] | None
+) -> list[SourceContribution]:
+    """Glassdoor salary pages this campaign collected, for *this* role (FR-264).
+
+    Campaign-scoped by design (see the module docstring): the rows are read back
+    from the browser run rather than from the shared base, and a page counts
+    only when it is both the same employer and a comparable title.
+    """
+    salaries = (advisory or {}).get("salaries") or []
+    if not salaries:
+        return []
+    company_name = opportunity.get("company_name")
+    terms = set(_title_terms(opportunity.get("title")))
+
+    matched: list[tuple[float, float]] = []
+    samples = 0
+    url: str | None = None
+    as_of: str | None = None
+    for row in salaries:
+        if not _same_company(company_name, row.get("company_name")):
+            continue
+        # Company alone is not a comparison set; the title has to line up too.
+        if terms and not (terms & set(_title_terms(row.get("job_title")))):
+            continue
+        if (row.get("currency") or currency).upper() != currency:
+            continue
+        low, high = row.get("low"), row.get("high")
+        if low is None or high is None or high <= 0:
+            continue
+        low, high = float(low), float(high)
+        if low > high:
+            low, high = high, low
+        # Annual figures only - a monthly or hourly page would distort the median.
+        if high < 5_000:
+            continue
+        matched.append((low, high))
+        samples += int(row.get("sample_size") or 0)
+        url = url or row.get("url")
+        as_of = as_of or row.get("collected_at")
+
+    if not matched:
+        return []
+    low, high = _median_pair(matched)
+    return [
+        SourceContribution(
+            kind="glassdoor",
+            label=f"Glassdoor salary pages for this role at this company (n={len(matched)})",
+            low=round(low, 2),
+            high=round(high, 2),
+            currency=currency,
+            weight=SOURCE_WEIGHTS["glassdoor"],
+            sample_size=samples,
+            url=url,
+            as_of=as_of,
+            note=(
+                "advisory: self-reported figures collected for this campaign, kept out of "
+                "the shared knowledge base"
+            ),
+        )
+    ]
+
+
 def builtin_prior(opportunity: dict, *, currency: str) -> SourceContribution | None:
     """The last-resort band prior.  Directional only, and always labelled as such."""
     seniority = (opportunity.get("seniority") or "").lower()
@@ -434,15 +590,50 @@ def builtin_prior(opportunity: dict, *, currency: str) -> SourceContribution | N
 # ---------------------------------------------------------------------------
 
 
-def employer_signal(company_id: str | None) -> tuple[float | None, list[dict]]:
+def _advisory_employer_rows(
+    advisory: dict[str, Any] | None, company_name: str | None
+) -> list[dict]:
+    """Glassdoor employer pages for this company, shaped like a review summary row."""
+    rows: list[dict] = []
+    for snapshot in (advisory or {}).get("employers") or []:
+        if not _same_company(company_name, snapshot.get("company_name")):
+            continue
+        themes: list[dict] = []
+        raw = snapshot.get("themes") or {}
+        if isinstance(raw, dict):
+            for polarity, items in raw.items():
+                themes.extend(
+                    {"theme": str(t), "polarity": polarity} for t in (items or []) if t
+                )
+        rows.append(
+            {
+                "rating": snapshot.get("rating"),
+                "rating_scale_max": 5,
+                "review_count": snapshot.get("review_count"),
+                "themes": themes,
+                "source": snapshot.get("source") or "glassdoor",
+            }
+        )
+    return rows
+
+
+def employer_signal(
+    company_id: str | None,
+    *,
+    advisory: dict[str, Any] | None = None,
+    company_name: str | None = None,
+) -> tuple[float | None, list[dict]]:
     """Rating normalised to 0-5 and the review themes (FR-265).
 
     Advisory input: this never touches the compensation range, and scoring gives
-    it a small, separately visible weight.
+    it a small, separately visible weight.  Shared ``employer_review_summary``
+    rows and the campaign's own Glassdoor snapshots are both read; the snapshots
+    stay campaign-scoped and are never written back into the shared base.
     """
-    if not company_id:
+    rows = repo.employer_reviews(company_id) if company_id else []
+    rows = [*rows, *_advisory_employer_rows(advisory, company_name)]
+    if not rows:
         return None, []
-    rows = repo.employer_reviews(company_id)
     ratings: list[tuple[float, float]] = []
     themes: list[dict] = []
     for row in rows:
@@ -486,17 +677,31 @@ def _confidence(sources: list[SourceContribution]) -> float:
         spread = (max(mids) - min(mids)) / max(statistics.mean(mids), 1.0)
         agreement = 0.10 if spread < 0.20 else (0.0 if spread < 0.45 else -0.15)
     sample = min(0.08, 0.01 * sum(min(s.sample_size, 8) for s in used) / max(len(used), 1))
-    return round(max(0.05, min(0.95, best + agreement + sample)), 3)
+    value = best + agreement + sample
+    # ``SOURCE_CONFIDENCE_CEILING`` is what a kind can reach *on its own*: a big
+    # sample of the same kind of evidence is still that kind of evidence, so it
+    # may not lift a source past its own ceiling.  Only genuinely independent
+    # kinds corroborating each other may.
+    if len({s.kind for s in used}) == 1:
+        value = min(value, best)
+    return round(max(0.05, min(0.95, value)), 3)
 
 
 def estimate(
-    opportunity: dict, *, currency: str | None = None, include_prior: bool = True
+    opportunity: dict,
+    *,
+    currency: str | None = None,
+    include_prior: bool = True,
+    advisory: dict[str, Any] | None = None,
 ) -> CompensationEstimate:
     """FR-264: an estimated range with confidence and a source list.
 
     A stated employer range is reported as stated and is not blended with market
     data; the market sources are still listed, unused, so a negotiation brief
     (FR-444) can see what the posting is worth against the market.
+
+    ``advisory`` carries this campaign's Glassdoor snapshots when there are any;
+    pass the payload from :func:`campaign_advisory`.
     """
     target_currency = (
         currency or opportunity.get("comp_currency") or default_currency(opportunity.get("country"))
@@ -511,6 +716,7 @@ def estimate(
         )
     )
     market.extend(observation_sources(opportunity, currency=target_currency))
+    market.extend(advisory_sources(opportunity, currency=target_currency, advisory=advisory))
     if include_prior and not [s for s in market if s.used]:
         prior = builtin_prior(opportunity, currency=target_currency)
         if prior is not None:
@@ -552,7 +758,11 @@ def estimate(
         result.notes.append("No comparable posted ranges, survey rows or observations found.")
         result.sources = market
 
-    rating, themes = employer_signal(opportunity.get("company_id"))
+    rating, themes = employer_signal(
+        opportunity.get("company_id"),
+        advisory=advisory,
+        company_name=opportunity.get("company_name"),
+    )
     result.employer_rating = rating
     result.employer_review_themes = themes
     if rating is not None:
@@ -616,9 +826,18 @@ def fit_against_directives(
 # ---------------------------------------------------------------------------
 
 
-def enrich_opportunity(opportunity: dict) -> CompensationEstimate:
-    """Estimate and persist the compensation block for one opportunity."""
-    result = estimate(opportunity)
+def enrich_opportunity(
+    opportunity: dict, *, advisory: dict[str, Any] | None = None
+) -> CompensationEstimate:
+    """Estimate and persist the compensation block for one opportunity.
+
+    ``advisory`` is looked up from the opportunity's own campaign when the caller
+    does not already hold it, so a single-opportunity refresh sees the same
+    Glassdoor snapshots a whole-campaign pass would.
+    """
+    if advisory is None:
+        advisory = campaign_advisory(opportunity.get("campaign_id"))
+    result = estimate(opportunity, advisory=advisory)
     repo.save_compensation(
         opportunity["id"], result.as_columns(),
         job_seeker_id=opportunity.get("job_seeker_id"),
@@ -634,8 +853,10 @@ def enrich_campaign(job_seeker_id: str, campaign_id: str, *, limit: int = 1000) 
     rows = repo.list_opportunities(
         job_seeker_id, campaign_id=campaign_id, limit=limit, respect_manual_order=False
     )
+    # Read once for the campaign rather than once per opportunity.
+    advisory = campaign_advisory(campaign_id)
     for opportunity in rows:
-        result = enrich_opportunity(opportunity)
+        result = enrich_opportunity(opportunity, advisory=advisory)
         if result.is_stated:
             stated += 1
         elif result.comp_max is not None:
@@ -648,4 +869,7 @@ def enrich_campaign(job_seeker_id: str, campaign_id: str, *, limit: int = 1000) 
         "stated": stated,
         "estimated": priced,
         "unpriced": unpriced,
+        # So the screen can say why the advisory source contributed nothing when
+        # no Glassdoor run has been made for this campaign.
+        "advisory_salary_pages": len(advisory.get("salaries") or []),
     }

@@ -242,6 +242,74 @@ def test_cv_generation_without_llm(tmp_path: Path) -> None:
         assert any("image" in part.content_type for part in document.part.package.iter_parts())
 
 
+def test_the_contact_line_prints_the_address_not_the_object() -> None:
+    """FR-322: a website the profile holds reaches the CV as its address.
+
+    ``linkedin_pdf``, ``cv_parser`` and the profile merge all write
+    ``contact.websites`` as ``{"url": ..., "label": ...}``.  The CV header used
+    to take ``str()`` of one of those, which printed a Python dict repr into
+    the contact line of the document that gets attached and sent.
+    """
+    from dreamjob.db.connection import to_json, update_row
+    from dreamjob.documents.cv_generator import build_base_document
+
+    ids = seed()
+    sections = {
+        **SECTIONS,
+        "contact": {
+            **SECTIONS["contact"],
+            "websites": [
+                {"url": "www.linkedin.com/in/svda", "label": "LinkedIn"},
+                {"url": "stepvda.example.com", "label": None},
+                "plain.example.com",
+            ],
+        },
+    }
+    update_row("profile_version", ids["profile_version"], {"sections": to_json(sections)})
+
+    document = build_base_document(_inputs(ids), language="nl")
+    assert document.contact.websites == [
+        "www.linkedin.com/in/svda",
+        "stepvda.example.com",
+        "plain.example.com",
+    ]
+    assert not any("{" in site for site in document.contact.websites)
+    assert "label" not in " ".join(document.contact.websites)
+
+    # ``linkedin_url`` is copied out of ``websites`` upstream, so the header
+    # line must not print the same profile address twice.
+    lines = document.contact.lines()
+    assert lines.count("linkedin.com/in/svda") + lines.count("www.linkedin.com/in/svda") == 1
+    assert len(lines) == len(set(line.casefold() for line in lines))
+
+
+def test_a_model_that_answers_with_a_list_still_produces_a_cv(tmp_path: Path) -> None:
+    """NFR-104: a badly shaped answer costs the tailoring, not the package.
+
+    ``generate_cv`` degrades on ``LLMError``/``ValueError``/``KeyError``/
+    ``TypeError``.  A model that returns a bare JSON list used to raise
+    ``AttributeError`` inside ``apply_tailoring`` instead, which is not in that
+    tuple, so the whole package generation failed on one bad answer.
+    """
+    import pytest as _pytest
+    from dreamjob.documents.cv_generator import apply_tailoring, build_base_document, generate_cv
+
+    ids = seed()
+    inputs = _inputs(ids)
+
+    with _pytest.raises(ValueError, match="not an object"):
+        apply_tailoring(build_base_document(inputs, language="nl"), ["headline", "summary"])
+
+    class ListAnsweringClient:
+        def complete_json(self, *args: object, **kwargs: object) -> object:
+            return ["headline", "summary"]
+
+    result = generate_cv(inputs, output_dir=tmp_path, language="nl", llm=ListAnsweringClient())
+    assert Path(result.pdf_path).is_file()
+    assert not result.tailored_by_llm
+    assert any("Tailoring unavailable" in note for note in result.notes)
+
+
 def test_cv_language_follows_the_opportunity() -> None:
     """FR-322 / NFR-501: nl, fr, en and de all produce localised headings."""
     from dreamjob.documents.cv_generator import build_base_document
@@ -354,6 +422,55 @@ def test_judge_findings_only_fail_on_unsupported_figures_or_names() -> None:
     assert "45" in unsupported_tokens("Leidde 45 mensen.", facts)
 
 
+def test_judge_allows_the_company_and_role_the_application_is_for() -> None:
+    """FR-322: the judge and check_free_text must agree about one name.
+
+    A tailored CV names its target, and ``check_free_text`` is given that name
+    in ``allow``.  Escalating the judge's quote on the same name would fail the
+    package on a word the sibling check just permitted - and would let the
+    judge fail a document on its own, which this module forbids.
+    """
+    from dreamjob.documents.consistency import profile_facts, unsupported_tokens
+
+    facts = profile_facts(_inputs(seed()))
+    quote = "This background fits the Senior Fullstack Engineer role at Solactive."
+    allow = {"Solactive", "Senior Fullstack Engineer"}
+
+    assert unsupported_tokens(quote, facts) != []  # without the set, it escalates
+    assert unsupported_tokens(quote, facts, allow=allow) == []
+    # The allowance is narrow: another employer is still caught.
+    assert "Globex International" in unsupported_tokens(
+        "Werkte bij Globex International.", facts, allow=allow
+    )
+
+
+def test_judge_escalation_honours_german_noun_capitalisation() -> None:
+    """FR-322: in German, a capitalised word is a noun, not a name.
+
+    ``capitalised_phrases`` already knows this - "German capitalises every noun,
+    so there a run has to be more than one word ... otherwise the scan would
+    report most of the document" - and ``check_free_text`` passes the document's
+    language so it applies.  ``unsupported_tokens`` did not, so the judge
+    escalation read *Erfahrung*, *Systeme* and *Entwickler* as invented
+    employers and failed German CVs by construction.
+    """
+    from dreamjob.documents.consistency import profile_facts, unsupported_tokens
+
+    facts = profile_facts(_inputs(seed()))
+    german = "Ein Jahrzehnt Erfahrung mit verteilten Systemen und Kern-APIs für Entwickler."
+
+    flagged_as_english = unsupported_tokens(german, facts)
+    flagged_as_german = unsupported_tokens(german, facts, language="de")
+    assert len(flagged_as_german) < len(flagged_as_english)
+    for ordinary_noun in ("Systemen", "Entwickler", "Kern-APIs"):
+        assert ordinary_noun not in flagged_as_german
+
+    # A real employer is still caught, in German too.
+    assert "Globex International GmbH" in unsupported_tokens(
+        "Arbeitete bei Globex International GmbH.", facts, language="de"
+    )
+
+
 def test_leak_scan_flags_another_persons_details() -> None:
     """NFR-206: content that is not this job seeker's must be reported."""
     from dreamjob.documents.cv_generator import build_base_document
@@ -382,6 +499,31 @@ def test_leak_scan_allows_the_company_only_where_it_belongs() -> None:
 
     assert consistency.scan_leakage({"email": text}, provenance, with_context={"email"}) == []
     assert consistency.scan_leakage({"cv": text}, provenance, with_context=set())
+
+
+def test_leak_scan_does_not_read_a_span_of_years_as_a_phone_number() -> None:
+    """NFR-206: a date is not a leaked telephone number.
+
+    ``2015-2017`` reduces to eight digits, which the phone pattern accepted -
+    and a ``leak_phone`` finding is high severity, so ``leak_scan_status``
+    failed and FR-324 refused approval with *no* override.  Every CV and
+    motivation document dates its experience this way.
+    """
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.documents import consistency
+
+    ids = seed()
+    provenance = consistency.build_provenance(
+        repo.provenance_corpus(ids["seeker"], ids["opportunity"])
+    )
+    for dated in ("Lead engineer 2015-2017 at Acme.", "Studied there (2015–2017).", "1999-2024"):
+        leaks = consistency.scan_leakage({"cv": dated}, provenance, with_context=set())
+        assert not [f for f in leaks if f.kind == "leak_phone"], dated
+
+    # A real number is still reported.
+    leaks = consistency.scan_leakage({"cv": "Reach me on +32 471 12 34 56."}, provenance,
+                                     with_context=set())
+    assert [f for f in leaks if f.kind == "leak_phone"]
 
 
 # ---------------------------------------------------------------------------

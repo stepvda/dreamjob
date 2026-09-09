@@ -340,10 +340,12 @@ def _extract(
             # DeepSeek's reasoning model spends its reasoning tokens out of the
             # same budget, so a cap sized for the answer alone truncates the
             # JSON and loses the whole extraction.  Seven blocks read out of a
-            # single page of prose: the largest extraction measured spent
-            # 16,842 tokens of a 24,000 budget, close enough to the edge that
-            # one long deliberation would have lost it.
-            max_tokens=32_000,
+            # single page of prose is not a long answer - roughly 2,500 tokens
+            # of it - but the deliberation in front of it is: extractions of
+            # the same statement have spent 1,307, 16,842 and 26,050 tokens.
+            # The last of those would have been lost under a 24,000 cap, so
+            # the budget is sized for the deliberation, not for the answer.
+            max_tokens=48_000,
         )
     except (LLMError, BudgetExhausted) as exc:
         log.warning("Dream job model extraction failed: %s", exc)

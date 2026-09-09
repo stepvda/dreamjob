@@ -23,6 +23,7 @@ from dreamjob.adapters.vacancy_source import (
     SourceUnavailable,
     application_route,
     detect_language,
+    html_to_text,
     jobposting_to_fields,
     jsonld_jobpostings,
     normalise_contract_type,
@@ -816,3 +817,61 @@ class TestCollectionSkipGuard:
 
         adapter = self._adapter("board.vdab")
         assert _is_ats(adapter) is False
+
+
+# ---------------------------------------------------------------------------
+# FR-183: what a board serves is not always what it says it serves
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "markup"),
+    [
+        ("plain html", '<div class="intro"><p>Hello &amp; welcome</p></div>'),
+        # The case that reached a PDF: no literal "<", so the fast path
+        # unescaped it - which *produced* the markup - and returned it as text.
+        ("escaped html", "&lt;div class=&quot;intro&quot;&gt;&lt;p&gt;Hello &amp;amp; welcome&lt;/p&gt;&lt;/div&gt;"),
+        ("doubly escaped", "&amp;lt;p&amp;gt;Hello &amp;amp;amp; welcome&amp;lt;/p&amp;gt;"),
+    ],
+)
+def test_html_to_text_never_returns_markup(name: str, markup: str) -> None:
+    """A stored description travels verbatim into the briefing PDF.
+
+    Boards serve HTML-escaped HTML - Greenhouse documents it, arbeitnow and
+    EURES do it - and 155 stored vacancies carried raw ``<div>``/``&nbsp;``
+    because unescaping happened *instead of* stripping rather than before it.
+    The tags then appeared in the middle of a generated briefing, between two
+    correctly rendered sections.
+    """
+    text = html_to_text(markup)
+    assert "<" not in text, f"{name}: markup survived into the flattened text"
+    assert "&nbsp;" not in text and "&amp;" not in text, f"{name}: entities survived"
+    assert "Hello & welcome" in text, f"{name}: the words did not survive"
+
+
+def test_html_to_text_breaks_on_blocks_but_not_on_emphasis() -> None:
+    """Emphasis is not a paragraph.
+
+    ``text(separator="\n")`` breaks on every node, inline ones included, so
+    "the <strong>FinTech</strong> connects consumers" became three lines. Every
+    emphasised sentence in a briefing was split down the middle - the second
+    half of the same defect that put raw tags in the document.
+    """
+    text = html_to_text(
+        "<div><p>Founded in 2012, the&nbsp;<strong>FinTech</strong> connects "
+        "<em>consumers</em> with <a href='#'>banks</a>.</p>"
+        "<ul><li>First item</li><li>Second item</li></ul></div>"
+    )
+    assert "the FinTech connects consumers with banks." in text, (
+        "an inline tag broke a sentence into separate lines"
+    )
+    # Blocks still separate: the list items are not run into the sentence.
+    first, *rest = [line for line in text.splitlines() if line.strip()]
+    assert first.startswith("Founded in 2012")
+    assert rest == ["First item", "Second item"]
+
+
+def test_html_to_text_leaves_ordinary_prose_alone() -> None:
+    assert html_to_text("Rust & Go, 3 < 5, no markup here") == "Rust & Go, 3 < 5, no markup here"
+    assert html_to_text("") == ""
+    assert html_to_text(None) == ""

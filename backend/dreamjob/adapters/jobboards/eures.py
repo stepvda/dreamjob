@@ -42,8 +42,9 @@ User-Agent (docs/Data_Gathering_Plan.md C1/C2, appendix C):
   item that asks for more is clamped here rather than spent on a 400;
 * the partition filters the sweep in FR-186 needs are honoured:
   ``locationCodes: ["BE1"]`` (NUTS-1) with ``publicationPeriod: "LAST_WEEK"``
-  narrows 232,496 to 1,593, and adding ``sectorCodes: ["N"]`` (NACE section N,
-  staffing agencies) narrows it further to 482.
+  narrows 232,496 to 1,593, and adding ``sectorCodes: ["N"]`` (NACE Rev 2.1
+  section N, professional/scientific/technical activities) narrows it further
+  to 482.
 
 europa.eu's robots.txt permits ``/eures/`` and states ``Crawl-delay: 10`` for
 ``User-agent: *``; volume therefore comes from partitioning the query, never

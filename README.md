@@ -104,7 +104,7 @@ DREAMJOB_LOCAL_LLM_TASKS=profile,cv,motivation
 
 ## Using it
 
-The **Where I am** screen is the map. Fifteen stages across five phases, each
+The **Where I am** screen is the map. Sixteen stages across five phases, each
 showing what is done, what is running, and — when something is blocked — *what
 would unblock it*. Every stage links to the screen that advances it.
 
@@ -161,14 +161,14 @@ aspirational:
 | long-running task | `jobs/runner.py` | everything is pausable and resumable |
 
 **Scale:** 172 Python modules / 72,820 lines · 113 JS modules / 34,082 lines ·
-**528 tests** · 71 tables · 24 adapters · 21 versioned prompt templates.
+**1,059 tests** · 71 tables · 24 adapters · 21 versioned prompt templates.
 
 ---
 
 ## Development
 
 ```bash
-PYTHONPATH=backend python3 -m pytest tests/ -q     # 528 tests
+PYTHONPATH=backend python3 -m pytest tests/ -q     # 1,059 tests
 python3 -m ruff check backend/dreamjob             # lint
 cd frontend && npm run build                       # production build
 python3 scripts/traceability.py                    # requirement coverage
@@ -179,6 +179,22 @@ Tests run against a temporary migrated database with no network access.
 **Adding a source** is one file: subclass `SourceAdapter`, implement
 `plan / fetch / parse / normalise`, decorate with `@register_adapter`. It
 appears in the catalogue at next boot.
+
+**Widening the company inventory** is operator work, run by hand:
+
+```bash
+python3 scripts/import_board_registry.py           # public ATS boards, monthly
+python3 scripts/resolve_employer_seed.py --dry-run # named large employers
+```
+
+The board registry is built from public URL indexes and is shaped like them:
+Personio and Recruitee SMEs, Teamtailor's Nordic base, and the Greenhouse and
+Ashby boards named in Hacker News threads. The large employers a Benelux search
+is judged on — the consultancies, the integrators, the telcos — run Workday or
+their own careers site and appear in none of those indexes. The second script
+closes that gap from `backend/dreamjob/pipeline/data/employer_seed.json`: it
+reads each named employer's own careers page and confirms the board with one
+request before storing it. No slug is ever guessed.
 
 ---
 
@@ -191,10 +207,9 @@ appears in the catalogue at next boot.
 | [DPIA](docs/DPIA.md) | Data-protection impact assessment (NFR-304) |
 | Word editions | `docs/Dream_Job_Functional_Design.docx`, `docs/Dream_Job_Technical_Architecture.docx` — illustrated |
 
-**155 of 157 requirements (98%)** from the specification are implemented and
-cited in the source: 103/104 Must, 43/44 Should, 9/9 Could. The two that are not
-are a performance target that needs a real campaign to measure, and the DPIA
-itself. Known limitations are listed in the Functional Design, §12 — they are
+**156 of 157 requirements (99%)** from the specification are implemented and
+cited in the source: 103/104 Must, 44/44 Should, 9/9 Could. The one that is not
+is the DPIA itself. Known limitations are listed in the Functional Design, §12 — they are
 stated rather than glossed.
 
 ---

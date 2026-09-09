@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     imap_host: str = Field("imap.gmail.com", alias="DREAMJOB_IMAP_HOST")
     imap_port: int = Field(993, alias="DREAMJOB_IMAP_PORT")
 
+    # RK-05: the transport guard.  True means every send runs the whole path -
+    # recipient, guard rails, MIME with the CV attached - and stops one step
+    # short of the wire, writing the assembled message to data/generated/
+    # dry_run/ instead.  It defaults to true so that no message can leave by
+    # accident; arming a real send is a deliberate change of this value plus a
+    # restart.  Enforced in dreamjob.mail.dry_run, never in the interface.
+    mail_dry_run: bool = Field(True, alias="DREAMJOB_MAIL_DRY_RUN")
+
     send_daily_cap: int = Field(25, alias="DREAMJOB_SEND_DAILY_CAP")
     send_min_interval_seconds: int = Field(90, alias="DREAMJOB_SEND_MIN_INTERVAL_SECONDS")
     send_window_start: time = Field(time(8, 30), alias="DREAMJOB_SEND_WINDOW_START")

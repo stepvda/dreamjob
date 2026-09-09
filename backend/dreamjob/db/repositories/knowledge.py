@@ -296,7 +296,10 @@ def vacancy_candidates(
 # ---------------------------------------------------------------------------
 
 WRITABLE_TABLES = frozenset(
-    {"company", "vacancy", "contact", "financial_year", "hiring_signal", "competitor_link", "event"}
+    {
+        "company", "vacancy", "contact", "financial_year", "hiring_signal",
+        "competitor_link", "event", "compensation_observation",
+    }
 )
 
 
@@ -427,6 +430,7 @@ def search_companies(
     country: str | None = None,
     sector: str | None = None,
     size_band: str | None = None,
+    ats_vendor: str | None = None,
     limit: int = 25,
     offset: int = 0,
 ) -> list[dict]:
@@ -450,6 +454,16 @@ def search_companies(
     if sector:
         where.append("c.sector_codes LIKE ?")
         params.append(f"%{sector}%")
+    # "any" answers "which of these did we reach through an ATS board at all",
+    # which is the question a corpus with one ATS-derived company could not be
+    # asked before.
+    if ats_vendor == "any":
+        where.append("c.ats_vendor IS NOT NULL")
+    elif ats_vendor == "none":
+        where.append("c.ats_vendor IS NULL")
+    elif ats_vendor:
+        where.append("c.ats_vendor = ?")
+        params.append(ats_vendor.lower())
     if where:
         sql += " AND " + " AND ".join(where)
     sql += " ORDER BY rank" if match else " ORDER BY COALESCE(c.refreshed_at, c.collected_at) DESC"
@@ -464,6 +478,7 @@ def count_companies(
     country: str | None = None,
     sector: str | None = None,
     size_band: str | None = None,
+    ats_vendor: str | None = None,
 ) -> int:
     where: list[str] = []
     params: list[Any] = []
@@ -485,10 +500,50 @@ def count_companies(
     if sector:
         where.append("c.sector_codes LIKE ?")
         params.append(f"%{sector}%")
+    if ats_vendor == "any":
+        where.append("c.ats_vendor IS NOT NULL")
+    elif ats_vendor == "none":
+        where.append("c.ats_vendor IS NULL")
+    elif ats_vendor:
+        where.append("c.ats_vendor = ?")
+        params.append(ats_vendor.lower())
     if where:
         sql += " AND " + " AND ".join(where)
     row = query_one(sql, tuple(params))
     return int(row["n"]) if row else 0
+
+
+def company_facets() -> dict[str, Any]:
+    """Where the company inventory came from, in one query each (FR-345).
+
+    This exists because a corpus can look healthy at 1,337 rows and still hold
+    one company reached through an ATS board and none of the large employers a
+    search is judged on.  Nothing on any screen said so.  Counting by source and
+    by ATS vendor makes a starved harvest stage visible without reading the
+    plan-item table.
+    """
+    def _counts(sql: str) -> dict[str, int]:
+        return {str(r["k"] or "unknown"): int(r["n"]) for r in query_all(sql)}
+
+    return {
+        "total": int((query_one("SELECT COUNT(*) AS n FROM company") or {"n": 0})["n"]),
+        "by_source": _counts(
+            "SELECT source AS k, COUNT(*) AS n FROM company GROUP BY source "
+            "ORDER BY n DESC LIMIT 25"
+        ),
+        "by_country": _counts(
+            "SELECT country AS k, COUNT(*) AS n FROM company GROUP BY country "
+            "ORDER BY n DESC LIMIT 25"
+        ),
+        "by_ats_vendor": _counts(
+            "SELECT ats_vendor AS k, COUNT(*) AS n FROM company "
+            "WHERE ats_vendor IS NOT NULL GROUP BY ats_vendor ORDER BY n DESC"
+        ),
+        "with_ats_board": int(
+            (query_one("SELECT COUNT(*) AS n FROM company WHERE ats_slug IS NOT NULL")
+             or {"n": 0})["n"]
+        ),
+    }
 
 
 def search_vacancies(

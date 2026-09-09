@@ -120,8 +120,17 @@ def test_seed_registry_is_eu_weighted(registry: dict) -> None:
     assert not imp.VENDORS["smartrecruiters"].enabled
 
     # Workday's slug is "<host>/<site>"; the URL indexes name only the tenant
-    # host, and a guessed site is a 404 that gets stored and re-probed.
-    assert "workday" not in by_vendor
+    # host, and a guessed site is a 404 that gets stored and re-probed.  So no
+    # *index* row may be a Workday one - but a board read off a named employer's
+    # own careers page carries the real pair, and those are how the large
+    # employers (who overwhelmingly run Workday) enter the registry at all.
+    for board in registry["boards"]:
+        if board["vendor"] != "workday":
+            continue
+        assert set(board["source"].split("+")) == {imp.SOURCE_EMPLOYER_SEED}, (
+            f"a Workday board from a URL index is a guessed site: {board}"
+        )
+        assert imp._WORKDAY_SLUG_RE.match(board["slug"]), board
 
 
 def test_seed_registry_documents_its_own_provenance(registry: dict) -> None:
@@ -510,7 +519,7 @@ def test_a_disabled_vendor_cannot_be_imported(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration 092: liveness state in the database
+# Migrations 092 / 131: liveness state in the database
 # ---------------------------------------------------------------------------
 
 _ENV_KEYS = ("DREAMJOB_DATA_DIR", "DREAMJOB_DB_PATH", "DREAMJOB_MASTER_KEY",
@@ -569,7 +578,7 @@ def test_liveness_is_a_state_the_importer_must_not_touch(isolated_db: None) -> N
 
     row_id = imp.board_row_id("recruitee", "acme")
     update_row("board_registry", row_id, {
-        "liveness": "live", "last_verified": "2026-09-08", "last_status": 200, "job_count": 12,
+        "state": "live", "last_verified": "2026-09-08", "last_status": 200, "job_count": 12,
     })
 
     later = imp.Board(vendor="recruitee", slug="acme", first_seen="2026-09-09",
@@ -578,7 +587,7 @@ def test_liveness_is_a_state_the_importer_must_not_touch(isolated_db: None) -> N
 
     stored = query_one("SELECT * FROM board_registry WHERE id = ?", (row_id,))
     assert stored["last_verified"] == "2026-09-08"
-    assert stored["liveness"] == "live"
+    assert stored["state"] == "live"
     assert stored["job_count"] == 12
     assert stored["first_seen"] == "2026-01-01"          # the oldest sighting wins
     assert stored["source"] == "commoncrawl+hackernews"  # the new evidence lands
@@ -592,7 +601,7 @@ def test_the_seed_registry_loads_into_the_table(isolated_db: None, registry: dic
     stats = imp.load_into_db(boards)
 
     assert stats["inserted"] == len(boards)
-    rows = query_all("SELECT vendor, slug, liveness, last_verified FROM board_registry")
+    rows = query_all("SELECT vendor, slug, state, last_verified FROM board_registry")
     assert len(rows) == len(boards)
-    assert {r["liveness"] for r in rows} == {"unverified"}
+    assert {r["state"] for r in rows} == {"unverified"}
     assert {r["last_verified"] for r in rows} == {None}

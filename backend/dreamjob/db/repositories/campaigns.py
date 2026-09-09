@@ -269,11 +269,93 @@ def record_extraction_rate(adapter_key: str, rate: float | None, had_success: bo
 # ---------------------------------------------------------------------------
 
 
-def insert_plan_item(campaign_id: str, values: dict) -> str:
+class UnknownSource(ValueError):
+    """A plan item was written for a source this installation has never heard of.
+
+    Raised by :func:`insert_plan_item` (FR-161, FR-164; plan item C5).
+    """
+
+
+#: Sources whose implementation is not a ``SourceAdapter``.  The FR-165
+#: LinkedIn network strategy is planned as a plan item like every other source
+#: but is executed by the browser job rather than by the collection spine, so
+#: it is never in the adapter registry and the guard below must not mistake it
+#: for a fixture.  The keys are written out rather than imported because this
+#: module is on the write path of every plan item and ``dreamjob.browser``
+#: pulls in the automation stack; ``tests/unit/test_plan_fixture_leak.py``
+#: asserts they still match ``browser.linkedin.ADAPTER_KEY`` and
+#: ``browser.glassdoor.ADAPTER_KEY``, so the shortcut cannot drift in silence.
+BROWSER_STRATEGY_KEYS = frozenset({"linkedin_network", "glassdoor"})
+
+
+def implemented_sources() -> set[str]:
+    """Every source key this installation can actually execute (NFR-601, FR-165).
+
+    Empty when no adapter module has been imported: the registry fills itself
+    at import time, so an empty one means "nothing is knowable yet", never
+    "nothing exists".  Callers treat the empty set as "do not judge".
+    """
+    from dreamjob.adapters.base import all_adapters  # noqa: PLC0415 - import cycle
+
+    registered = set(all_adapters())
+    return registered | set(BROWSER_STRATEGY_KEYS) if registered else set()
+
+
+def refuse_unknown_source(adapter_key: str) -> None:
+    """A plan may only name a source something knows about (FR-161, FR-164, C5).
+
+    Two things can vouch for a source, and a plan item needs one of them:
+
+    * an **implementation** - an adapter in the registry, or one of the browser
+      strategies that are executed outside it;
+    * a **catalogue row** - a source an administrator can see, acknowledge or
+      switch off (FR-363).  A catalogued source whose adapter has gone is
+      deliberately still plannable: collection settles it as ``skipped`` and
+      ``admin.prune_unknown_sources`` removes the row at the next start-up
+      unless a person decided to keep it.  Refusing it here would break a plan
+      over a row that is already being handled honestly elsewhere.
+
+    A key with neither is residue.  ``broken_board``, ``stub_board`` and eight
+    ``spine.*`` stubs are unit-test adapters that reached the installed
+    catalogue through ``sync_catalogue`` (C5); the catalogue rows were pruned,
+    but the 104 plan items they had produced stayed behind in 32 campaigns
+    (migration 132), naming sources that nothing implements and nothing
+    catalogues: unrunnable, unexplainable, and 104 of the 538 outcomes the
+    FR-185 dashboard had to account for.  A row like that must not be written
+    in the first place.
+
+    This is the second net, not the first: a stub registered by a test *is* an
+    implementation as far as this function can see, so what keeps fixtures out
+    of the installed database is ``tests/unit/conftest.py`` pointing the whole
+    unit suite at a scratch file.  This one catches what gets past that.
+    """
+    known = implemented_sources()
+    if not known or adapter_key in known:
+        return
+    if adapter_key and get_catalogue_entry(adapter_key) is not None:
+        return
+    raise UnknownSource(
+        f"Nothing knows the source {adapter_key!r}: it has no adapter and no catalogue row, "
+        f"so a plan item for it could never run and could never be explained (FR-164, C5). "
+        f"Implemented sources: {', '.join(sorted(known))}."
+    )
+
+
+def insert_plan_item(campaign_id: str, values: dict, *, allow_unimplemented: bool = False) -> str:
+    """Write one plan item, refusing a source nothing knows about (FR-163, FR-164).
+
+    ``allow_unimplemented`` is the deliberate exception, and it is not a way
+    round the guard: a plan outlives the code that ran it, so a *stored* item
+    may legitimately name an adapter that has since been deleted or renamed -
+    collection settles those as skipped - and the tests that cover that path
+    have to be able to write one.  Nothing in the application passes it.
+    """
     payload = dict(values)
     payload["campaign_id"] = campaign_id
     payload.setdefault("status", "planned")
     payload.setdefault("created_at", utcnow())
+    if not allow_unimplemented:
+        refuse_unknown_source(str(payload.get("adapter_key") or ""))
     return insert_row("source_plan_item", payload)
 
 

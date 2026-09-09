@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -192,15 +193,32 @@ def build_base_document(
     return document
 
 
+def _website_urls(entries: Any) -> list[str]:
+    """The address of each site, as the header line prints it.
+
+    Every producer of ``contact.websites`` writes ``{"url": ..., "label": ...}``:
+    ``linkedin_pdf``, ``cv_parser`` and the ``profile_intake`` merge all read
+    ``w["url"]``.  Taking ``str(w)`` of one of those puts a Python dict
+    repr - ``{'url': '...', 'label': 'LinkedIn'}`` - in the contact line of the
+    CV that gets attached and sent, which is what it did before this.  A bare
+    string is still accepted, because an edited profile may hold one.
+    """
+    out: list[str] = []
+    for entry in entries or []:
+        url = str(entry.get("url") or "") if isinstance(entry, Mapping) else str(entry)
+        url = url.strip()
+        if url and url not in out:
+            out.append(url)
+    return out
+
+
 def _contact(sections: dict, seeker: dict, disclosure: Disclosure) -> CvContact:
     block = sections.get("contact") or {}
     if disclosure.blocked("contact"):
         return CvContact(name=str(seeker.get("display_name") or ""))
-    websites = [
-        str(w)
-        for w in (block.get("websites") or [])
-        if str(w).strip() and not disclosure.blocked("contact.websites")
-    ]
+    websites = (
+        [] if disclosure.blocked("contact.websites") else _website_urls(block.get("websites"))
+    )
     return CvContact(
         name=disclosure.filter_text("contact.name", block.get("name"))
         or str(seeker.get("display_name") or ""),
@@ -462,6 +480,14 @@ def apply_tailoring(
     document: CvDocument, tailoring: dict[str, Any]
 ) -> tuple[CvDocument, list[str], list[str]]:
     """Merge a model response into the base document.  Facts are never taken."""
+    if not isinstance(tailoring, Mapping):
+        # A model that answers with a bare list - the JSON is valid, the shape
+        # is not - used to raise AttributeError here, which is not in the tuple
+        # :func:`generate_cv` degrades on, so one bad answer failed the whole
+        # package instead of producing the untailored CV (NFR-104).
+        raise ValueError(
+            f"the tailoring response is a {type(tailoring).__name__}, not an object"
+        )
     notes = [str(n).strip() for n in (tailoring.get("notes") or []) if str(n).strip()]
     dropped: list[str] = []
 

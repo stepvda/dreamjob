@@ -33,9 +33,11 @@ ROUTERS: list[tuple[str, str, str]] = [
     ("campaigns",    "/api/campaigns",    "Campaigns"),             # FR-161..166, FR-185
     ("browser",      "/api/browser",      "Browser automation"),    # FR-201..208
     ("companies",    "/api/companies",    "Companies"),             # FR-221..246, FR-341..345
+    ("employers",    "/api/employers",    "Employer kind"),         # FR-143, FR-341, NFR-402
     ("opportunities", "/api/opportunities", "Opportunities"),       # FR-261..285, FR-381..383
     ("contacts",     "/api/contacts",     "Contacts"),              # FR-301..306
     ("applications", "/api/applications", "Applications"),          # FR-321..331
+    ("apply",        "/api/apply",        "Apply browser"),         # FR-321..325
     ("mail",         "/api/mail",         "Mail"),                  # FR-325..327
     ("pipeline",     "/api/pipeline",     "Post-application"),      # FR-421..425
     ("monitoring",   "/api/monitoring",   "Monitoring"),            # FR-401..403
@@ -67,6 +69,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("Source catalogue synchronised: %d adapters", count)
     except Exception:  # noqa: BLE001
         log.exception("Could not synchronise the source catalogue")
+
+    # FR-181/DR-101: the shipped ATS board registry becomes rows, so the boards
+    # this installation verifies, retires or resolves to a company have
+    # somewhere to be recorded.  Importing never overwrites what is already
+    # there - the file ships "never verified" on every row.
+    try:
+        from dreamjob.db.repositories import board_registry as board_repo  # noqa: PLC0415
+        from dreamjob.pipeline.discovery import load_board_registry  # noqa: PLC0415
+
+        imported = board_repo.sync_from_file(load_board_registry())
+        if imported["added"]:
+            log.info(
+                "Board registry: %d board(s) imported, %d already known",
+                imported["added"], imported["kept"],
+            )
+    except Exception:  # noqa: BLE001 - a registry that will not import is not a failed boot
+        log.exception("Could not import the ATS board registry")
 
     # NFR-401: jobs interrupted by a restart are marked resumable.
     try:

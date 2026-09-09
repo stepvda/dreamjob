@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from dreamjob.llm.client import LLMClient, LLMError
+from dreamjob.llm.client import LLMClient, LLMError, TruncatedResponse
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,16 @@ def complete_json(llm: LLMClient, task: str, system: str, user: str, **kwargs: A
     """``LLMClient.complete_json`` with the reasoning-budget fallback."""
     kwargs.setdefault("max_tokens", MAX_OUTPUT_TOKENS)
     try:
+        return llm.complete_json(task, system, user, **kwargs)
+    except TruncatedResponse:
+        # The reasoning model spent the whole ceiling thinking and returned
+        # nothing, or stopped mid-JSON.  That is exactly the case this module
+        # exists for, and it is named by its own exception class now, so it no
+        # longer has to be recognised from the wording of a message.  Raising
+        # the ceiling would only buy a longer think; the chat model does not
+        # reason against the same budget, so the task is routed to it instead.
+        log.info("Task %s was cut off at its token budget; retrying on the chat model", task)
+        kwargs["prefer_strong"] = False
         return llm.complete_json(task, system, user, **kwargs)
     except LLMError as exc:
         message = str(exc).lower()

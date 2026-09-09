@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
@@ -39,7 +40,7 @@ from dreamjob.adapters.registries.common import (
     identity_record,
 )
 from dreamjob.egress.client import RobotsDisallowed
-from dreamjob.pipeline.dedup import company_similarity
+from dreamjob.pipeline.dedup import company_similarity, tokens
 
 log = logging.getLogger(__name__)
 
@@ -59,9 +60,51 @@ NAME_SEARCH_FORM = (
     "&actionNPRP=Search"
 )
 
-#: A name is the weakest DR-101 key, so a result row has to look like the
-#: company that was asked for before its number is believed.
-NAME_MATCH_FLOOR = 0.60
+# ---------------------------------------------------------------------------
+# The exact-name gate (DR-101, FR-184, CR-405)
+# ---------------------------------------------------------------------------
+#
+# The register answers a *phonetic* search, and ``company_similarity`` strips
+# "de", "the" and the legal form before comparing, so several rows on a hit
+# list score 1.00 against a name that is not theirs.  Measured on thirty
+# Belgian employer names, the similarity floor this replaced - accept the
+# best-scoring row at 0.60 - picked the wrong legal entity **six times**: "SMALS" resolved to a gravel company, "DE BRANDT NV" to the
+# construction firm "Brandt", and "TOURING NV" to "A TOURING COMPANY BV" at
+# similarity 1.00 - because "a" is a stopword.
+#
+# Anchoring DR-101 on the wrong entity is worse than not resolving at all:
+# the NBB figures, the VAT number and - since NACE 78.x is precision 1.00 for
+# a staffing agency - the employer-kind verdict are then all confidently about
+# a different company (CR-405, docs/Agency_Research_Design.md section 2.1).
+# So for identity the gate is **equality, not similarity**, and it refuses
+# rather than guesses.
+
+#: Legal forms, and only legal forms.  "Company", "Group", "Belgium" and
+#: "International" are deliberately absent from this set although
+#: :data:`dreamjob.pipeline.dedup.LEGAL_FORMS` holds them: they are part of a
+#: registered name, and stripping them is exactly what let "TOURING" match
+#: "A TOURING COMPANY".
+_GATE_LEGAL_FORMS = frozenset(
+    """
+    nv sa bv bvba sprl srl cv cvba cvoa scrl scs sca comm va vof snc gcv se sce
+    vzw asbl ivzw aisbl esv eesv
+    ltd limited plc llp lp llc inc incorporated corp corporation
+    gmbh mbh ag kg kgaa ohg ug gbr eg ev
+    sas sasu sarl eurl sci scop
+    spa srls sapa oy oyj ab abp as asa aps hf ehf bhd sdn pty pte pvt
+    """.split()
+)
+
+#: Words that carry no identity of their own.  They are **not** removed before
+#: the comparison - "DE BRANDT" is not "Brandt" - they only decide whether the
+#: name that was asked for has any identity to compare at all.
+_GATE_STOPWORDS = frozenset(
+    "de het the la le les der die das den een a an and en et und of van von du des".split()
+)
+
+#: ``Dumortierlaan 70 8300 Knokke-Heist`` - the register prints the seat as a
+#: street line followed by a Belgian postcode and its municipality.
+_SEAT_RE = re.compile(r"(\d{4})\s+([^\d,;]{2,60})$")
 
 _ENTERPRISE_HREF = re.compile(r"ondernemingsnummer=(\d{9,10})")
 
@@ -104,6 +147,147 @@ def _labelled(text: str, *labels: str) -> str | None:
                 return lines[index + 1].strip()
     return None
 
+
+@dataclass(frozen=True)
+class EntityMatch:
+    """What the exact-name gate concluded about one phonetic hit list.
+
+    ``ambiguous`` is a first-class answer and is not the same as ``no_match``:
+    the register *does* hold a company of this name, and cannot say which one.
+    The employer-kind rung turns it into ``cannot_tell(registry_ambiguous)``
+    with these candidates attached, so the job seeker is shown the two rows
+    rather than a coin flip (docs/Agency_Research_Design.md sections 2.1, 7).
+    """
+
+    decision: str  # matched | ambiguous | no_match
+    number: str | None = None
+    name: str = ""
+    municipality: str = ""
+    postcode: str = ""
+    rule: str = ""  # exact_name | extended_name
+    municipality_checked: bool = False
+    #: The identifying words of the name that was asked for.  One of them is
+    #: the class the phonetic search gets wrong; two or more, matched exactly,
+    #: is the class it gets right (see ``employer_registry_rung``).
+    queried_tokens: tuple[str, ...] = ()
+    reason: str = ""
+    candidates: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+
+    @property
+    def matched(self) -> bool:
+        return self.decision == "matched" and bool(self.number)
+
+    def as_dict(self) -> dict[str, Any]:
+        """The identity evidence, as it is stored beside a verdict (NFR-402)."""
+        return {
+            "gate": "exact_name_v2",
+            "decision": self.decision,
+            "legal_id": self.number,
+            "registered_name": self.name,
+            "municipality": self.municipality,
+            "postcode": self.postcode,
+            "rule": self.rule,
+            "municipality_checked": self.municipality_checked,
+            "queried_tokens": list(self.queried_tokens),
+            "reason": self.reason,
+            "candidates": list(self.candidates),
+        }
+
+
+def _trading_name(name: str) -> str:
+    """The name as the register indexes it: the legal form dropped, spelling kept."""
+    kept = [word for word in (name or "").split() if _gate_tokens(word)]
+    return " ".join(kept) or (name or "")
+
+
+def _gate_tokens(name: str | None) -> list[str]:
+    """Identifying words of a registered name: legal form out, everything else in."""
+    return [token for token in tokens(name or "") if token not in _GATE_LEGAL_FORMS]
+
+
+def _name_rule(wanted: list[str], row: list[str]) -> str:
+    """``exact_name``, ``extended_name`` or "" - how this row matches, if at all.
+
+    ``extended_name`` is the one concession to how companies are named in a
+    posting: the register holds "ACCENT Jobs For People" and the vacancy says
+    "Accent Jobs".  It is a *prefix* rule, in order, which is what keeps
+    "TOURING" away from "A TOURING COMPANY", and it never stands on its own -
+    :meth:`KBOAdapter.match_search_result` requires the seat to confirm it.
+    """
+    if not wanted or not row:
+        return ""
+    if wanted == row:
+        return "exact_name"
+    if len(row) > len(wanted) and row[: len(wanted)] == wanted:
+        return "extended_name"
+    return ""
+
+
+def _normalise_place(value: str | None) -> set[str]:
+    """Place words, for comparing a seat with a vacancy location."""
+    return {token for token in tokens(value or "") if len(token) > 2}
+
+
+def _seat_matches(row: dict[str, Any], municipalities: tuple[str, ...] | list[str]) -> bool:
+    """Is this entity seated where the company's vacancies are?
+
+    Deliberately generous - a postcode anywhere in the hint, or one shared
+    place word - because the check exists to *separate* two rows, not to prove
+    a location.  An agency's vacancies are at its clients' sites, so a seat
+    that does not appear is weak evidence of nothing; a seat that does appear
+    is what tells the two "House of Recruitment Solutions" rows apart.
+    """
+    if not municipalities:
+        return False
+    seat_words = _normalise_place(row.get("municipality"))
+    postcode = (row.get("postcode") or "").strip()
+    for hint in municipalities:
+        text = str(hint or "")
+        if postcode and postcode in text:
+            return True
+        if seat_words and seat_words & _normalise_place(text):
+            return True
+    return False
+
+
+def _candidate(row: dict[str, Any]) -> dict[str, Any]:
+    """One register row, as evidence a person can read (NFR-402)."""
+    return {
+        "legal_id": row.get("number"),
+        "registered_name": row.get("name"),
+        "municipality": row.get("municipality"),
+        "postcode": row.get("postcode"),
+        "url": f"{KBO_PUBLIC_SEARCH}?ondernemingsnummer={row.get('number')}",
+    }
+
+
+def _matched(
+    rule: str,
+    row: dict[str, Any],
+    *,
+    municipality_checked: bool,
+    wanted: tuple[str, ...] = (),
+) -> EntityMatch:
+    return EntityMatch(
+        "matched",
+        number=row.get("number"),
+        name=row.get("name") or "",
+        municipality=row.get("municipality") or "",
+        postcode=row.get("postcode") or "",
+        rule=rule,
+        municipality_checked=municipality_checked,
+        queried_tokens=wanted,
+        reason=(
+            f"the register holds one entity named {row.get('name')!r}"
+            + (
+                " and it is seated where the vacancies are"
+                if municipality_checked
+                else f", seated in {row.get('municipality') or 'an unknown place'}, "
+                "which the vacancies do not confirm"
+            )
+        ),
+        candidates=(_candidate(row),),
+    )
 
 @register_adapter
 class KBOAdapter(RegistryAdapter):
@@ -253,20 +437,67 @@ class KBOAdapter(RegistryAdapter):
             confidence=0.85,
         )
 
-    async def search_by_name(self, name: str, *, egress: Any) -> str | None:
+    @staticmethod
+    def name_search_url(name: str, *, legal_persons_only: bool = False) -> str:
+        """The phonetic search as the register's own form posts it.
+
+        ``legal_persons_only`` drops the natural-person and establishment-unit
+        halves of the form (their ``_x=on`` markers stay: Spring answers 404
+        without them).  A bare token - "100G", "VIND" - otherwise returns a
+        page of sole traders and shop signs that the gate then has to throw
+        away one by one.
+        """
+        form = NAME_SEARCH_FORM
+        if legal_persons_only:
+            form = form.replace("ondNP=true&", "").replace("vest=true&", "")
+        # The legal form is part of what the search matches on, and including
+        # it empties the hit list: measured live on 2026-09-09, "NOEL FRANKLIN
+        # BV" returned 0 rows and "NOEL FRANKLIN" returned the enterprise
+        # (0700.275.068); "100G BV" returned 20 rows, none of them 100G, and
+        # "100G" returned 0803.543.941 alone.
+        trading = _trading_name(name)
+        return f"{KBO_NAME_SEARCH}?searchWord={quote(trading)}&{form}"
+
+    async def search_by_name(
+        self,
+        name: str,
+        *,
+        egress: Any,
+        municipalities: tuple[str, ...] | list[str] = (),
+        legal_persons_only: bool = False,
+    ) -> str | None:
         """Phonetic name search - the weakest DR-101 key, so it is the last resort."""
-        url = f"{KBO_NAME_SEARCH}?searchWord={quote(name)}&{NAME_SEARCH_FORM}"
+        match = await self.match_by_name(
+            name,
+            egress=egress,
+            municipalities=municipalities,
+            legal_persons_only=legal_persons_only,
+        )
+        return match.number if match.matched else None
+
+    async def match_by_name(
+        self,
+        name: str,
+        *,
+        egress: Any,
+        municipalities: tuple[str, ...] | list[str] = (),
+        legal_persons_only: bool = False,
+    ) -> EntityMatch:
+        """The gate's own answer, so a caller can tell ambiguity from absence."""
+        url = self.name_search_url(name, legal_persons_only=legal_persons_only)
         try:
             response = await egress.fetch(url)
         except Exception as exc:  # noqa: BLE001
             log.info("[%s] name search unavailable (%s)", self.key, exc)
-            return None
+            return EntityMatch("no_match", reason=f"the register did not answer ({exc})"[:200])
         if not response.ok:
             log.info(
                 "[%s] name search for %r returned HTTP %s", self.key, name, response.status_code
             )
-            return None
-        return self.pick_search_result(response.text, name)
+            return EntityMatch(
+                "no_match", reason=f"the register answered HTTP {response.status_code}"
+            )
+        return self.match_search_result(response.text, name, municipalities=municipalities)
 
     @staticmethod
     def parse_search_results(markup: str) -> list[dict[str, Any]]:
@@ -295,36 +526,158 @@ class KBOAdapter(RegistryAdapter):
                 continue
             kind_text = _WS.sub(" ", cells[1].text(separator=" ")).strip()
             name_node = row.css_first("td.benaming")
+            address = _WS.sub(" ", cells[-1].text(separator=" ")).replace("\n", " ").strip()
+            address = _WS.sub(" ", address)
+            seat = _SEAT_RE.search(address)
             out.append(
                 {
                     "kind": "ENT" if kind_text.upper().startswith("ENT") else "VE",
                     "status": "active" if "actief" in kind_text.lower() else "",
                     "number": match.group(1).zfill(10),
                     "name": _WS.sub(" ", (name_node.text() if name_node else "")).strip(),
+                    # The seat is what separates two entities with the same
+                    # name, so it is read here rather than fetched per row.
+                    "address": address,
+                    "postcode": seat.group(1) if seat else "",
+                    "municipality": seat.group(2).strip() if seat else "",
                 }
             )
         return out
 
     @classmethod
-    def pick_search_result(cls, markup: str, wanted: str) -> str | None:
+    def pick_search_result(
+        cls, markup: str, wanted: str, *, municipalities: tuple[str, ...] | list[str] = ()
+    ) -> str | None:
         """The enterprise number of the row that is actually this company.
 
-        The register answers a phonetic search, so the first row is frequently
-        a different company with a similar-sounding name; taking it would anchor
-        DR-101 on the wrong legal entity for good.
+        A thin wrapper over :meth:`match_search_result`: it answers with a
+        number only when the gate *matched*, and with ``None`` for both
+        ``no_match`` and ``ambiguous``, which is what every caller that only
+        wants an identifier can act on.  A caller that has to tell "no such
+        company" from "two companies share this name" - the employer-kind
+        registry rung does - reads the match itself.
         """
-        scored = [
-            (row["kind"] == "ENT", company_similarity(wanted, row["name"]), row)
-            for row in cls.parse_search_results(markup)
-        ]
-        scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
-        for is_entity, score, row in scored:
-            if score >= NAME_MATCH_FLOOR:
-                log.info(
-                    "[registry.kbo] %r resolved to %s (%s, name score %.2f)",
-                    wanted, format_enterprise_number(row["number"]),
-                    "entity" if is_entity else "establishment unit", score,
-                )
-                return row["number"]
-        log.info("[registry.kbo] no register row matched %r closely enough", wanted)
+        match = cls.match_search_result(markup, wanted, municipalities=municipalities)
+        if match.matched:
+            log.info(
+                "[registry.kbo] %r resolved to %s (%s, %s)",
+                wanted, format_enterprise_number(match.number or ""), match.name, match.rule,
+            )
+            return match.number
+        log.info("[registry.kbo] %r not resolved: %s", wanted, match.reason)
         return None
+
+    @classmethod
+    def match_search_result(
+        cls, markup: str, wanted: str, *, municipalities: tuple[str, ...] | list[str] = ()
+    ) -> EntityMatch:
+        """Apply the exact-name gate to a phonetic hit list (DR-101, CR-405).
+
+        The rules, in the order they fire, and what each one is for:
+
+        1. **Registered entities only.**  An establishment unit is a site of an
+           enterprise, not the enterprise; its number is the parent's and its
+           name is often a shop sign.
+        2. **The normalised names must be equal**, legal form removed and
+           nothing else - or, when the registered name merely *extends* the
+           name asked for ("ACCENT Jobs" -> "ACCENT Jobs For People"), equal on
+           the queried tokens as a prefix, which then has to be confirmed by
+           the seat.  A stopword-only difference is a difference: "DE BRANDT"
+           is not "Brandt".
+        3. **A name that is nothing but stopwords and legal forms** has no
+           identity to compare, so it is refused rather than matched.
+        4. **Ties are broken by the seat municipality**, compared with the
+           places the company's vacancies are in; when that does not separate
+           them the answer is ``ambiguous``, never the first row.
+        5. **A one-token name** ("VIND", "JOBZ", "SMALS") is the class the
+           phonetic search gets wrong most often, so when locations are known
+           the seat must agree.  With no locations to check against, a single
+           exactly-named entity is still returned - it is the only candidate -
+           but ``municipality_checked`` is false and the caller is expected to
+           want corroboration before acting on it.
+        """
+        wanted_tokens = _gate_tokens(wanted)
+        if not wanted_tokens:
+            return EntityMatch("no_match", reason="the name carries no identifying word")
+        if all(token in _GATE_STOPWORDS for token in wanted_tokens):
+            return EntityMatch(
+                "no_match", reason=f"{wanted!r} is nothing but stopwords and a legal form"
+            )
+
+        rows = [row for row in cls.parse_search_results(markup) if row["kind"] == "ENT"]
+        if not rows:
+            return EntityMatch(
+                "no_match", reason="the register's hit list holds no registered entity"
+            )
+
+        hits: list[tuple[str, dict[str, Any]]] = []
+        for row in rows:
+            rule = _name_rule(wanted_tokens, _gate_tokens(row.get("name")))
+            if rule:
+                hits.append((rule, row))
+        if not hits:
+            closest = max(rows, key=lambda r: company_similarity(wanted, r.get("name") or ""))
+            return EntityMatch(
+                "no_match",
+                reason=(
+                    f"no registered entity on the hit list is named {wanted!r} "
+                    f"(closest: {closest.get('name')!r})"
+                ),
+                candidates=tuple(_candidate(row) for row in rows[:5]),
+            )
+
+        confirmed = [(rule, row) for rule, row in hits if _seat_matches(row, municipalities)]
+        exact = [(rule, row) for rule, row in hits if rule == "exact_name"]
+        one_token = len(wanted_tokens) == 1
+
+        if len(confirmed) == 1:
+            rule, row = confirmed[0]
+            return _matched(
+                rule, row, municipality_checked=True, wanted=tuple(wanted_tokens)
+            )
+        if len(confirmed) > 1:
+            return EntityMatch(
+                "ambiguous",
+                reason=(
+                    f"{len(confirmed)} registered entities are named {wanted!r} and seated in "
+                    "the same place; the register cannot say which one posted the vacancies"
+                ),
+                candidates=tuple(_candidate(row) for _, row in confirmed[:5]),
+            )
+
+        # Nothing was confirmed by the seat.  That is only fatal when the seat
+        # was the evidence the rule needed.
+        single = exact if len(exact) == 1 else (hits if len(hits) == 1 else [])
+        if not single:
+            return EntityMatch(
+                "ambiguous",
+                reason=(
+                    f"{len(hits)} registered entities carry the name {wanted!r} and none is "
+                    "seated where the vacancies are"
+                ),
+                candidates=tuple(_candidate(row) for _, row in hits[:5]),
+            )
+        rule, row = single[0]
+        if rule != "exact_name":
+            return EntityMatch(
+                "ambiguous",
+                reason=(
+                    f"the registered name {row.get('name')!r} extends {wanted!r} and its seat "
+                    f"({row.get('municipality') or 'unknown'}) does not appear in the vacancies"
+                ),
+                candidates=(_candidate(row),),
+            )
+        # One exactly-named entity, and the seat did not confirm it - either
+        # because no location was known or because the vacancies are somewhere
+        # else, which for an agency is the normal case: its postings are at its
+        # clients' sites.  That is not a reason to refuse the only candidate,
+        # and it is a reason not to close the ladder on it: the match travels
+        # with ``municipality_checked = False`` and the rung caps what may be
+        # concluded from it (see ``employer_registry_rung.UNCHECKED_IDENTITY_CAP``).
+        if one_token:
+            log.info(
+                "[registry.kbo] %r is a one-word name matched without a seat check", wanted
+            )
+        return _matched(
+            rule, row, municipality_checked=False, wanted=tuple(wanted_tokens)
+        )

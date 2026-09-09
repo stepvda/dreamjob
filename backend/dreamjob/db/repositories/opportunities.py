@@ -32,6 +32,7 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+from dreamjob.db.repositories import employer_kind as _employer_kind
 
 #: Columns of ``opportunity`` that hold JSON and are decoded on the way out.
 JSON_COLUMNS = (
@@ -58,7 +59,12 @@ SORT_EXPRESSIONS: dict[str, str] = {
     "company": "company_name COLLATE NOCASE ASC",
 }
 
-_LIST_SELECT = """
+# NFR-502: the employer-kind badge travels with the row rather than costing a
+# query per line.  ``BADGE_JOIN`` is a primary-key look-up on the verdict
+# table, and the correction is a correlated scalar on purpose - a LEFT JOIN
+# would double any row that has both a private and a promoted correction
+# (db/repositories/employer_kind.py::badge_correction_column).
+_LIST_SELECT = f"""
     SELECT o.*,
            c.name           AS company_name,
            c.domain         AS company_domain,
@@ -68,10 +74,13 @@ _LIST_SELECT = """
            c.trajectory     AS company_trajectory,
            c.careers_url    AS company_careers_url,
            v.source_url     AS vacancy_source_url,
-           v.posted_at      AS vacancy_posted_at
+           v.posted_at      AS vacancy_posted_at,
+           {_employer_kind.BADGE_COLUMNS.strip()},
+           {_employer_kind.badge_correction_column()}
     FROM opportunity o
     LEFT JOIN company c ON c.id = o.company_id
     LEFT JOIN vacancy v ON v.id = o.vacancy_id
+    {_employer_kind.BADGE_JOIN.format(company_column="o.company_id")}
 """
 
 
@@ -765,6 +774,8 @@ def compensation_observations(
     country: str | None = None,
     company_id: str | None = None,
     sources: list[str] | None = None,
+    normalised_titles: list[str] | None = None,
+    market_wide: bool = False,
     limit: int = 100,
 ) -> list[dict]:
     sql = "SELECT * FROM compensation_observation WHERE 1 = 1"
@@ -772,10 +783,19 @@ def compensation_observations(
     if company_id:
         sql += " AND company_id = ?"
         params.append(company_id)
-    if function_family:
+    if normalised_titles:
+        marks = ", ".join("?" for _ in normalised_titles)
+        sql += f" AND normalised_title IN ({marks})"
+        params.extend(normalised_titles)
+    if market_wide:
+        # A national survey is published per occupation, not per function
+        # family: its rows carry no family and would never match an equality
+        # test against one.
+        sql += " AND function_family IS NULL"
+    elif function_family:
         sql += " AND function_family = ?"
         params.append(function_family)
-    if seniority:
+    if seniority and not market_wide:
         sql += " AND seniority = ?"
         params.append(seniority)
     if country:

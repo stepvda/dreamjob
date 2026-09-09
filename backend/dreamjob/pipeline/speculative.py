@@ -637,3 +637,56 @@ def generate_campaign(
         report.degraded,
     )
     return report
+
+
+# ---------------------------------------------------------------------------
+# Stage entry point (NFR-603, FR-149, FR-262)
+# ---------------------------------------------------------------------------
+
+
+def is_spontaneous_campaign(campaign: dict) -> bool:
+    """FR-149: does this campaign's directive set drop every vacancy source?
+
+    Such a campaign plans no job board and no ATS, so synthesising the vacancies
+    it collected can only ever produce an empty list.  Its opportunities come
+    from this module or from nowhere, which is why the caller of the synthesis
+    pass asks this before deciding it is finished.
+    """
+    try:
+        inputs = campaign_repo.load_planning_inputs(campaign)
+    except Exception:  # noqa: BLE001 - an unreadable directive set is not spontaneous-only
+        log.exception("Could not read the directive set of campaign %s", campaign.get("id"))
+        return False
+    directives = inputs.get("directives")
+    if not directives:
+        return False
+    return dir_mod.skips_vacancy_sources(directives)
+
+
+def rerun(campaign_id: str, job_seeker_id: str, **options: Any) -> dict[str, Any]:
+    """Generate this campaign's speculative openings (FR-262, NFR-603).
+
+    ``dreamjob.pipeline.collection`` reserves the ``speculative`` stage for this
+    module, which is what puts the spontaneous-application track on the "re-run
+    a stage" surface and inside the campaign pipeline.  Until this existed the
+    only route to :func:`generate_campaign` was a hand-written POST: no screen
+    called it, no stage ran it, and FR-149's ``spontaneous_only`` directive -
+    which drops every vacancy source - produced a campaign that could not
+    yield a single opportunity.
+
+    ``ConsentRequired`` is answered rather than raised, because a stage re-run
+    reports what happened; the caller renders the answer.
+    """
+    campaign = campaign_repo.get_campaign(campaign_id, job_seeker_id)
+    if campaign is None:
+        raise LookupError(f"No campaign {campaign_id} for this job seeker")
+    try:
+        report = generate_campaign(
+            campaign,
+            max_companies=int(options.get("max_companies") or 40),
+            max_openings=int(options.get("max_openings") or DEFAULT_MAX_OPENINGS),
+            language=str(options.get("language") or "en"),
+        )
+    except ConsentRequired as exc:
+        return {"error": "consent_required", "detail": str(exc)}
+    return report.as_dict()

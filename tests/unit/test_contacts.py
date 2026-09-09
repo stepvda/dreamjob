@@ -14,6 +14,7 @@ import asyncio
 import base64
 import os
 import secrets
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -248,6 +249,27 @@ def test_addresses_are_extracted_from_a_page() -> None:
     assert not any(a.endswith(".png") for a in addresses)
     named = next(i for i in found if i.email == "marie.dupont@acme-data.example")
     assert named.full_name == "Marie Dupont"
+
+
+def test_a_page_with_an_inlined_asset_does_not_stall_the_crawl() -> None:
+    """The obfuscated-address pattern must stay linear in the page it is given.
+
+    ``at`` cannot be anchored to a word boundary - "jan(at)acme.be" is the whole
+    point - so every occurrence of those two letters starts an attempt, and an
+    unbounded run in front of it made each attempt walk back over the entire
+    surrounding blob.  One 40 kB base64 data: URI took 66 seconds of pure
+    backtracking, inside the event loop, with seven other companies queued
+    behind it.  This is the page that did it, in miniature.
+    """
+    blob = "".join("aAtB0+_-." [i % 9] for i in range(60_000))
+    html = f'<img src="data:image/png;base64,{blob}"><p>hr (at) acme-data (dot) example</p>'
+    started = time.perf_counter()
+    found = {item.email for item in patterns.extract_addresses(html)}
+    elapsed = time.perf_counter() - started
+    # Generous by three orders of magnitude against the 66 s the unbounded
+    # pattern took, and still far too short for a quadratic scan to pass.
+    assert elapsed < 5.0, f"the obfuscated pattern took {elapsed:.1f}s on one inlined asset"
+    assert "hr@acme-data.example" in found
 
 
 def test_lookup_service_is_off_until_oq05_is_answered() -> None:

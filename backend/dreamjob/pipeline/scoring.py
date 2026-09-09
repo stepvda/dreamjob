@@ -69,6 +69,7 @@ from dreamjob.db.repositories import opportunities as repo
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError, redact
 from dreamjob.pipeline import compensation as comp_mod
 from dreamjob.pipeline import directives as dir_mod
+from dreamjob.pipeline import employer_product as emp_mod
 from dreamjob.pipeline.enrichment import load_prompt
 from dreamjob.pipeline.geocode import haversine_km
 from dreamjob.pipeline.opportunities import KIND_SPECULATIVE
@@ -251,6 +252,21 @@ class ScoringContext:
     _companies: dict[str, dict] = field(default_factory=dict)
     _company_scores: dict[str, SubScore] = field(default_factory=dict)
     _reachability: dict[str, dict] = field(default_factory=dict)
+    _employer_tags: dict[str, emp_mod.EmployerTag] = field(default_factory=dict)
+    _advisory: dict[str, Any] | None = None
+
+    @property
+    def advisory(self) -> dict[str, Any]:
+        """This campaign's Glassdoor snapshots, read once per run (FR-265).
+
+        They are campaign-scoped rather than shared knowledge base, so the
+        employer-review signal has to be handed them explicitly; without this
+        the rating would be read from a table only a browser run can fill and
+        would be ``None`` for every employer.
+        """
+        if self._advisory is None:
+            self._advisory = comp_mod.campaign_advisory(self.campaign_id)
+        return self._advisory
 
     def company(self, company_id: str | None) -> dict | None:
         if not company_id:
@@ -259,7 +275,29 @@ class ScoringContext:
             self._companies[company_id] = repo.get_company(company_id) or {}
         return self._companies[company_id] or None
 
-    def company_score(self, company_id: str | None) -> SubScore:
+    def employer_tag(self, opportunity: dict) -> emp_mod.EmployerTag:
+        """Is the company on this row the employer, or the intermediary?
+
+        The verdict is a shared knowledge-base fact about the *company*, so it
+        is read once per employer per run like the other company inputs; the
+        posting's own on-behalf clause is then applied on top, which is cheap
+        and cannot be cached per company because it is a property of the
+        advert (proposal section 2.2).
+        """
+        company_id = (opportunity or {}).get("company_id") or ""
+        base = self._employer_tags.get(company_id)
+        if base is None:
+            base = emp_mod.tag_for_company(
+                company_id or None,
+                job_seeker_id=self.job_seeker_id,
+                company=self.company(company_id) or {},
+            )
+            self._employer_tags[company_id] = base
+        return emp_mod.apply_posting(base, opportunity)
+
+    def company_score(
+        self, company_id: str | None, tag: emp_mod.EmployerTag | None = None
+    ) -> SubScore:
         """FR-281 company attractiveness, computed once per company per run.
 
         A pre-rank over a whole campaign (N11) meets the same employer on
@@ -268,13 +306,19 @@ class ScoringContext:
         none of which change while the run is in flight.  Reading them once per
         company instead of once per opportunity is the difference between four
         queries per row and four queries per employer.
+
+        When the employer is not disclosed the sub-score is refused outright:
+        the agency's trajectory and its ability to pay are facts about the
+        wrong legal entity (proposal section 4.4).
         """
+        if tag is not None and not tag.employer_disclosed:
+            return undisclosed_company_score(tag)
         if not company_id:
             return company_attractiveness(None)
         cached = self._company_scores.get(company_id)
         if cached is None:
             cached = company_attractiveness(
-                company_id, company=self.company(company_id) or {}
+                company_id, company=self.company(company_id) or {}, advisory=self.advisory
             )
             self._company_scores[company_id] = cached
         return cached
@@ -554,14 +598,50 @@ def _contract_score(
     return _weighted(parts), "; ".join(notes)
 
 
+def _intermediary_check(
+    tag: emp_mod.EmployerTag | None, preference: str
+) -> tuple[float, str] | None:
+    """FR-143: the seeker's preference about intermediaries, scored not hidden.
+
+    This is where the preference belongs (proposal section 4.4).  Excluding
+    agency rows from the list instead would let "unknown beat known-bad": a
+    Belgian list is 33-37% agency rows, and dropping them silently puts the
+    unresearched employers at the top by default.  Scoring it keeps the row,
+    shows the reason (FR-282) and gives FR-285 something to learn from.
+    """
+    if tag is None or preference == emp_mod.INTERMEDIARY_NO_PREFERENCE:
+        return None
+    if tag.is_intermediary:
+        if preference == emp_mod.INTERMEDIARY_DIRECT_ONLY:
+            return 0.0, (
+                "posted by a staffing agency; your directives ask for direct employers "
+                "only, so this row is excluded from the list"
+            )
+        return 0.0, "posted by a staffing agency; you prefer direct employers"
+    if tag.role == emp_mod.ROLE_UNVERIFIED:
+        # Not acted on either way (proposal section 2.3): the 'possible' band on
+        # its own is a coin flip, and an unresearched employer is not evidence.
+        return 0.5, "employer type not verified"
+    return 1.0, "posted by the employer itself"
+
+
 def _company_type_score(
-    company: dict | None, directives: dir_mod.DirectiveSet
+    company: dict | None,
+    directives: dir_mod.DirectiveSet,
+    tag: emp_mod.EmployerTag | None = None,
 ) -> tuple[float | None, str]:
+    preference = emp_mod.intermediary_preference(directives)
+    intermediary = _intermediary_check(tag, preference)
     if company is None:
-        return None, "company not profiled"
+        if intermediary is None:
+            return None, "company not profiled"
+        return intermediary[0], intermediary[1]
     wanted = directives.company_type
     parts: list[tuple[float, float | None]] = []
     notes: list[str] = []
+    if intermediary is not None:
+        parts.append((1.0, intermediary[0]))
+        notes.append(intermediary[1])
 
     def check(label: str, actual: Any, allowed: list[Any], weight: float) -> None:
         if not allowed:
@@ -575,13 +655,24 @@ def _company_type_score(
         parts.append((weight, 1.0 if hit else 0.0))
         notes.append(f"{label} {actual} {'matches' if hit else 'is outside'} the directive")
 
-    check("size band", company.get("size_band"), wanted.size_bands, 1.0)
-    check("stage", company.get("stage"), wanted.stages, 1.0)
-    check("ownership", company.get("ownership"), wanted.ownerships, 0.6)
-    check("trajectory", company.get("trajectory"), wanted.trajectories, 0.8)
+    if tag is not None and not tag.employer_disclosed:
+        # The size band, stage, ownership and trajectory on this row belong to
+        # the agency.  Checking a directive about the employer against them is
+        # the same error as scoring the agency's balance sheet (section 4.4):
+        # they are left out, and said to be left out.
+        if any((wanted.size_bands, wanted.stages, wanted.ownerships, wanted.trajectories)):
+            notes.append(
+                "size, stage, ownership and trajectory cannot be checked: the employer "
+                "is not named, and these describe the agency"
+            )
+    else:
+        check("size band", company.get("size_band"), wanted.size_bands, 1.0)
+        check("stage", company.get("stage"), wanted.stages, 1.0)
+        check("ownership", company.get("ownership"), wanted.ownerships, 0.6)
+        check("trajectory", company.get("trajectory"), wanted.trajectories, 0.8)
 
     if not parts:
-        return None, "no company-type directive"
+        return None, "; ".join(notes) or "no company-type directive"
     return _weighted(parts), "; ".join(notes)
 
 
@@ -634,22 +725,29 @@ def _job_content_score(
     return _weighted(parts), "; ".join(notes)
 
 
-def directive_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
+def directive_fit(
+    opportunity: dict, ctx: ScoringContext, *, tag: emp_mod.EmployerTag | None = None
+) -> SubScore:
     """FR-281: location, work arrangement, contract and company type.
 
     The job-content directives (FR-142) are folded in as a fifth part: they are
     directives too, and leaving them out would score a perfectly-placed,
     perfectly-arranged wrong job as a perfect directive fit.
+
+    FR-143's intermediary preference is scored inside the company-type part,
+    which is where preferences live and where FR-282 shows the reason.
     """
     if ctx.directives is None:
         return SubScore(None, ["no directive set on this campaign"])
     directives = ctx.directives
     company = ctx.company(opportunity.get("company_id"))
+    if tag is None:
+        tag = ctx.employer_tag(opportunity)
 
     location_score, location_note = _location_score(opportunity, directives)
     arrangement_score, arrangement_note = _work_arrangement_score(opportunity, directives)
     contract_score, contract_note = _contract_score(opportunity, directives)
-    company_score, company_note = _company_type_score(company, directives)
+    company_score, company_note = _company_type_score(company, directives, tag)
     content_score, content_note = _job_content_score(opportunity, directives)
 
     value = _weighted(
@@ -670,6 +768,15 @@ def directive_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
             "contract": contract_score,
             "company_type": company_score,
             "job_content": content_score,
+            "intermediaries": emp_mod.intermediary_preference(directives),
+            # FR-282: the explain payload counts what a directive removed, so
+            # "why is this list short" has an answer other than silence.
+            "excluded_by_directive": bool(
+                tag is not None
+                and tag.is_intermediary
+                and emp_mod.intermediary_preference(directives)
+                == emp_mod.INTERMEDIARY_DIRECT_ONLY
+            ),
         },
     )
 
@@ -700,8 +807,49 @@ def _signal_strength(company_id: str) -> tuple[float, int]:
     return total, counted
 
 
+def undisclosed_company_score(tag: emp_mod.EmployerTag) -> SubScore:
+    """FR-281's company component when the employer is not named.
+
+    ``None``, not a number.  The two alternatives were both measured and both
+    rejected (proposal section 4.4 and Appendix A):
+
+    * the *agency's* figures are a confident statement about the wrong
+      organisation - the failure that produced the NOEL FRANKLIN package;
+    * the 0.45 neutral prior lets an unknown employer outrank, by fiat, every
+      researched company that scored below 45, and hides the choice inside a
+      number that looks computed.
+
+    ``None`` is excluded by :func:`_weighted`, which renormalises the six
+    remaining components over the weight they actually carry.  The list then
+    has to say why, which is the point: ``tag.list_note`` is that sentence.
+    """
+    label = "an agency" if tag.role == emp_mod.ROLE_AGENCY else "a job board"
+    reasons = [
+        f"employer not named - cannot assess: this vacancy is posted by {label}",
+        "not scored against the intermediary: its accounts say nothing about the "
+        "employer's ability to pay",
+    ]
+    if tag.descriptors:
+        reasons.append(f"the posting says: {tag.descriptors[0][:200]}")
+    return SubScore(
+        value=None,
+        reasons=reasons,
+        detail={
+            "employer_role": tag.role,
+            "employer_disclosed": False,
+            "intermediary_name": tag.company_name,
+            "dimensions_not_assessed": list(emp_mod.COMPANY_DIMENSIONS),
+            "evidence": tag.evidence()[:4],
+        },
+        method="not_assessed",
+    )
+
+
 def company_attractiveness(
-    company_id: str | None, *, company: dict | None = None
+    company_id: str | None,
+    *,
+    company: dict | None = None,
+    advisory: dict[str, Any] | None = None,
 ) -> SubScore:
     """FR-281: financial trajectory, ability to pay, investment capacity, signals.
 
@@ -735,7 +883,9 @@ def company_attractiveness(
     if counted:
         reasons.append(f"{counted} recent hiring signal(s)")
 
-    rating, _themes = comp_mod.employer_signal(company_id)
+    rating, _themes = comp_mod.employer_signal(
+        company_id, advisory=advisory, company_name=company.get("name")
+    )
     rating_score = None if rating is None else _clamp(rating / 5.0)
     if rating_score is not None:
         reasons.append(f"employer review rating {rating}/5 (advisory only, FR-265)")
@@ -829,7 +979,17 @@ def plausibility_fit(opportunity: dict) -> SubScore:
 
 
 def reachability(opportunity: dict, ctx: ScoringContext) -> SubScore:
-    """FR-281: is there a validated contact, or an introduction path?"""
+    """FR-281: is there a validated contact, or an introduction path?
+
+    **Deliberately unchanged for agency postings, and do not "fix" it.**  When
+    a staffing agency posts on behalf of an unnamed employer, the agency's
+    recruiter *is* the correct person to write to: they are the application
+    channel in 100% of the agency rows in the corpus, and the agency's stated
+    channel is the only one that exists.  Nothing about the employer being
+    undisclosed makes that contact worse.  What changes is the framing of the
+    message, not its recipient - see ``documents/motivation.py`` and proposal
+    section 4.6.
+    """
     inputs = ctx.reachability_inputs(opportunity.get("company_id"))
     contacts = inputs["contacts"]
     reasons: list[str] = []
@@ -877,6 +1037,25 @@ def reachability(opportunity: dict, ctx: ScoringContext) -> SubScore:
 IMPORTANCE_WEIGHTS = {"must": 3.0, "strong": 2.0, "nice": 1.0}
 STATUS_VALUES = {"met": 1.0, "partial": 0.5, "violated": 0.0}
 
+#: FR-383's fourth bucket.  Distinct from ``unknown`` on purpose: *unknown* is
+#: "nobody has written it down and might"; *cannot_assess* is "this cannot be
+#: answered until the recruiter names the employer".  It is deliberately absent
+#: from :data:`STATUS_VALUES`, so it never becomes a 0 or a 0.5 in the meter -
+#: a role-only 90% must never read as a full 90% (proposal section 4.2).
+STATUS_CANNOT_ASSESS = "cannot_assess"
+
+#: The deal-breaker the dream-job model already emits - ``{"constraint":
+#: "agencies", "hard": true, "detectable_from": ["company type"]}`` - and the
+#: words a seeker writes for it.  Today it token-matches against the advert
+#: text and is therefore always *unknown*: the one preference the product
+#: already elicits can never fire.  On an intermediary row the channel is a
+#: known fact, so it can.
+_AGENCY_CONSTRAINT = re.compile(
+    r"\b(agenc(y|ies)|interim|int[ée]rim|uitzend\w*|staffing|"
+    r"zeitarbeit|payroll(ing)?|detacher\w*|recruitment (agency|agencies))\b",
+    re.IGNORECASE,
+)
+
 _ATTRIBUTE_FIELDS = {
     "size": "size_band",
     "stage": "stage",
@@ -901,19 +1080,55 @@ def _criterion(
     }
 
 
-def dream_criteria(opportunity: dict, ctx: ScoringContext) -> list[dict[str, Any]]:
+def _intermediary_words(tag: emp_mod.EmployerTag) -> str:
+    return "a job board" if tag.role == emp_mod.ROLE_BOARD else "a staffing agency"
+
+
+def _advert_says(advert: str, wanted: str) -> str | None:
+    """A verbatim fragment of the advert that mentions ``wanted``, or nothing.
+
+    The return value is a substring of the advert, quoted rather than
+    paraphrased, because it is shown to the seeker as what the *posting* said
+    about an employer we cannot name (proposal section 4.3).
+    """
+    wanted_tokens = _tokens(wanted)
+    if not advert or not wanted_tokens:
+        return None
+    for sentence in re.split(r"[.!?\n\r]+", advert):
+        fragment = sentence.strip()
+        if len(fragment) < 8:
+            continue
+        if wanted_tokens & _tokens(fragment):
+            return fragment[:200]
+    return None
+
+
+def dream_criteria(
+    opportunity: dict, ctx: ScoringContext, *, tag: emp_mod.EmployerTag | None = None
+) -> list[dict[str, Any]]:
     """FR-383: the criteria list, assessed as far as arithmetic can take it.
 
     Every criterion is either checked against a field or marked ``unknown``.
     Missing information is never a violation (CR-405) - it is a question the
     seeker can answer for themselves.
+
+    When the employer is not disclosed, the company-characteristic and culture
+    criteria are assessed **against the advert text only** - never against the
+    linked company, which is the agency - and anything the advert does not
+    state becomes :data:`STATUS_CANNOT_ASSESS`.  Unknown is never quietly
+    treated as unmet, and it is never quietly treated as met either.
     """
     dream = ctx.dream
-    company = ctx.company(opportunity.get("company_id")) or {}
+    if tag is None:
+        tag = ctx.employer_tag(opportunity)
+    disclosed = tag.employer_disclosed
+    company = (ctx.company(opportunity.get("company_id")) or {}) if disclosed else {}
+    advert = (opportunity.get("description") or "")[:4000]
     title_tokens = _tokens(opportunity.get("title"), opportunity.get("function_family"))
-    body_tokens = _tokens((opportunity.get("description") or "")[:4000])
+    body_tokens = _tokens(advert)
     criteria: list[dict[str, Any]] = []
     culture_tokens: set[str] | None = None
+    cannot_assess_because = emp_mod.cannot_assess_reason(ctx.language)
 
     for index, role in enumerate(dream.get("target_roles") or [], start=1):
         if not isinstance(role, dict):
@@ -989,12 +1204,37 @@ def dream_criteria(opportunity: dict, ctx: ScoringContext) -> list[dict[str, Any
         if not wanted:
             continue
         label = f"Company {attribute or 'characteristic'}: {wanted}"
+        # Work arrangement is a fact about the *role*, printed in the advert,
+        # and is knowable whoever the employer turns out to be.
+        from_advert = False
         if attribute == "work_arrangement":
             actual = opportunity.get("work_arrangement")
+        elif not disclosed:
+            from_advert = True
+            # The advert is the only thing that speaks about this employer, and
+            # only in its own words.  A quote counts; the agency's record does
+            # not exist for this purpose.  ``partial`` is the ceiling even on a
+            # good match: it is an agency's description of a company it will
+            # not name, which is evidence about the posting rather than about
+            # the employer.
+            actual = _advert_says(advert, wanted)
+            if actual is None:
+                criteria.append(
+                    _criterion(
+                        f"company_characteristic:{index}", label, STATUS_CANNOT_ASSESS,
+                        f"{cannot_assess_because}, and the posting does not say",
+                        str(item.get("importance") or "strong"),
+                        source="dream_job.company_characteristics",
+                        blocked_by="employer_not_disclosed",
+                    )
+                )
+                continue
         else:
             actual = company.get(_ATTRIBUTE_FIELDS.get(attribute, ""), None)
         if not actual:
             status, explanation = "unknown", f"{attribute or 'this attribute'} is not recorded"
+        elif from_advert:
+            status, explanation = "partial", f"the posting says: {actual}"
         else:
             actual_text = str(actual).lower()
             if wanted.lower() in actual_text or actual_text in wanted.lower():
@@ -1028,20 +1268,28 @@ def dream_criteria(opportunity: dict, ctx: ScoringContext) -> list[dict[str, Any
             )
         hits = _tokens(cue) & culture_tokens
         named = ", ".join(sorted(hits)[:3])
+        whose = "the company's own language" if disclosed else "the posting"
+        extra: dict[str, Any] = {}
         if not culture_tokens:
             status, explanation = "unknown", "nothing recorded about how this company works"
+        elif not hits and not disclosed:
+            # An unnamed employer's culture is not "not recorded yet"; it is
+            # unknowable until the recruiter says who the employer is.
+            status = STATUS_CANNOT_ASSESS
+            explanation = f"{cannot_assess_because}, and the posting does not mention '{cue}'"
+            extra["blocked_by"] = "employer_not_disclosed"
         elif not hits:
             status, explanation = "unknown", f"nothing recorded either way about '{cue}'"
         elif avoid:
-            status, explanation = "violated", f"the company's own language mentions {named}"
+            status, explanation = "violated", f"{whose} mentions {named}"
         elif len(hits) >= max(1, len(_tokens(cue)) // 2):
-            status, explanation = "met", f"the company's own language mentions {named}"
+            status, explanation = "met", f"{whose} mentions {named}"
         else:
-            status, explanation = "partial", f"the company's language touches {named}"
+            status, explanation = "partial", f"{whose} touches {named}"
         criteria.append(
             _criterion(f"culture_value:{index}", label, status, explanation, "strong",
                        source="dream_job.culture_values",
-                       polarity="avoid" if avoid else "seek")
+                       polarity="avoid" if avoid else "seek", **extra)
         )
 
     for index, item in enumerate(dream.get("deal_breakers") or [], start=1):
@@ -1050,24 +1298,51 @@ def dream_criteria(opportunity: dict, ctx: ScoringContext) -> list[dict[str, Any
         constraint = str(item.get("constraint") or "").strip()
         if not constraint:
             continue
-        haystack = _tokens(
-            opportunity.get("title"),
-            (opportunity.get("description") or "")[:4000],
-            opportunity.get("work_arrangement"),
-            opportunity.get("contract_type"),
-            company.get("business_summary"),
-        )
-        hits = _tokens(constraint) & haystack
-        if hits and len(hits) >= max(1, len(_tokens(constraint)) // 2):
+        detectable = " ".join(str(d) for d in (item.get("detectable_from") or []))
+        extra = {}
+        if not disclosed and _AGENCY_CONSTRAINT.search(constraint):
+            # The one deal-breaker the model already emits and the product has
+            # never been able to fire (proposal section 3, row 4).  The
+            # employer is unknown; the *channel* is not.
             status = "violated"
-            explanation = f"the role matches the excluded condition ({', '.join(sorted(hits)[:3])})"
+            explanation = (
+                f"this vacancy is posted by {_intermediary_words(tag)}; you asked not "
+                "to be shown agency postings"
+            )
+        elif not disclosed and _AGENCY_CONSTRAINT.search(detectable + " " + constraint):
+            status = "violated"
+            explanation = f"this vacancy is posted by {_intermediary_words(tag)}"
+        elif not disclosed and "company" in detectable.lower():
+            # Never violated and never met: an employer nobody has named cannot
+            # breach a constraint about employers.
+            status = STATUS_CANNOT_ASSESS
+            explanation = f"{cannot_assess_because}, so this cannot be checked"
+            extra = {"blocked_by": "employer_not_disclosed"}
         else:
-            status = "unknown"
-            explanation = "nothing in the record triggers this deal-breaker"
+            haystack = _tokens(
+                opportunity.get("title"),
+                advert,
+                opportunity.get("work_arrangement"),
+                opportunity.get("contract_type"),
+                # Skipped when the employer is not disclosed: this summary
+                # describes the agency, and a deal-breaker must never fire on
+                # facts about the wrong organisation.
+                company.get("business_summary"),
+            )
+            hits = _tokens(constraint) & haystack
+            if hits and len(hits) >= max(1, len(_tokens(constraint)) // 2):
+                status = "violated"
+                explanation = (
+                    f"the role matches the excluded condition ({', '.join(sorted(hits)[:3])})"
+                )
+            else:
+                status = "unknown"
+                explanation = "nothing in the record triggers this deal-breaker"
         criteria.append(
             _criterion(f"deal_breaker:{index}", f"Deal-breaker: {constraint}", status,
                        explanation, "must" if item.get("hard", True) else "strong",
-                       source="dream_job.deal_breakers", hard=bool(item.get("hard", True)))
+                       source="dream_job.deal_breakers", hard=bool(item.get("hard", True)),
+                       **extra)
         )
 
     return criteria
@@ -1090,18 +1365,34 @@ def score_criteria(criteria: list[dict[str, Any]]) -> float | None:
     return min(value, 0.1) if hard_violation else value
 
 
-def meter(criteria: list[dict[str, Any]], value: float | None, method: str) -> dict[str, Any]:
-    """FR-383: the meter itself, grouped the way the requirement words it."""
-    grouped: dict[str, list[dict]] = {"met": [], "partial": [], "violated": [], "unknown": []}
+def meter(
+    criteria: list[dict[str, Any]],
+    value: float | None,
+    method: str,
+    *,
+    tag: emp_mod.EmployerTag | None = None,
+    language: str = "en",
+) -> dict[str, Any]:
+    """FR-383: the meter itself, grouped the way the requirement words it.
+
+    The fourth bucket is ``cannot_assess``.  Without it a meter built from the
+    role alone shows 90% and reads as a full 90%; with it the same meter says
+    "90%, and four criteria could not be assessed because the employer is not
+    named", which is the honest sentence (proposal section 4.2).
+    """
+    grouped: dict[str, list[dict]] = {
+        "met": [], "partial": [], "violated": [], "unknown": [], STATUS_CANNOT_ASSESS: [],
+    }
     for criterion in criteria:
         grouped.setdefault(criterion.get("status", "unknown"), []).append(criterion)
-    return {
+    out = {
         "score": None if value is None else round(value * 100, 1),
         "method": method,
         "met": grouped["met"],
         "partially_met": grouped["partial"],
         "violated": grouped["violated"],
         "unknown": grouped["unknown"],
+        "cannot_assess": grouped[STATUS_CANNOT_ASSESS],
         "counts": {k: len(v) for k, v in grouped.items()},
         "note": (
             "The dream-job fit meter is separate from the overall score: it says what "
@@ -1109,6 +1400,18 @@ def meter(criteria: list[dict[str, Any]], value: float | None, method: str) -> d
             "NFR-305)."
         ),
     }
+    if grouped[STATUS_CANNOT_ASSESS]:
+        out["cannot_assess_note"] = (
+            f"{len(grouped[STATUS_CANNOT_ASSESS])} criteria could not be assessed"
+            + (
+                f": {emp_mod.cannot_assess_reason(language)}."
+                if tag is not None and not tag.employer_disclosed
+                else "."
+            )
+        )
+    if tag is not None:
+        out["employer"] = emp_mod.presentation(tag)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1116,8 +1419,28 @@ def meter(criteria: list[dict[str, Any]], value: float | None, method: str) -> d
 # ---------------------------------------------------------------------------
 
 
-def _llm_payload(opportunity: dict, ctx: ScoringContext) -> dict:
+def _llm_payload(
+    opportunity: dict, ctx: ScoringContext, *, tag: emp_mod.EmployerTag | None = None
+) -> dict:
     company = ctx.company(opportunity.get("company_id")) or {}
+    if tag is not None and not tag.employer_disclosed:
+        # What the model is given is what it will reason about.  Handing it the
+        # agency's profile under the key ``company`` is how a rationale about
+        # Randstad's stage and culture gets written for somebody else's job.
+        company = {
+            "name": None,
+            "business_summary": (
+                f"The employer is not named. This vacancy was posted by "
+                f"{tag.company_name or 'an agency'}, an intermediary, on behalf of an "
+                "employer it does not identify. Say nothing about the employer beyond "
+                "what the posting itself states."
+            ),
+            "posting_says_about_employer": tag.descriptors,
+            "size_band": None,
+            "stage": None,
+            "trajectory": None,
+            "values_culture": None,
+        }
     return {
         "opportunity": {
             "kind": opportunity.get("kind"),
@@ -1141,7 +1464,9 @@ def _llm_payload(opportunity: dict, ctx: ScoringContext) -> dict:
                 "stage": company.get("stage"),
                 "trajectory": company.get("trajectory"),
                 "values_culture": from_json(company.get("values_culture"), None),
+                "posting_says_about_employer": company.get("posting_says_about_employer"),
             },
+            "employer_disclosed": tag is None or tag.employer_disclosed,
         },
         "seeker": redact(
             {
@@ -1165,6 +1490,8 @@ def semantic_dream_fit(
     subscores: dict[str, SubScore],
     criteria: list[dict[str, Any]],
     llm: LLMClient,
+    *,
+    tag: emp_mod.EmployerTag | None = None,
 ) -> dict[str, Any] | None:
     """One call for the two things arithmetic cannot do (FR-282, FR-383).
 
@@ -1174,7 +1501,14 @@ def semantic_dream_fit(
     """
     template = load_prompt(PROMPT_NAME)
     system, user = template.render(language=ctx.language)
-    payload = _llm_payload(opportunity, ctx)
+    payload = _llm_payload(opportunity, ctx, tag=tag)
+    if tag is not None and not tag.employer_disclosed:
+        user += (
+            "\n\nThe employer of this vacancy is NOT named. It was posted by an "
+            "intermediary. Say nothing about the employing organisation beyond what "
+            "the posting itself states, do not name a company as the employer, and "
+            "leave any company-related criterion as it is."
+        )
     try:
         data = llm.complete_json(
             template.task or "score.opportunity",
@@ -1226,6 +1560,13 @@ def _merge_criteria(
         text = str(item.get("criterion") or "").strip()
         explanation = str(item.get("explanation") or "").strip()[:400]
         if cid in by_id:
+            if by_id[cid].get("status") == STATUS_CANNOT_ASSESS:
+                # The model was not given the employer, so it cannot have found
+                # out who it is.  Letting it move a cannot_assess to met is how
+                # a role-only assessment turns back into a claim about a
+                # company nobody has identified (CR-405).
+                by_id[cid]["llm_suggested_status"] = status
+                continue
             by_id[cid].update(
                 {"status": status, "explanation": explanation or by_id[cid]["explanation"],
                  "refined_by": "llm"}
@@ -1262,16 +1603,20 @@ def score_opportunity(
     them: recomputation must never move a row the seeker placed by hand
     (FR-284).
     """
+    # Who is the employer?  Read once and threaded through every component that
+    # would otherwise describe the intermediary as if it were the employer.
+    tag = ctx.employer_tag(opportunity)
+
     subscores: dict[str, SubScore] = {
         "profile_fit": profile_fit(opportunity, ctx),
-        "directive_fit": directive_fit(opportunity, ctx),
-        "company": ctx.company_score(opportunity.get("company_id")),
+        "directive_fit": directive_fit(opportunity, ctx, tag=tag),
+        "company": ctx.company_score(opportunity.get("company_id"), tag),
         "compensation": compensation_fit(opportunity, ctx),
         "plausibility": plausibility_fit(opportunity),
         "reachability": reachability(opportunity, ctx),
     }
 
-    criteria = dream_criteria(opportunity, ctx)
+    criteria = dream_criteria(opportunity, ctx, tag=tag)
     deterministic_dream = score_criteria(criteria)
     subscores["dream_fit"] = SubScore(
         deterministic_dream,
@@ -1283,7 +1628,7 @@ def score_opportunity(
     meter_method = "deterministic"
     llm_extra: dict[str, Any] = {}
     if llm is not None:
-        data = semantic_dream_fit(opportunity, ctx, subscores, criteria, llm)
+        data = semantic_dream_fit(opportunity, ctx, subscores, criteria, llm, tag=tag)
         if data is not None:
             try:
                 semantic = _clamp(float(data.get("dream_fit")))
@@ -1314,15 +1659,30 @@ def score_opportunity(
     weights = ctx.weights
     overall = _weighted([(weights.get(name, 0.0), sub.value) for name, sub in subscores.items()])
     if rationale is None:
-        rationale = _fallback_rationale(opportunity, subscores)
+        rationale = _fallback_rationale(opportunity, subscores, tag=tag)
 
+    # FR-282: which components carried the score, and which were left out.  A
+    # renormalised total over six components looks exactly like a total over
+    # seven unless somebody says so.
+    assessed = {name for name, sub in subscores.items() if sub.value is not None}
     columns: dict[str, Any] = {
         "score": None if overall is None else round(overall * 100, 1),
         "rationale": rationale,
-        "dream_fit_detail": meter(criteria, score_criteria(criteria), meter_method),
+        "dream_fit_detail": meter(
+            criteria, score_criteria(criteria), meter_method, tag=tag, language=ctx.language
+        ),
         "score_detail": {
             "weights": weights,
             "components": {name: sub.as_dict() for name, sub in subscores.items()},
+            "employer": {
+                **tag.as_dict(ctx.language),
+                "components_assessed": sorted(assessed),
+                "components_not_assessed": sorted(set(COMPONENTS) - assessed),
+                "weight_assessed": round(
+                    sum(weights.get(name, 0.0) for name in assessed), 4
+                ),
+                "partially_assessed": not tag.employer_disclosed,
+            },
             "advisory": ADVISORY_NOTE,
             **llm_extra,
         },
@@ -1335,13 +1695,23 @@ def score_opportunity(
     return columns
 
 
-def _fallback_rationale(opportunity: dict, subscores: dict[str, SubScore]) -> str:
+def _fallback_rationale(
+    opportunity: dict, subscores: dict[str, SubScore], *, tag: emp_mod.EmployerTag | None = None
+) -> str:
     """A plain, honest paragraph when no LLM is available (NFR-104 degradation)."""
     kind_note = (
         "This role is not advertised; it is a speculative opening (FR-263). "
         if opportunity.get("kind") == KIND_SPECULATIVE
         else ""
     )
+    if tag is not None and not tag.employer_disclosed:
+        # Without this sentence the paragraph reads as a judgement about the
+        # agency, which is the whole failure this slice exists to stop.
+        kind_note += (
+            f"The employer is not disclosed: this vacancy was posted by "
+            f"{tag.company_name or 'an intermediary'} on behalf of an employer it does "
+            "not name, so the company dimensions were not assessed. "
+        )
     ranked = sorted(
         ((name, sub) for name, sub in subscores.items() if sub.value is not None),
         key=lambda pair: -pair[1].value,
@@ -1662,8 +2032,15 @@ _REJECTION_BUCKETS: list[tuple[str, re.Pattern[str], str]] = [
     ("compensation", re.compile(
         r"\b(salary|pay|compensation|loon|salaris|r[ée]mun[ée]ration|too low|budget)\b", re.I),
      "compensation.minimum_package"),
+    # FR-143/FR-285: "I do not want agency work" used to land in size_bands and
+    # stages, which cannot express it, so the one preference the product already
+    # elicits could never be acted on (proposal section 3, row 4).
+    ("intermediaries", re.compile(
+        r"\b(agenc(y|ies)|interim|int[ée]rim|uitzend\w*|staffing|zeitarbeit|"
+        r"recruiter|detacher\w*|bureau)\b", re.I),
+     "company_type.intermediaries"),
     ("company_type", re.compile(
-        r"\b(too (big|small)|corporate|startup|scale-?up|consultancy|agency|multinational)\b",
+        r"\b(too (big|small)|corporate|startup|scale-?up|consultancy|multinational)\b",
         re.I),
      "company_type.size_bands / company_type.stages"),
     ("seniority", re.compile(

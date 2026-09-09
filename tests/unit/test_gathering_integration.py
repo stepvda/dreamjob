@@ -5,7 +5,7 @@ because each defect here lives *between* two files that no single slice owned:
 
 * the planner refused to partition EURES unless the adapter declared it read the
   partition keys, and the adapter never declared them - so a "partitioned"
-  Campaign B was one country-wide plan item instead of 126 (N1 <-> N2);
+  Campaign B was one country-wide plan item instead of 133 (N1 <-> N2);
 * the planner wrote the sector axis as ``nace_section`` and the adapter read
   ``sector_codes``, so even a forced partition sent the same body for all
   eighteen NACE sections of a region - 40 plan items, 3 distinct requests;
@@ -68,13 +68,16 @@ def test_belgium_last_week_is_one_plan_item_per_region_and_sector():
     items = discovery.eures_partitions(
         countries=["BE"], caps={}, partitioned=discovery.reads_partitions(EuresAdapter)
     )
-    # 3 NUTS-1 regions x 18 NACE sections (N, T and U excluded).
-    assert len(items) == 54
+    # 3 NUTS-1 regions x 19 NACE Rev 2.1 sections (only T, U and V are left
+    # out, for yield).  N is professional services and is swept; O is where
+    # staffing sits and is also swept - agencies are a per-employer tag, not a
+    # partition the sweep refuses to look at.
+    assert len(items) == 57
 
 
-def test_belgium_and_the_netherlands_are_the_plans_own_126_partitions():
+def test_belgium_and_the_netherlands_are_the_plans_own_133_partitions():
     items = discovery.eures_partitions(countries=["BE", "NL"], caps={}, partitioned=True)
-    assert len(items) == 126
+    assert len(items) == 133
 
 
 def _body(native: dict) -> str:
@@ -93,7 +96,7 @@ def _body(native: dict) -> str:
 def test_every_partition_asks_the_service_a_different_question():
     """The defect: 18 sections of a region all sent byte-for-byte one body."""
     items = discovery.eures_partitions(countries=["BE"], caps={}, partitioned=True)
-    assert len({_body(i.native_query) for i in items}) == len(items) == 54
+    assert len({_body(i.native_query) for i in items}) == len(items) == 57
 
 
 def test_the_sector_axis_survives_the_planners_spelling_of_it():

@@ -32,6 +32,7 @@ import CompanyFinancials from './company/CompanyFinancials'
 import CompanyMarket from './company/CompanyMarket'
 import CompanyProfileTab from './company/CompanyProfileTab'
 import CompanyValues from './company/CompanyValues'
+import { EmployerKindPanel } from './employers'
 
 const TERMINAL = ['done', 'failed', 'cancelled']
 
@@ -323,6 +324,10 @@ export default function CompanyDetailPage() {
           </Caution>
         )}
       </div>
+
+      {/* FR-143/NFR-402: whether this company is the employer at all, before
+          any of the tabs below say anything about "the company". */}
+      <EmployerKindPanel companyId={id} companyName={identity.name} />
 
       <div style={{ marginTop: 16 }}>
         <Tabs

@@ -95,7 +95,9 @@ export default function CompaniesPage() {
   const [draft, setDraft] = useState('')
   const [countryDraft, setCountryDraft] = useState('')
   const [sectorDraft, setSectorDraft] = useState('')
-  const [filters, setFilters] = useState({ q: '', country: '', sector: '', size_band: '' })
+  const [filters, setFilters] = useState({
+    q: '', country: '', sector: '', size_band: '', ats_vendor: '',
+  })
 
   // FR-345 asks for stage and trajectory too. The search endpoint filters on
   // q/country/sector/size_band only, so these two narrow the page in the
@@ -106,7 +108,7 @@ export default function CompaniesPage() {
 
   const { data, error, loading, reload } = useFetch(
     () => api.get(`/companies?${queryString({ ...filters, limit: PAGE_SIZE, offset })}`),
-    [filters.q, filters.country, filters.sector, filters.size_band, offset],
+    [filters.q, filters.country, filters.sector, filters.size_band, filters.ats_vendor, offset],
   )
 
   // FR-401: the watchlist is private, so it is a separate read and must never
@@ -125,8 +127,19 @@ export default function CompaniesPage() {
   )
   const staleCount = items.filter((c) => c.stale).length
   const filtered = Boolean(
-    filters.q || filters.country || filters.sector || filters.size_band || stage || trajectory,
+    filters.q ||
+      filters.country ||
+      filters.sector ||
+      filters.size_band ||
+      filters.ats_vendor ||
+      stage ||
+      trajectory,
   )
+  // FR-345: how this inventory was actually built. A corpus can look healthy
+  // at a thousand rows and still have been reached through one free job board,
+  // with no company's own ATS board read at all - which is exactly the shape
+  // that hides the well-known employers. The screen now says so.
+  const facets = data?.facets ?? null
 
   function applySearch(e) {
     e.preventDefault()
@@ -151,7 +164,7 @@ export default function CompaniesPage() {
     setStage('')
     setTrajectory('')
     setOffset(0)
-    setFilters({ q: '', country: '', sector: '', size_band: '' })
+    setFilters({ q: '', country: '', sector: '', size_band: '', ats_vendor: '' })
   }
 
   async function watch(company) {
@@ -304,6 +317,33 @@ export default function CompaniesPage() {
             />
           </div>
 
+          {/* The ATS board is the route to a company's own postings. Being able
+              to ask "which of these did we reach that way" is what makes a
+              starved harvest stage visible from the screen. */}
+          <div className="field" style={{ marginBottom: 0, width: 170 }}>
+            <label>
+              ATS board
+              <HelpTip title="ATS board">
+                The applicant-tracking system a company publishes its own vacancies on. Reaching a
+                company through its board is the freshest and most complete route to what it is
+                hiring for; a company found only through an aggregator is known from one advert.
+              </HelpTip>
+            </label>
+            <select
+              value={filters.ats_vendor}
+              onChange={(e) => setFilter('ats_vendor', e.target.value)}
+            >
+              <option value="">Any source</option>
+              <option value="any">Has a board</option>
+              <option value="none">No board known</option>
+              {Object.keys(facets?.by_ats_vendor || {}).map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <button className="btn btn-primary">Search</button>
           {filtered && (
             <button type="button" className="btn btn-ghost" onClick={clearAll}>
@@ -315,7 +355,33 @@ export default function CompaniesPage() {
         {(stage || trajectory) && (
           <p className="small muted" style={{ marginTop: 8 }}>
             Stage and trajectory narrow the {rows.length} rows on this page. Search, country, size
-            band and sector are applied across the whole knowledge base.
+            band, sector and ATS board are applied across the whole knowledge base.
+          </p>
+        )}
+
+        {/* FR-345: where this inventory came from. A thousand companies from one
+            aggregator and none read from their own board is a collection
+            problem, not a market: say it here rather than leaving it to be
+            inferred from who is missing. */}
+        {facets && facets.total > 0 && (
+          <p className="small muted" style={{ marginTop: 8 }}>
+            {facets.total} companies on record ·{' '}
+            <strong>{facets.with_ats_board}</strong> reached through their own ATS board
+            {facets.with_ats_board === 0 && (
+              <>
+                {' '}— none yet, so every company here is known from an aggregator advert. The ATS
+                harvest runs last in a campaign; raise the page ceiling, or re-run collection.
+              </>
+            )}
+            {Object.keys(facets.by_source || {}).length > 0 && (
+              <>
+                {' '}· mostly from{' '}
+                {Object.entries(facets.by_source)
+                  .slice(0, 3)
+                  .map(([k, n]) => `${k} (${n})`)
+                  .join(', ')}
+              </>
+            )}
           </p>
         )}
       </div>

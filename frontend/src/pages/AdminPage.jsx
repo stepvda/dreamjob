@@ -27,6 +27,7 @@ import WorkflowMap from '../components/WorkflowMap'
 import { Empty, Tabs, useFetch } from '../components/ui'
 import { useSession } from '../session'
 import ActivityTab from './admin/ActivityTab'
+import { EmployerCoveragePanel } from './employers'
 import AuditTab from './admin/AuditTab'
 import DataTab from './admin/DataTab'
 import LogsTab from './admin/LogsTab'
@@ -40,6 +41,7 @@ const TABS = [
   { key: 'audit', label: 'Audit' },
   { key: 'logs', label: 'Logs' },
   { key: 'data', label: 'Data' },
+  { key: 'employers', label: 'Employer kind' },
 ]
 
 export default function AdminPage() {
@@ -84,6 +86,9 @@ export default function AdminPage() {
       {tab === 'audit' && <AuditTab />}
       {tab === 'logs' && <LogsTab />}
       {tab === 'data' && <DataTab />}
+      {/* How much of the corpus knows who is actually hiring, by rung and by
+          the reason a non-answer is a non-answer (proposal section 4.8). */}
+      {tab === 'employers' && <EmployerCoveragePanel />}
     </div>
   )
 }

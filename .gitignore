@@ -20,9 +20,13 @@ frontend/.vite/
 credentials.json
 token.json
 
-# Runtime data (private job-seeker data, raw documents, generated packages)
-data/
-!data/.gitkeep
+# Runtime data (private job-seeker data, raw documents, generated packages).
+# Anchored: an unanchored ``data/`` also swallowed ``backend/dreamjob/pipeline/data``,
+# which is packaged application data (pyproject ``package-data``) that the code
+# reads at import - the skills taxonomy, the board registry, the agency name
+# lexicon - so a fresh clone had none of it.
+/data/
+!/data/.gitkeep
 *.db
 *.db-wal
 *.db-shm

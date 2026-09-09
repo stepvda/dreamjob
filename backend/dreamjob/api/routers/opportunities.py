@@ -28,8 +28,8 @@ from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import compensation as comp_mod
+from dreamjob.pipeline import employer_product, scoring, speculative
 from dreamjob.pipeline import opportunities as synth
-from dreamjob.pipeline import scoring, speculative
 
 router = APIRouter()
 
@@ -114,10 +114,31 @@ COMPARISON_FIELDS = (
 )
 
 
-def _present(opportunity: dict) -> dict:
-    """Add the FR-263 labelling and the FR-283 links to one row."""
+def _employer_tag(row: dict, locale: str | None = None) -> dict:
+    """The employer-kind badge for one list row (FR-143, FR-263, NFR-502).
+
+    Rendered from the columns ``_LIST_SELECT`` already joined, so a page of
+    fifty rows costs no extra query.  A company with no verdict comes back as
+    *not researched* rather than blank: an empty cell reads as "employer",
+    which is the assumption this axis exists to stop.  The evidence is not
+    here on purpose - the popover fetches it from ``/api/employers/{id}/kind``
+    when a reader asks for it.
+    """
+    return employer_product.badge_from_row(row, locale or "en")
+
+
+def _present(opportunity: dict, locale: str | None = None) -> dict:
+    """Add the FR-263 labelling and the FR-283 links to one row.
+
+    ``locale`` is the *reader's*, not the posting's: the badge is a sentence
+    the product says to a job seeker, so it follows the interface language,
+    while the disclosure note quotes the advertisement in the advertisement's
+    own words.  Reading the badge off ``opportunity['language']`` put a Dutch
+    badge on an English screen.
+    """
     out = dict(opportunity)
     out.update(speculative.presentation(opportunity))
+    out["employer"] = _employer_tag(opportunity, locale)
     company_id = opportunity.get("company_id")
     out["links"] = {
         "company_profile": f"/api/companies/{company_id}" if company_id else None,
@@ -228,7 +249,7 @@ def list_opportunities(
         limit=limit, offset=offset, **filters,
     )
     return {
-        "items": [_present(r) for r in rows],
+        "items": [_present(r, seeker.locale) for r in rows],
         "total": repo.count_opportunities(seeker.id, **filters),
         "limit": limit,
         "offset": offset,
@@ -259,7 +280,7 @@ def compare(seeker: Seeker, payload: CompareRequest) -> dict:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "at least two of your opportunities are needed"
         )
-    presented = [_present(r) for r in rows]
+    presented = [_present(r, seeker.locale) for r in rows]
     return {
         "items": presented,
         "fields": list(COMPARISON_FIELDS),
@@ -354,11 +375,26 @@ async def synthesise(seeker: Seeker, payload: SynthesiseRequest) -> dict:
     campaign = _campaign_or_404(payload.campaign_id, seeker.id)
 
     def work() -> dict:
-        return synth.synthesise_campaign(
+        result = synth.synthesise_campaign(
             campaign,
             include_knowledge_base=payload.include_knowledge_base,
             window_days=payload.window_days,
         ).as_dict()
+        # FR-149: a spontaneous-application campaign plans no job board and no
+        # ATS, so synthesis alone can only ever hand back an empty list.  The
+        # track that gives such a campaign its opportunities is the speculative
+        # one, and it runs here rather than waiting for a button the seeker has
+        # no reason to know they must press.
+        if speculative.is_spontaneous_campaign(campaign):
+            try:
+                result["speculative"] = speculative.generate_campaign(campaign).as_dict()
+            except speculative.ConsentRequired as exc:
+                result["speculative"] = {"error": "consent_required", "detail": str(exc)}
+        # FR-264, by the same argument: pricing is pure corpus work, it costs
+        # nothing, and a freshly synthesised list that shows no range anywhere
+        # reads as a missing feature rather than as a pass not yet run.
+        result["compensation"] = comp_mod.enrich_campaign(seeker.id, payload.campaign_id)
+        return result
 
     return await _run("scoring", campaign, work, background=payload.background)
 
@@ -399,13 +435,21 @@ async def enrich_compensation(seeker: Seeker, payload: CampaignRequest) -> dict:
 
 @router.post("/recalculate")
 async def recalculate(seeker: Seeker, payload: RecalculateRequest) -> dict:
-    """FR-281/282: recompute every score.  Manual order is left untouched (FR-284)."""
+    """FR-281/282: recompute every score.  Manual order is left untouched (FR-284).
+
+    The FR-264 compensation pass runs first.  It costs no tokens and no network,
+    and the compensation sub-score reads the stored estimate rather than
+    recomputing it - so without this, a recalculation would score every
+    unpriced opportunity against a range that nothing had ever filled in.
+    """
     campaign = _campaign_or_404(payload.campaign_id, seeker.id)
 
     def work() -> dict:
-        return scoring.score_campaign(
+        compensation = comp_mod.enrich_campaign(seeker.id, payload.campaign_id)
+        report = scoring.score_campaign(
             campaign, use_llm=payload.use_llm, language=payload.language
         ).as_dict()
+        return {**report, "compensation": compensation}
 
     return await _run("scoring", campaign, work, background=payload.background)
 
@@ -419,7 +463,7 @@ async def recalculate(seeker: Seeker, payload: RecalculateRequest) -> dict:
 def get_opportunity(seeker: Seeker, opportunity_id: str) -> dict:
     """One opportunity with its sub-scores, fit meter, contacts and links (FR-283)."""
     opportunity = _opportunity_or_404(opportunity_id, seeker.id)
-    presented = _present(opportunity)
+    presented = _present(opportunity, seeker.locale)
     presented["contacts"] = repo.contacts_for_company(opportunity.get("company_id")) \
         if opportunity.get("company_id") else []
     presented["introduction_paths"] = repo.introduction_paths(seeker.id, opportunity_id)
@@ -493,6 +537,10 @@ def refresh_compensation(seeker: Seeker, opportunity_id: str) -> dict:
 def rescore_one(seeker: Seeker, opportunity_id: str, use_llm: bool = True) -> dict:
     """Recompute one opportunity, leaving its manual position alone (FR-284)."""
     opportunity = _opportunity_or_404(opportunity_id, seeker.id)
+    # FR-264 first, for the same reason as the campaign-wide recalculation: the
+    # compensation sub-score reads the stored estimate, it does not build one.
+    comp_mod.enrich_opportunity(opportunity)
+    opportunity = _opportunity_or_404(opportunity_id, seeker.id)
     campaign = owned_or_404("campaign", opportunity["campaign_id"], seeker.id)
     ctx = scoring.build_context(campaign)
     llm = None
@@ -504,7 +552,7 @@ def rescore_one(seeker: Seeker, opportunity_id: str, use_llm: bool = True) -> di
             llm = client
     columns = scoring.score_opportunity(opportunity, ctx, llm=llm)
     repo.save_scores(opportunity_id, columns, job_seeker_id=seeker.id)
-    return _present(_opportunity_or_404(opportunity_id, seeker.id))
+    return _present(_opportunity_or_404(opportunity_id, seeker.id), seeker.locale)
 
 
 @router.patch("/{opportunity_id}")
@@ -527,7 +575,7 @@ def update_controls(seeker: Seeker, opportunity_id: str, payload: UserControls) 
     if values.get("tags") is not None:
         values["tags"] = [str(t).strip()[:40] for t in values["tags"] if str(t).strip()][:12]
     updated = repo.set_user_controls(opportunity_id, seeker.id, values)
-    return _present(updated or {})
+    return _present(updated or {}, seeker.locale)
 
 
 @router.post("/{opportunity_id}/tags")
@@ -540,7 +588,7 @@ def add_tags(
     updated = repo.set_user_controls(
         opportunity_id, seeker.id, {"tags": [str(t).strip()[:40] for t in merged][:12]}
     )
-    return _present(updated or {})
+    return _present(updated or {}, seeker.locale)
 
 
 @router.post("/{opportunity_id}/check-material")

@@ -975,3 +975,232 @@ def test_api_refuses_generated_material_that_claims_a_vacancy(api):
     assert body["is_speculative"] is True
     assert body["safe"] is False
     assert body["false_vacancy_claims"]
+
+
+# ---------------------------------------------------------------------------
+# FR-149 / FR-262: the spontaneous-application track is reachable
+# ---------------------------------------------------------------------------
+
+
+def test_speculative_is_a_re_runnable_pipeline_stage():
+    """NFR-603: the track has to be on the re-run surface, not only in the API.
+
+    ``speculative.generate_campaign`` was reachable from exactly one place - a
+    hand-written POST. No screen called it, no stage ran it, and nothing chained
+    it after synthesis, so the whole unadvertised-roles half of the product was
+    dead code from a user's point of view.
+    """
+    from dreamjob.pipeline import collection
+
+    stages = {s["stage"]: s["description"] for s in collection.available_stages()}
+    assert "speculative" in stages, "the spontaneous track is not a re-runnable stage"
+    assert "FR-262" in stages["speculative"]
+
+
+def test_the_stage_generates_openings_and_reports_what_it_did(db, monkeypatch):
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+    company_id = _company("Northwind Data")
+    _campaign_company(campaign["id"], company_id)
+
+    stub = StubLLM(
+        {
+            "openings": [
+                {
+                    "title": "Head of Data Platform",
+                    "function_family": "data & analytics",
+                    "seniority": "director",
+                    "description": "Would own the platform the company has no owner for.",
+                    "rationale": "No data leadership in the department map.",
+                    "evidence": ["no data leadership in the map"],
+                    "plausibility": 0.7,
+                    "plausibility_basis": "structure",
+                }
+            ],
+            "company_read": "Growing, no data lead.",
+            "insufficient_evidence": False,
+        }
+    )
+    monkeypatch.setattr(speculative, "LLMClient", lambda **kwargs: stub)
+
+    report = speculative.rerun(campaign["id"], seeker_id)
+
+    assert report["created"] == 1
+    assert report["companies_generated"] == 1
+    rows = repo.list_opportunities(seeker_id, campaign_id=campaign["id"])
+    assert [r["kind"] for r in rows] == ["speculative"]
+
+
+def test_the_stage_answers_a_missing_consent_rather_than_raising(db, monkeypatch):
+    """CR-410: a stage re-run reports what happened; the caller renders it."""
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+    # Withdraw the consent the fixture recorded.
+    from dreamjob.db.connection import execute
+
+    execute("DELETE FROM consent_record WHERE job_seeker_id = ?", (seeker_id,))
+    monkeypatch.setattr(speculative, "LLMClient", lambda **kwargs: StubLLM({}))
+
+    result = speculative.rerun(campaign["id"], seeker_id)
+    assert result["error"] == "consent_required"
+    assert "CR-410" in result["detail"]
+
+
+def test_a_spontaneous_only_campaign_is_recognised_as_one(db):
+    """FR-149: the directive that drops every vacancy source is what marks it.
+
+    Such a campaign plans no job board and no ATS, so synthesising its collected
+    vacancies can only ever return an empty list. Something has to notice.
+    """
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+    assert speculative.is_spontaneous_campaign(campaign) is False
+
+    update_row(
+        "directive_set", campaign["directive_set_id"], {"spontaneous_only": 1}
+    )
+    assert speculative.is_spontaneous_campaign(campaign) is True
+
+
+def test_an_unreadable_directive_set_is_not_spontaneous_only(db, monkeypatch):
+    """A configuration this cannot read must not silently turn the track on."""
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+
+    def boom(_campaign):
+        raise RuntimeError("directive set unreadable")
+
+    monkeypatch.setattr(speculative.campaign_repo, "load_planning_inputs", boom)
+    assert speculative.is_spontaneous_campaign(campaign) is False
+
+
+# ---------------------------------------------------------------------------
+# FR-264: the Glassdoor path, and the pass that fills the columns in
+# ---------------------------------------------------------------------------
+
+
+def test_glassdoor_snapshots_price_a_role_without_reaching_the_shared_base(db, monkeypatch):
+    """FR-264/FR-265: a campaign's Glassdoor run feeds the estimate, advisory only.
+
+    The snapshots stay campaign-scoped (they are never promoted into
+    ``compensation_observation``), and they are matched on company *and* role.
+    """
+    company_id = _company("Vestor NV")
+    advisory = {
+        "employers": [
+            {"company_name": "Vestor NV", "rating": 3.6, "review_count": 88,
+             "themes": {"pros": ["clear roadmap"], "cons": ["slow reviews"]}},
+        ],
+        "salaries": [
+            {"company_name": "Vestor NV", "job_title": "Data Engineering Manager",
+             "low": 88_000, "high": 112_000, "currency": "EUR", "sample_size": 24,
+             "url": "https://www.glassdoor.com/Salary/vestor.htm"},
+            # Same employer, unrelated role: must not be treated as comparable.
+            {"company_name": "Vestor NV", "job_title": "Warehouse Operative",
+             "low": 24_000, "high": 29_000, "currency": "EUR", "sample_size": 40},
+            # Another employer entirely.
+            {"company_name": "Someone Else BV", "job_title": "Data Engineering Manager",
+             "low": 10_000, "high": 12_000, "currency": "EUR"},
+        ],
+    }
+    opportunity = {
+        "id": "o-gd",
+        "company_id": company_id,
+        "company_name": "Vestor NV",
+        "title": "Data Engineering Manager",
+        "function_family": "data & analytics",
+        "seniority": "manager",
+        "country": "BE",
+        "comp_is_stated": 0,
+    }
+
+    result = comp_mod.estimate(opportunity, advisory=advisory)
+
+    used = [s for s in result.sources if s.used]
+    assert [s.kind for s in used] == ["glassdoor"]
+    assert used[0].sample_size == 24
+    assert (result.comp_min, result.comp_max) == (88_000, 112_000)
+    # A source kind may not talk itself past its own ceiling, however big its sample.
+    assert result.confidence <= comp_mod.SOURCE_CONFIDENCE_CEILING["glassdoor"]
+    # FR-265: the rating rides along, advisory, and does not move the range.
+    assert result.employer_rating == 3.6
+    assert {t["polarity"] for t in result.employer_review_themes} == {"pros", "cons"}
+    # Nothing was written into the shared knowledge base.
+    assert query_one("SELECT COUNT(*) AS n FROM compensation_observation")["n"] == 0
+    assert query_one("SELECT COUNT(*) AS n FROM employer_review_summary")["n"] == 0
+
+
+def test_campaign_pass_prices_every_opportunity(db, monkeypatch):
+    """The FR-264 pass fills the columns the detail screen reads (FR-283)."""
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+    campaign_id = campaign["id"]
+    company_id = _company("Priced NV")
+    for index in range(4):
+        insert_row(
+            "vacancy",
+            {
+                "company_id": _company(f"Comparable {index}"),
+                "title": "Data Engineering Manager",
+                "function_family": "data & analytics",
+                "seniority": "manager",
+                "country": "BE",
+                "salary_min": 70_000 + index * 1_000,
+                "salary_max": 90_000 + index * 1_000,
+                "salary_currency": "EUR",
+                "collected_at": utcnow(),
+            },
+        )
+    insert_row(
+        "opportunity",
+        {
+            "id": "o-unpriced",
+            "job_seeker_id": seeker_id,
+            "campaign_id": campaign_id,
+            "company_id": company_id,
+            "title": "Data Engineering Manager",
+            "function_family": "data & analytics",
+            "seniority": "manager",
+            "country": "BE",
+            "kind": "vacancy",
+            "comp_is_stated": 0,
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+        },
+    )
+    monkeypatch.setattr(comp_mod, "campaign_advisory", lambda _cid: {"employers": [], "salaries": []})
+
+    report = comp_mod.enrich_campaign(seeker_id, campaign_id)
+
+    assert report["estimated"] == 1
+    assert report["unpriced"] == 0
+    stored = repo.get_opportunity("o-unpriced", seeker_id)
+    assert stored["comp_max"] is not None
+    assert stored["comp_currency"] == "EUR"
+    assert stored["comp_sources"]["sources"]
+
+
+def test_scoring_reads_the_employer_rating_from_the_campaigns_own_snapshots(db):
+    """FR-265: the rating lives in the browser run, not in the shared base.
+
+    ``employer_review_summary`` is only ever filled by a browser run that
+    promotes its findings, which nothing does; read without the campaign's
+    snapshots the rating is ``None`` for every employer and the component is
+    silently absent from the score.
+    """
+    company_id = _company("Rated NV")
+    advisory = {
+        "employers": [{"company_name": "Rated NV", "rating": 4.2, "review_count": 310,
+                       "themes": {"pros": ["real ownership"]}}],
+        "salaries": [],
+    }
+
+    without = scoring.company_attractiveness(company_id, company={"name": "Rated NV"})
+    assert not any("review rating" in r for r in without.reasons)
+
+    with_snapshots = scoring.company_attractiveness(
+        company_id, company={"name": "Rated NV"}, advisory=advisory
+    )
+    assert any("employer review rating 4.2/5" in r for r in with_snapshots.reasons)
+    # FR-265: advisory only - it is one visible component, never the score.
+    assert any("advisory only" in r for r in with_snapshots.reasons)

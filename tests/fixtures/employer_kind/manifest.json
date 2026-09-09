@@ -1,0 +1,145 @@
+{
+  "captured_at": "2026-09-09T09:34:00+00:00",
+  "pages": [
+    {
+      "file": "forumjobs_be_home.html",
+      "requested_url": "https://www.forumjobs.be/",
+      "final_url": "https://www.forumjobs.be/",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 59990,
+      "sha256_16": "17f11d2d0da1eb3a",
+      "note": "Agency (KBO 78.200). Home page; the nav carries 'Ik zoek werk | Voor bedrijven'."
+    },
+    {
+      "file": "forumjobs_be_employers.html",
+      "requested_url": "https://www.forumjobs.be/nl/ik-zoek-een-werknemer",
+      "final_url": "https://www.forumjobs.be/nl/ik-zoek-een-werknemer",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 60080,
+      "sha256_16": "73d20b5504d93508",
+      "note": "The employer-facing page behind 'Voor bedrijven'."
+    },
+    {
+      "file": "adecco_com_nl_be_home.html",
+      "requested_url": "https://www.adecco.be/",
+      "final_url": "https://www.adecco.com/nl-be",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 21467,
+      "sha256_16": "9cad03affb199df9",
+      "note": "Agency. adecco.be redirects within the same organisation to adecco.com/nl-be."
+    },
+    {
+      "file": "adecco_com_nl_be_uitzendwerk.html",
+      "requested_url": "https://www.adecco.com/nl-be/werkgevers/diensten/uitzendwerk",
+      "final_url": "https://www.adecco.com/nl-be/werkgevers/diensten/uitzendwerk",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 35910,
+      "sha256_16": "5b0fc043841ce2b8",
+      "note": "Employer-facing services page: uitzendarbeid, payrolling, outsourcing."
+    },
+    {
+      "file": "noelfranklin_be_home.html",
+      "requested_url": "https://www.noelfranklin.be/",
+      "final_url": "https://www.noelfranklin.be/",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 60085,
+      "sha256_16": "3cff1c8a1df022de",
+      "note": "Agency (KBO 78.100/78.200/78.300); 56 vacancies in the corpus, no agency word in the name."
+    },
+    {
+      "file": "gitlab_com_home.html",
+      "requested_url": "https://about.gitlab.com/",
+      "final_url": "https://about.gitlab.com/",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 59979,
+      "sha256_16": "4a625584e4ce0f11",
+      "note": "Employer. The case a title-diversity detector calls an agency."
+    },
+    {
+      "file": "gitlab_com_company.html",
+      "requested_url": "https://about.gitlab.com/company/",
+      "final_url": "https://about.gitlab.com/company/",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 59952,
+      "sha256_16": "759b8be4b8941aaf",
+      "note": "Employer, about page: 'We're the company behind GitLab ...'."
+    },
+    {
+      "file": "televic_com_home.html",
+      "requested_url": "https://www.televic.com/en",
+      "final_url": "https://www.televic.com/en",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 30658,
+      "sha256_16": "7d0b76dc76ae6e79",
+      "note": "Employer: a product maker whose home page recruits for itself."
+    },
+    {
+      "file": "100g_be_home.html",
+      "requested_url": "https://100g.be/",
+      "final_url": "https://100g.be/",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 326,
+      "sha256_16": "ae168d45e0829792",
+      "note": "cannot_tell(js_rendered_or_empty): the page renders 0 characters of text."
+    },
+    {
+      "file": "editx_eu_home.html",
+      "requested_url": "https://www.editx.eu/",
+      "final_url": "https://editx.eu/en",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 7306,
+      "sha256_16": "e33078f3276c75fe",
+      "note": "cannot_tell(js_rendered_or_empty): the page renders 'loading...'."
+    },
+    {
+      "file": "jobat_be_bot_wall.html",
+      "requested_url": "https://www.jobat.be/",
+      "final_url": "https://www.jobat.be/",
+      "http_status": 403,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 5507,
+      "sha256_16": "9796a60cf34bfc68",
+      "note": "cannot_tell(bot_wall): Cloudflare 'Attention Required!' challenge."
+    },
+    {
+      "file": "hyundaiusa_com_404.html",
+      "requested_url": "https://think-about-it.com/",
+      "final_url": "https://www.hyundaiusa.com/us/en/404",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 18105,
+      "sha256_16": "f87b0a247839b4f0",
+      "note": "cannot_tell(off_domain_redirect): the domain confirmed for 'think about IT' now serves a Hyundai 404 page. Body trimmed to a stub; only the final URL matters."
+    },
+    {
+      "file": "adecco_com_nl_be_home_injected.html",
+      "requested_url": "https://www.adecco.be/",
+      "final_url": "https://www.adecco.com/nl-be",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 21710,
+      "sha256_16": "a6c81f1c38efe78e",
+      "note": "adecco_com_nl_be_home.html with the planted prompt injection of Agency_Research_Design section 3.5 appended."
+    },
+    {
+      "file": "gitlab_com_home_injected.html",
+      "requested_url": "https://about.gitlab.com/",
+      "final_url": "https://about.gitlab.com/",
+      "http_status": 200,
+      "fetched_at": "2026-09-09T09:34:00+00:00",
+      "bytes": 60222,
+      "sha256_16": "28a175759253872b",
+      "note": "gitlab_com_home.html with the planted prompt injection of Agency_Research_Design section 3.5 appended."
+    }
+  ]
+}

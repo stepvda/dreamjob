@@ -80,12 +80,21 @@ def search_companies(
     country: str | None = None,
     sector: str | None = None,
     size_band: str | None = None,
+    ats_vendor: str | None = Query(
+        None,
+        description=(
+            "A vendor name, or 'any'/'none' for companies reached through an ATS "
+            "board at all. The ATS route is the one that reaches a company's own "
+            "postings, so being able to ask is how a starved harvest stage shows."
+        ),
+    ),
     limit: int = Query(25, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> dict:
     """Full-text and faceted search over the shared company knowledge base."""
     return knowledge_base.browse_companies(
-        q, country=country, sector=sector, size_band=size_band, limit=limit, offset=offset
+        q, country=country, sector=sector, size_band=size_band, ats_vendor=ats_vendor,
+        limit=limit, offset=offset,
     )
 
 

@@ -26,8 +26,34 @@ around interruption rather than around the happy path:
   the plan item that produced it (FR-166) and de-duplicates it (FR-184);
 * the extraction rate of each adapter is tracked and a collapse is flagged for
   the administrator within the campaign that saw it (NFR-403);
-* an adapter that is missing, disabled or blocked by robots.txt fails its own
-  plan item and nothing else (IR-101, FR-182).
+* an adapter that is missing, disabled or blocked by robots.txt settles its
+  own plan item and nothing else (IR-101, FR-182);
+* **an outcome is labelled for what it is.**  Counting every non-2xx as an
+  error was the correction of a worse bug - a plan item that fetched nothing
+  was recorded as ``done`` with 0 records and 0 errors, which hid a total
+  retrieval failure - but it over-corrected: one campaign reported 538
+  "errors" of which 308 were dead registry slugs answering 404, 192 were
+  robots.txt refusals the product made on purpose, and 51 were bot walls.  A
+  real failure buried among 500 expected outcomes is a failure nobody sees, so
+  a plan item now ends in one of six measured states (:class:`ItemOutcome`):
+
+  ``succeeded``  records were written;
+  ``blocked``    we declined, correctly - robots.txt, a 403 bot wall, terms of
+                 service.  A decision, and one the product can defend
+                 (FR-182, IR-101, CR-402);
+  ``gone``       the target is not there any more - 404 or 410 on a board the
+                 registry offered.  The registry is told, so it learns and
+                 stops offering it (FR-343, DR-101);
+  ``failed``     something actually went wrong - 5xx, a transport error, a
+                 rate limit, a parse crash, an adapter exception.  This is the
+                 one the operator must see, and it is the only one that still
+                 increments ``error_count``;
+  ``skipped``    there was nothing to do;
+  ``capped``     the FR-186 budget ended the run before this item finished.
+
+  ``blocked`` and ``gone`` are counted in columns of their own (migration 130)
+  rather than made quiet: "we declined 192 sources on principle" is
+  information the operator wants, it is simply not an error.
 
 Two properties of that design were missing and are added here (see
 ``docs/Data_Gathering_Plan.md`` sections 2.4 and 5.2, items N5 and N7):
@@ -72,6 +98,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from dreamjob.adapters.base import PlanItem, get_adapter
+from dreamjob.adapters.vacancy_source import SourceUnavailable
 from dreamjob.config import get_settings
 from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import campaigns as repo
@@ -80,7 +107,7 @@ from dreamjob.db.repositories import knowledge as kb_repo
 from dreamjob.egress import client as egress_client
 from dreamjob.egress.client import EgressClient, FetchResult, RobotsDisallowed
 from dreamjob.jobs.runner import JobCancelled, JobContext, runner
-from dreamjob.pipeline import knowledge_base, planning
+from dreamjob.pipeline import board_registry, knowledge_base, planning
 
 
 def _is_ats(adapter: Any) -> bool:
@@ -219,6 +246,62 @@ def _bucket_for(item: dict, adapter: Any) -> str:
     return f"adapter:{item.get('adapter_key') or getattr(adapter, 'key', '')}"
 
 
+# ---------------------------------------------------------------------------
+# What an answer means (FR-182, FR-185, IR-101, NFR-403)
+# ---------------------------------------------------------------------------
+
+#: Answers in which the other side declined us, or we declined it.  A bot wall
+#: (403) and a legal refusal (451) are the HTTP spelling of the decision
+#: robots.txt states in words: the source does not want to be read this way.
+#: Neither is a defect in this product, and neither is retried by paging on -
+#: but both are recorded, because "we declined 192 sources on principle" is
+#: exactly the kind of thing the operator has to be able to defend (FR-182,
+#: IR-101, CR-402).
+#:
+#: 401 is deliberately absent: a credential this installation was supposed to
+#: hold and does not is our own defect, and it must stay loud.  So is 429 and
+#: so is 503 - "come back later" is a rate the product is exceeding, which is
+#: the operator's problem to see, not a decision to record and forget.
+BLOCKED_STATUSES: frozenset[int] = frozenset({403, 451})
+
+#: Answers in which the target is not there any more.  On a board the registry
+#: offered, this is the measured cost of a harvested registry, not a failure:
+#: liveness of a Wayback-only slug was measured at 27.5% (board_registry, N3).
+#: The registry learns it once and stops offering it (FR-343, DR-101).
+GONE_STATUSES: frozenset[int] = frozenset({404, 410})
+
+
+@dataclass
+class Refusal:
+    """One request that was turned down, with the evidence to classify it."""
+
+    url: str
+    #: The HTTP status, or ``None`` when no request was made at all because
+    #: robots.txt disallowed it (:class:`RobotsDisallowed`, FR-182).
+    status: int | None
+    robots: bool = False
+
+    @property
+    def detail(self) -> str:
+        if self.robots:
+            return f"{self.url}: robots.txt disallows this source (FR-182)"
+        return f"{self.url}: HTTP {self.status}"
+
+    def kind(self, *, board: bool) -> str:
+        """``blocked``, ``gone`` or ``failed`` - the three ways to be refused.
+
+        ``board`` says whether this plan item reads one named ATS board, which
+        is the only target a 404 can mean *gone* for.  A search endpoint that
+        answers 404 has moved and the adapter is now wrong about it; that is a
+        breakage and it stays a failure.
+        """
+        if self.robots or (self.status in BLOCKED_STATUSES):
+            return "blocked"
+        if board and self.status in GONE_STATUSES:
+            return "gone"
+        return "failed"
+
+
 class _UnitEgress:
     """One plan item's view of the shared egress client (FR-183, FR-185).
 
@@ -239,7 +322,10 @@ class _UnitEgress:
     def __init__(self, client: EgressClient):
         self._client = client
         self.requests = 0
-        self.refusals: list[str] = []
+        #: Every request that was turned down, as evidence rather than as
+        #: prose: the status is what tells a bot wall from a dead board from a
+        #: server that fell over, and a string cannot be classified twice.
+        self.refusals: list[Refusal] = []
         # The last request this item made, kept for the fetch ledger (N4): the
         # ledger answers "was this target read recently", so it needs the URL
         # and validators of the read, not just how many there were.
@@ -256,11 +342,13 @@ class _UnitEgress:
         self.requests += 1
         try:
             result = await self._client.fetch(url, **kwargs)
-        except RobotsDisallowed as exc:
-            self.refusals.append(f"{url}: robots.txt disallows this source (FR-182): {exc}")
+        except RobotsDisallowed:
+            # RobotsUnavailable subclasses this: a robots.txt that could not be
+            # read is a refusal too, and by the same decision (FR-182).
+            self.refusals.append(Refusal(url=url, status=None, robots=True))
             raise
         if not result.ok:
-            self.refusals.append(f"{url}: HTTP {result.status_code}")
+            self.refusals.append(Refusal(url=url, status=result.status_code))
         self.last_url = result.url or url
         self.last_status = result.status_code
         headers = result.headers or {}
@@ -310,25 +398,132 @@ class Caps:
 class CollectionStats:
     pages: int = 0
     records: int = 0
+    #: Things that actually went wrong (5xx, transport, crashes).  Refusals we
+    #: made on principle and targets that are gone are counted next door, so
+    #: this number is the one an operator can act on (FR-185).
     errors: int = 0
+    #: Requests declined on principle: robots.txt, a bot wall, terms of
+    #: service (FR-182, IR-101).
+    blocked: int = 0
+    #: Requests to a target that no longer exists (404/410 on a board).
+    gone: int = 0
     companies: set[str] = field(default_factory=set)
     people: set[str] = field(default_factory=set)
     by_adapter: dict[str, dict[str, int]] = field(default_factory=dict)
     stopped_by: str | None = None
+    #: FR-186: pages charged per collection stage, which is what a stage's
+    #: reservation is spent against.
+    pages_by_stage: dict[int, int] = field(default_factory=dict)
+    #: ``(stage, ceiling)`` of the wave running now, or ``None`` between waves.
+    #: Reaching the ceiling ends that stage, not the run.
+    stage_limit: tuple[int, int] | None = None
 
     def adapter(self, key: str) -> dict[str, int]:
-        return self.by_adapter.setdefault(key, {"pages": 0, "records": 0, "errors": 0})
+        bucket = self.by_adapter.setdefault(
+            key, {"pages": 0, "records": 0, "errors": 0, "blocked": 0, "gone": 0}
+        )
+        # A bucket restored from a checkpoint written before migration 130 has
+        # neither key, and a missing key here is a KeyError in the page loop.
+        bucket.setdefault("blocked", 0)
+        bucket.setdefault("gone", 0)
+        return bucket
+
+    def charge_stage(self, stage: int, pages: int) -> None:
+        self.pages_by_stage[stage] = self.pages_by_stage.get(stage, 0) + pages
 
     def to_dict(self) -> dict:
         return {
             "pages": self.pages,
             "records": self.records,
             "errors": self.errors,
+            # NFR-401: the checkpoint carries these, so a resumed job reports
+            # the same totals as an uninterrupted one.
+            "blocked": self.blocked,
+            "gone": self.gone,
             "companies": len(self.companies),
             "people": len(self.people),
             "by_adapter": self.by_adapter,
             "stopped_by": self.stopped_by,
+            "pages_by_stage": {str(k): v for k, v in self.pages_by_stage.items()},
         }
+
+    def restore(self, saved: dict | None) -> None:
+        """Continue an interrupted run's counters instead of restarting them.
+
+        A resumed job re-runs at most the page that was in flight, so every
+        record, error, refusal and dead target the previous attempt counted is
+        work this attempt will not do again.  Leaving them at zero made a
+        resumed campaign report fewer records and fewer failures than the same
+        campaign run straight through, which is the same class of lie as
+        ``done, 0 records, 0 errors`` (NFR-401, FR-185).
+        """
+        if not isinstance(saved, dict):
+            return
+        for name in ("records", "errors", "blocked", "gone"):
+            value = saved.get(name)
+            if isinstance(value, (int, float)):
+                setattr(self, name, int(value))
+        by_adapter = saved.get("by_adapter")
+        if isinstance(by_adapter, dict):
+            for key, counts in by_adapter.items():
+                if not isinstance(counts, dict):
+                    continue
+                bucket = self.adapter(str(key))
+                for name, value in counts.items():
+                    if isinstance(value, (int, float)):
+                        bucket[name] = bucket.get(name, 0) + int(value)
+
+
+# FR-186: how the page budget is reserved across the collection stages.
+#
+# Weights, not fractions: what a stage does not spend is divided among the
+# stages that still have work, in proportion, so a reservation never wastes
+# budget.  Before this existed the budget was first-come-first-served in stage
+# order and the floor pass gave every *unit* one page, so a plan with more
+# discovery items than pages spent the entire budget before the harvest stage
+# was reached: one real run settled 4,429 planned ATS boards as
+# "not started: max_pages" without issuing a single request to any of them.
+# The harvest stage is the only route to a company's own board, so it is
+# reserved as much of the budget as discovery.
+STAGE_RESERVE: dict[int, int] = {
+    repo.STAGE_DISCOVER: 4,
+    repo.STAGE_DEEPEN: 2,
+    repo.STAGE_HARVEST: 4,
+}
+DEFAULT_STAGE_RESERVE = 1
+
+
+def _stage_allowance(
+    stage: int, pending_stages: set[int], stats: CollectionStats, caps: Caps
+) -> int:
+    """How many more pages this stage may charge in the wave about to run.
+
+    Computed when the wave starts, from what is actually left and which stages
+    still have work, so an under-spending stage hands its remainder on rather
+    than reserving it against nothing.
+    """
+    remaining = max(0, caps.max_pages - stats.pages)
+    if remaining <= 0:
+        return 0
+    weights = sum(STAGE_RESERVE.get(s, DEFAULT_STAGE_RESERVE) for s in pending_stages)
+    if weights <= 0:
+        return remaining
+    share = STAGE_RESERVE.get(stage, DEFAULT_STAGE_RESERVE) / weights
+    # A stage always gets at least one page: a reservation that rounded to zero
+    # would settle the whole stage "never started" for arithmetic reasons.
+    return max(1, min(remaining, int(remaining * share)))
+
+
+def _stage_exhausted(stats: CollectionStats) -> bool:
+    """Has the wave now running spent its stage's reservation (FR-186)?
+
+    Distinct from :func:`_cap_hit`: this ends a stage and lets the run continue
+    to the next one, where a cap ends the run.
+    """
+    if stats.stage_limit is None:
+        return False
+    stage, ceiling = stats.stage_limit
+    return stats.pages_by_stage.get(stage, 0) >= ceiling
 
 
 def _cap_hit(stats: CollectionStats, caps: Caps, started: float) -> str | None:
@@ -429,16 +624,58 @@ class ItemOutcome:
     pages: int = 0               # pages that issued a request or returned material
     productive_pages: int = 0    # ... of which yielded at least one parsed record
     charged: int = 0             # what this item cost the run's page budget (FR-186)
+    #: Pages that actually went wrong.  One per failed page, which is what
+    #: ``source_plan_item.error_count`` counts and what an operator is asked to
+    #: look at.  A refusal we made on principle and a target that is gone are
+    #: *not* errors and never land here.
     errors: int = 0
-    refused: int = 0             # requests the server or robots.txt turned down
+    refused: int = 0             # every request the server or robots.txt turned down
+    #: ... of which: declined on principle (robots.txt, 403, 451) and dead
+    #: (404/410 on a board).  Both are counted per request, and both are
+    #: outcomes rather than failures (FR-182, IR-101, FR-343).
+    blocked: int = 0
+    gone: int = 0
+    #: ... and the rest: requests that failed, plus one for a page that failed
+    #: without issuing one (a crash).  This is ``failed_count`` in the plan row
+    #: - the same events as ``errors``, counted per request instead of per page.
+    failed: int = 0
     #: Answers in which the source itself stated it holds nothing for this query.
     stated_empty: int = 0
-    blocked: bool = False        # robots.txt refused the source (FR-182)
+    robots_blocked: int = 0      # ... of ``blocked``, refused by robots.txt (FR-182)
+    #: Why we were declined, and what was gone: the evidence a ``blocked`` or a
+    #: ``gone`` verdict has to be able to show (NFR-402).
+    block_reason: str | None = None
+    gone_reason: str | None = None
+    #: The statuses the gone and failed verdicts rest on, which is what the
+    #: board registry is told: 404/410 retires a board, a 5xx never can.
+    gone_status: int | None = None
+    failed_status: int | None = None
     last_error: str | None = None
 
     @property
     def written(self) -> int:
         return self.created + self.updated
+
+    @property
+    def failed_requests(self) -> int:
+        """Refusals that were neither a decision nor a dead target.
+
+        Derived rather than stored: every refusal is classified exactly once,
+        so the three buckets always add up to ``refused`` and no answer can be
+        counted twice or dropped between them.
+        """
+        return max(0, self.refused - self.blocked - self.gone)
+
+    @property
+    def page_failures(self) -> int:
+        """What this page cost in real failures, at request granularity.
+
+        A page that issued three requests and had all three answered 500 failed
+        three times; a page that crashed without issuing one still failed once.
+        ``max`` rather than a sum, so a 500 that then raised is one failure and
+        not two.
+        """
+        return max(self.errors, self.failed_requests)
 
     @property
     def extraction_rate(self) -> float | None:
@@ -454,11 +691,23 @@ class ItemOutcome:
         return self.productive_pages / self.pages
 
     def state(self) -> str:
-        """One of five distinct answers, never folded into "done"."""
+        """The one word this item ended in, never folded into "done".
+
+        Order is the whole point.  ``failed`` is tested before ``blocked`` and
+        ``gone`` so a real failure on a source that was also refused somewhere
+        stays loud: the expected outcomes must never be able to swallow one.
+        ``blocked`` precedes ``gone`` because robots.txt refuses the *source*
+        while a 404 refuses one target, and the wider statement is the truer
+        label for the item.
+        """
         if self.written:
             return "succeeded"
         if self.errors:
             return "failed"
+        if self.blocked:
+            return "blocked"
+        if self.gone:
+            return "gone"
         if self.dropped:
             return "rejected"
         if self.parsed or self.normalised:
@@ -487,7 +736,15 @@ class ItemOutcome:
             "dropped": self.dropped,
             "pages": self.pages,
             "charged_pages": self.charged,
-            "blocked_by_robots": self.blocked,
+            # FR-185: the three ways a request can be turned down, kept apart.
+            # ``refused`` stays their total, so nothing that read it before
+            # migration 130 reads a smaller number now.
+            "blocked": self.blocked,
+            "gone": self.gone,
+            "failed": self.failed,
+            "blocked_by_robots": bool(self.robots_blocked),
+            "block_reason": self.block_reason,
+            "gone_reason": self.gone_reason,
             "stated_empty": self.stated_empty,
             "extraction_rate": self.extraction_rate,
         }
@@ -497,9 +754,17 @@ class ItemOutcome:
 # "succeeded" is ``done``: a source that fetched nothing, was refused, or
 # produced records the knowledge base would not take has not done its job, and
 # recording that as ``done`` is what hid this failure for months.
+#
+# ``blocked`` and ``gone`` are statuses of their own rather than either ``done``
+# or ``failed``.  Both are terminal - neither is retried, because neither answer
+# changes by asking again this week - and both must be countable apart from the
+# failures, which is the whole point: 500 expected outcomes filed as errors is
+# how the next real failure gets missed.
 _STATE_STATUS: dict[str, str] = {
     "succeeded": "done",
     "failed": "failed",
+    "blocked": "blocked",
+    "gone": "gone",
     "rejected": "failed",
     "normalised_nothing": "failed",
     "extracted_nothing": "failed",
@@ -509,6 +774,17 @@ _STATE_STATUS: dict[str, str] = {
     "no_matches": "done",
     "no_work": "skipped",
 }
+
+#: The states that are not failures.  Everything else charges the plan item an
+#: error, so a new state cannot be added by accident and stay silent.
+NON_FAILURE_STATES: frozenset[str] = frozenset(
+    {"succeeded", "no_matches", "blocked", "gone", "skipped", "capped"}
+)
+
+#: Plan-item statuses that will not be run again by a later campaign, and so
+#: carry no remaining time.  ``blocked`` and ``gone`` are terminal for the same
+#: reason ``done`` is: asking again this week cannot change the answer.
+TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "skipped", "blocked", "gone"})
 
 
 def _state_message(outcome: ItemOutcome) -> str | None:
@@ -520,6 +796,18 @@ def _state_message(outcome: ItemOutcome) -> str | None:
         return outcome.last_error if outcome.refused else None
     if state == "failed":
         return outcome.last_error
+    if state == "blocked":
+        # Not an error, and phrased as what it is: a decision this product has
+        # to be able to defend, with the evidence it rests on (FR-182, IR-101).
+        return (
+            f"declined on principle: {outcome.block_reason or 'no reason recorded'} - "
+            f"{outcome.blocked} request(s) refused, none collected"
+        )
+    if state == "gone":
+        return (
+            f"the target is gone: {outcome.gone_reason or 'no reason recorded'} - "
+            "the board registry has been told, so it stops offering it (FR-343)"
+        )
     if state == "rejected":
         return (
             f"the knowledge base refused all {outcome.dropped} record(s) this source produced: "
@@ -663,11 +951,12 @@ def _target_key(unit: _Unit) -> str:
     rows were fresh.  An ATS board is named by its slug; anything else is named
     by the same identity the planner uses to match a re-plan to its rows, so a
     EURES partition and its re-plan are one target and two partitions are two.
+
+    The key itself is :func:`planning.target_key`, because the reuse assessment
+    reads these rows back and a second implementation that drifted by one
+    character would silently restore the per-adapter behaviour this replaced.
     """
-    if unit.board:
-        return f"{unit.board[0]}/{unit.board[1]}"
-    _, digest = planning._plan_key(unit.adapter_key, unit.item.get("native_query"))
-    return digest or unit.adapter_key
+    return planning.target_key(unit.adapter_key, unit.item.get("native_query"), unit.board)
 
 
 def _record_ledger(unit: _Unit) -> None:
@@ -777,6 +1066,37 @@ def _extraction_counters(adapter: Any) -> tuple[int, int]:
     )
 
 
+def _classify_refusals(step: ItemOutcome, refusals: list[Any], *, board: bool) -> None:
+    """Sort this page's refusals into decision, dead target and failure.
+
+    Every refusal is classified exactly once and the three counts add up to
+    ``refused``, so an answer can neither be counted twice nor fall between the
+    buckets - which is what a second, independent reading of the same log line
+    would eventually do.
+    """
+    for refusal in refusals:
+        if not isinstance(refusal, Refusal):  # pragma: no cover - defensive
+            continue
+        kind = refusal.kind(board=board)
+        if kind == "blocked":
+            step.blocked += 1
+            step.robots_blocked += 1 if refusal.robots else 0
+            step.block_reason = step.block_reason or refusal.detail
+        elif kind == "gone":
+            step.gone += 1
+            step.gone_reason = step.gone_reason or refusal.detail
+            step.gone_status = step.gone_status or refusal.status
+        else:
+            step.failed_status = step.failed_status or refusal.status
+
+
+def _last_detail(refusals: list[Any]) -> str:
+    if not refusals:
+        return "no detail recorded"
+    last = refusals[-1]
+    return last.detail if isinstance(last, Refusal) else str(last)
+
+
 async def _run_page(unit: _Unit, page: int) -> ItemOutcome:
     """One page of one source, measured at every step (FR-181, NFR-403)."""
     step = ItemOutcome()
@@ -794,18 +1114,48 @@ async def _run_page(unit: _Unit, page: int) -> ItemOutcome:
     refusals_before = len(getattr(egress, "refusals", ()) or ())
 
     def measure() -> None:
+        """Charge this page with the requests and refusals it made itself.
+
+        The refusals are classified here rather than counted here and read
+        somewhere else, so every exit from this function - including the two
+        that raise - leaves the same, complete verdict behind.
+        """
         step.requests = int(getattr(egress, "requests", 0)) - requests_before
-        step.refused = len(getattr(egress, "refusals", ()) or ()) - refusals_before
+        new = list(getattr(egress, "refusals", ()) or ())[refusals_before:]
+        step.refused = len(new)
+        _classify_refusals(step, new, board=unit.board is not None)
 
     attempts_before, successes_before = _extraction_counters(unit.adapter)
     failures_before = len(getattr(unit.writer, "failures", ()) or ())
     try:
         records = await unit.adapter.run(plan_item)
     except RobotsDisallowed as exc:
+        # FR-182 / IR-101: we declined this source; the source did not fail us.
+        # No page is counted, so NFR-403's breakage detector is not fed a
+        # refusal it would read as a layout change - which is how 96 dead
+        # Personio boards made a working adapter look broken.
         measure()
-        step.blocked = True
-        step.errors = 1
+        if not step.blocked:
+            # The adapter raised without fetching through this item's view.
+            step.blocked = 1
+            step.robots_blocked = 1
+        step.block_reason = step.block_reason or f"robots.txt disallows this source: {exc}"
         step.last_error = f"robots.txt disallows this source (FR-182): {exc}"
+        return step
+    except SourceUnavailable as exc:
+        # The adapter's own "every request I issued was turned down" (FR-185).
+        # What that *means* is in the answers, which this item's view recorded:
+        # a bot wall is a decision, a 404 on a board the registry offered is a
+        # dead target, and a 5xx, a rate limit or a transport error is a
+        # failure - and stays one.
+        measure()
+        step.charged = step.requests
+        if step.failed_requests or not step.refused:
+            step.errors = 1
+            step.last_error = f"{type(exc).__name__}: {exc}"
+            step.pages = 1 if step.requests else 0
+        else:
+            step.last_error = step.block_reason or step.gone_reason
         return step
     except Exception as exc:  # noqa: BLE001 - one page must not stop the run
         log.exception("[%s] page %d failed", unit.adapter_key, page)
@@ -855,15 +1205,16 @@ async def _run_page(unit: _Unit, page: int) -> ItemOutcome:
         # rather than raising, so an adapter that swallows it returned an empty
         # list - and an empty list used to be written down as "done, 0 records,
         # 0 errors", which is the shape every bug in this pipeline hid behind.
-        detail = (getattr(egress, "refusals", None) or ["no detail recorded"])[-1]
+        detail = _last_detail(list(getattr(egress, "refusals", ()) or ()))
         if not step.dropped:
             step.last_error = (
                 f"{step.refused} request(s) refused - {detail}"
                 if step.normalised
                 else f"{step.refused} request(s) refused and nothing collected - {detail}"
             )
-        if not step.normalised:
-            # Nothing survived the refusal, so this page is a failed page.
+        if not step.normalised and step.failed_requests:
+            # Nothing survived, and what turned us down was neither a decision
+            # we made nor a target that is gone: this page failed.
             step.errors = max(step.errors, 1)
     return step
 
@@ -883,7 +1234,15 @@ def _absorb(unit: _Unit, step: ItemOutcome) -> None:
     total.errors += step.errors
     total.refused += step.refused
     total.stated_empty += step.stated_empty
-    total.blocked = total.blocked or step.blocked
+    total.blocked += step.blocked
+    total.gone += step.gone
+    total.robots_blocked += step.robots_blocked
+    # Per request, and never twice for one page: see ``page_failures``.
+    total.failed += step.page_failures
+    total.block_reason = total.block_reason or step.block_reason
+    total.gone_reason = total.gone_reason or step.gone_reason
+    total.gone_status = total.gone_status or step.gone_status
+    total.failed_status = total.failed_status or step.failed_status
     if step.last_error:
         total.last_error = step.last_error
 
@@ -908,6 +1267,18 @@ async def collection_worker(ctx: JobContext) -> None:
     stats.pages = int((saved or {}).get("pages") or 0) or sum(
         int(v) for v in completed.values()
     )
+    # FR-185 / NFR-401: the records, failures, refusals and dead targets the
+    # interrupted attempt counted are work this attempt will not repeat, so a
+    # resumed job reports the same totals as an uninterrupted one.
+    stats.restore(saved)
+    # FR-186 / NFR-401: a resumed run continues against the same per-stage
+    # reservations, so an interrupted campaign cannot spend discovery's share
+    # twice and starve its own harvest stage on the second attempt.
+    for key, value in ((saved or {}).get("pages_by_stage") or {}).items():
+        try:
+            stats.pages_by_stage[int(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
 
     items = [
         i
@@ -969,11 +1340,23 @@ async def collection_worker(ctx: JobContext) -> None:
                         ctx.progress(stats.pages, total_pages)
                         continue
                     ran_stages.add(stage)
-                    await _run_wave(
-                        [u for u in pending if u.stage == stage],
-                        pass_limit, ctx, stats, caps, started, completed,
-                        total_pages, concurrency,
+                    # FR-186: the stage takes its reservation of what is left,
+                    # never the whole of it.  A wave that reaches its ceiling
+                    # ends that stage and the next one runs; only a cap in
+                    # ``_cap_hit`` ends the run.
+                    stats.stage_limit = (
+                        stage,
+                        stats.pages_by_stage.get(stage, 0)
+                        + _stage_allowance(stage, {u.stage for u in pending}, stats, caps),
                     )
+                    try:
+                        await _run_wave(
+                            [u for u in pending if u.stage == stage],
+                            pass_limit, ctx, stats, caps, started, completed,
+                            total_pages, concurrency,
+                        )
+                    finally:
+                        stats.stage_limit = None
                 if stats.stopped_by:
                     break
                 if not harvested:
@@ -1010,9 +1393,15 @@ async def collection_worker(ctx: JobContext) -> None:
         for unit in units:
             if not unit.running:
                 continue
+            reason = f"{type(exc).__name__}: {exc}"
+            unit.outcome.failed += 1
             repo.update_plan_item(
                 unit.id,
-                {"status": "failed", "last_error": f"{type(exc).__name__}: {exc}"},
+                {
+                    "status": "failed",
+                    "last_error": reason,
+                    **_outcome_columns(unit, "failed", reason),
+                },
             )
             repo.bump_plan_item(unit.id, errors=1)
         repo.set_stage(campaign_id, "collection", "failed")
@@ -1127,8 +1516,18 @@ def _build_units(
             # malformed native_query took the whole job down with it and left
             # every source looking untouched - status planned, 0 errors.
             log.exception("[%s] could not be prepared for collection", item.get("adapter_key"))
+            reason = f"{type(exc).__name__}: {exc}"
             repo.update_plan_item(
-                item["id"], {"status": "failed", "last_error": f"{type(exc).__name__}: {exc}"}
+                item["id"],
+                {
+                    "status": "failed",
+                    "last_error": reason,
+                    # A plan item this product could not even prepare is a
+                    # failure of ours, and it stays one (FR-185).
+                    "outcome_state": "failed",
+                    "outcome_reason": reason[:2000],
+                    "failed_count": int(item.get("failed_count") or 0) + 1,
+                },
             )
             repo.bump_plan_item(item["id"], errors=1)
             continue
@@ -1156,7 +1555,14 @@ def _build_unit(
     if adapter is None:
         repo.update_plan_item(
             item["id"],
-            {"status": "skipped", "last_error": "no adapter registered for this source"},
+            {
+                "status": "skipped",
+                "last_error": "no adapter registered for this source",
+                # Nothing to do, and nothing went wrong: 104 plan items of one
+                # campaign named adapters that exist only as test fixtures.
+                "outcome_state": "skipped",
+                "outcome_reason": "no adapter registered for this source",
+            },
         )
         return None
     # An ATS plan item with no board slug has nothing to read.  It is left
@@ -1164,14 +1570,17 @@ def _build_unit(
     # discovered by this run, and a terminal 'skipped' would never be
     # revisited even once that company exists (FR-162).
     if _is_ats(adapter) and not _has_ats_slug(adapter, item):
+        reason = (
+            "no company with a known board for this source yet - run the "
+            "discovery sources first (FR-162)"
+        )
         repo.update_plan_item(
             item["id"],
             {
                 "status": "planned",
-                "last_error": (
-                    "no company with a known board for this source yet - run the "
-                    "discovery sources first (FR-162)"
-                ),
+                "last_error": reason,
+                "outcome_state": "skipped",
+                "outcome_reason": reason,
             },
         )
         return None
@@ -1329,6 +1738,16 @@ async def _run_wave(
         for unit in units:
             if stats.stopped_by:
                 return
+            # A cap ends the run and is recorded as the reason; a stage
+            # reservation only ends this wave.  The cap is tested first, or a
+            # stage that had spent its share would swallow the reason the run
+            # actually stopped (FR-186).
+            reason = _cap_hit(stats, caps, started)
+            if reason:
+                stats.stopped_by = reason
+                return
+            if _stage_exhausted(stats):
+                return
             if unit.remaining <= 0:
                 continue
             if slots is None:
@@ -1402,6 +1821,10 @@ async def _drive_unit(
         if reason:
             stats.stopped_by = reason
             return
+        if _stage_exhausted(stats):
+            # FR-186: this stage has spent its reservation.  The run continues -
+            # the next stage is exactly what the reservation was protecting.
+            return
         await ctx.checkpoint_barrier()  # FR-185 pause / cancel
         page = unit.done + 1
         try:
@@ -1420,22 +1843,38 @@ async def _drive_unit(
             bucket["errors"] += step.errors
             stats.errors += step.errors
             unit.pages = unit.done  # a failed source is not paged through further
-        elif step.refused:
-            # The page produced records and part of what it asked for was still
-            # refused.  The records are kept and the refusal is counted anyway:
+        elif step.failed_requests:
+            # The page produced records and part of what it asked for still
+            # failed.  The records are kept and the failure is counted anyway:
             # a source that half answered is not a source that answered (N7).
-            repo.bump_plan_item(unit.id, errors=step.refused, last_error=step.last_error)
+            # Only the requests that actually failed are charged here - a bot
+            # wall or a dead board on the same page is counted below, not as an
+            # error the operator is asked to look at.
+            repo.bump_plan_item(unit.id, errors=step.failed_requests,
+                                last_error=step.last_error)
             ctx.record_error(step.last_error or "request refused")
-            bucket["errors"] += step.refused
-            stats.errors += step.refused
-        elif not step.pages:
-            # The adapter issued no request and returned no material for this
-            # query.  Page two will not either, and asking for it would charge
-            # the run's budget for work that never happens (FR-186).
+            bucket["errors"] += step.failed_requests
+            stats.errors += step.failed_requests
+        if step.blocked:
+            # FR-182 / IR-101: we declined, correctly.  Counted, never buried,
+            # and never as an error - the job's own error counter stays the
+            # number of things that went wrong.
+            bucket["blocked"] += step.blocked
+            stats.blocked += step.blocked
+        if step.gone:
+            bucket["gone"] += step.gone
+            stats.gone += step.gone
+        if not step.errors and not step.written and (step.refused or not step.pages):
+            # Nothing came back and nothing will: robots.txt does not change its
+            # mind on page two, a board that is gone is gone, and an adapter
+            # that issued no request for page one issues none for page two
+            # either - asking would charge the budget for work that never
+            # happens (FR-186).
             unit.pages = unit.done
         if step.written:
             repo.bump_plan_item(unit.id, records=step.written)
         stats.pages += step.charged
+        stats.charge_stage(unit.stage, step.charged)
         stats.records += step.written
         # FR-186: a company this item collected for counts whether the writer
         # created it or the board's identity resolved to one that existed.
@@ -1454,6 +1893,92 @@ async def _drive_unit(
             return
 
 
+#: What each settled state tells the board registry about the board.  The
+#: names are the registry slice's own contract (``pipeline/board_registry``),
+#: and the distinctions are the point of it:
+#:
+#: * ``mark_gone`` - 404 or 410, evidence the tenant has left.  Two of them
+#:   retire the slug and every later campaign stops paying a request for it,
+#:   which is what turns 308 repeated dead boards into one fact learned once.
+#: * ``mark_live`` - the board answered, so the failure counter is cleared.
+#:   Without this a board that 404'd once during a rename would carry that
+#:   strike for ever and be retired by an unrelated 404 months later.
+#: * ``mark_unreachable`` - a 5xx, a rate limit, a transport error or a crash.
+#:   The status is recorded and the registry's opinion is left exactly as it
+#:   was: a vendor having a bad afternoon must never retire the boards it
+#:   serves.
+#:
+#: Every other state says nothing.  ``blocked`` in particular is silence on
+#: purpose: robots.txt tells us what we may read, never what exists.
+_REGISTRY_VERDICT: dict[str, str] = {
+    "gone": "gone",
+    "failed": "unreachable",
+    "succeeded": "live",
+    "no_matches": "live",
+}
+
+
+def _tell_the_registry(unit: _Unit, outcome: ItemOutcome, state: str) -> None:
+    """Tell the board registry what this item's board answered (FR-343, DR-101).
+
+    Keyed on the item's settled state rather than on the counters, so a board
+    that answered on page one and 404'd on page two - which is how a paging
+    board ends - is reported as the live board it is.  What to *do* about each
+    answer is the registry's policy, not this module's, and a registry that
+    cannot be written never fails a campaign: the board is simply offered again
+    next time, which is what happens today.
+    """
+    if unit.board is None:
+        return
+    verdict = _REGISTRY_VERDICT.get(state)
+    if verdict is None:
+        return
+    vendor, slug = unit.board
+    try:
+        if verdict == "gone":
+            board_registry.mark_gone(vendor, slug, outcome.gone_status or 404)
+        elif verdict == "unreachable":
+            board_registry.mark_unreachable(vendor, slug, http_status=outcome.failed_status)
+        else:
+            # The last answer is only evidence of liveness when it *was* one: a
+            # board that answered page one and 404'd page two is a live board,
+            # and writing that 404 into the registry row would say otherwise.
+            last = int(getattr(unit.egress, "last_status", None) or 200)
+            board_registry.mark_live(
+                vendor,
+                slug,
+                http_status=last if 200 <= last < 300 else 200,
+                job_count=outcome.normalised,
+                company_id=unit.board_company_id,
+            )
+    except Exception:  # noqa: BLE001 - bookkeeping never fails a run
+        log.warning("[%s] could not tell the board registry about %s/%s",
+                    unit.adapter_key, vendor, slug, exc_info=True)
+
+
+def _outcome_columns(unit: _Unit, state: str, reason: str | None) -> dict[str, Any]:
+    """The per-item counts migration 130 added, continued rather than replaced.
+
+    A resumed or re-run campaign adds to what the previous attempt recorded,
+    the same way ``error_count`` does, so the four columns keep adding up to
+    every answer the item has ever had.
+    """
+    outcome = unit.outcome
+    previous = unit.item
+
+    def before(column: str) -> int:
+        value = previous.get(column)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    return {
+        "outcome_state": state,
+        "outcome_reason": reason[:2000] if reason else None,
+        "blocked_count": before("blocked_count") + outcome.blocked,
+        "gone_count": before("gone_count") + outcome.gone,
+        "failed_count": before("failed_count") + outcome.failed,
+    }
+
+
 def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     """Write down what this source did, in words that distinguish the cases."""
     outcome = unit.outcome
@@ -1462,7 +1987,8 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     if not unit.started:
         if unit.remaining <= 0:
             # Every page of this item was already fetched by the run this one
-            # resumed (NFR-401): it is finished, not waiting.
+            # resumed (NFR-401): it is finished, not waiting.  Its outcome was
+            # written by the run that did the work and is left alone.
             repo.update_plan_item(unit.id, {"status": "done", "last_error": None})
         elif stats.stopped_by:
             repo.update_plan_item(
@@ -1470,36 +1996,68 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
                 {
                     "status": "planned",
                     "last_error": f"not started: {stats.stopped_by} (FR-186)",
+                    # FR-186: the budget, not a fault.  4,664 items in one
+                    # campaign ended here and every one of them was reported as
+                    # a collection error.
+                    "outcome_state": "capped",
+                    "outcome_reason": f"not started: {stats.stopped_by} (FR-186)",
+                },
+            )
+        else:
+            # Its stage spent its reservation before reaching this item.  It is
+            # runnable and will be reached by the next run - but saying so is
+            # what makes a starved stage legible in the plan table, which is
+            # exactly how "not started: max_pages" on 4,429 boards was found.
+            reason = "not started: this stage's page reservation was spent (FR-186)"
+            repo.update_plan_item(
+                unit.id,
+                {
+                    "status": "planned",
+                    "last_error": reason,
+                    "outcome_state": "capped",
+                    "outcome_reason": reason,
                 },
             )
         return
     if stats.stopped_by and unit.remaining > 0 and not outcome.errors:
         # Bounded by a cap, not finished: leave it runnable so that raising the
         # cap continues it from its checkpoint (FR-186).
+        reason = f"stopped by cap: {stats.stopped_by} (FR-186)"
         repo.update_plan_item(
             unit.id,
-            {
-                "status": "planned",
-                "last_error": f"stopped by cap: {stats.stopped_by} (FR-186)",
-            },
+            {"status": "planned", "last_error": reason, **_outcome_columns(unit, "capped", reason)},
         )
         return
-    status = _STATE_STATUS.get(outcome.state(), "failed")
+    state = outcome.state()
+    status = _STATE_STATUS.get(state, "failed")
     message = _state_message(outcome)
-    if outcome.state() not in ("succeeded", "failed", "no_matches") and message:
+    if state not in NON_FAILURE_STATES and state != "failed" and message:
         # A source that fetched and produced nothing has not raised, so nothing
-        # has counted an error for it yet.  It counts as one now: "done, 0
+        # has counted an error for it yet - unlike ``failed``, whose error the
+        # page loop charged when the page failed.  It counts as one now: "done, 0
         # records, 0 errors" is the shape this whole failure hid behind.
         # ``no_matches`` is excluded: the source answered and said it holds
         # nothing, so charging it an error would contradict its own "done".
+        # ``blocked`` and ``gone`` are excluded for the same reason - they are
+        # answers, not faults - and they are counted in columns of their own.
         repo.bump_plan_item(unit.id, errors=1)
+        outcome.failed += 1
         stats.errors += 1
         stats.adapter(unit.adapter_key)["errors"] += 1
+    _tell_the_registry(unit, outcome, state)
     caps_payload = dict(unit.item.get("caps") or {})
     caps_payload["outcome"] = outcome.to_dict()
+    reason = outcome.block_reason if state == "blocked" else (
+        outcome.gone_reason if state == "gone" else message
+    )
     repo.update_plan_item(
         unit.id,
-        {"status": status, "last_error": message, "caps": caps_payload},
+        {
+            "status": status,
+            "last_error": message,
+            "caps": caps_payload,
+            **_outcome_columns(unit, state, reason),
+        },
     )
 
 
@@ -1614,12 +2172,19 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
 
     sources = []
     breakage = []
+    outcomes: dict[str, int] = {}
     remaining_seconds = 0
     for item in items:
         entry = catalogue.get(item["adapter_key"], {})
         rate = entry.get("extraction_success_rate")
-        if item["status"] not in ("done", "skipped") and not item["excluded_by_user"]:
+        # A board that is gone and a source we declined are finished, however
+        # many pages they were planned for: counting them as time remaining is
+        # how an estimate stays wrong for the rest of the campaign (FR-185).
+        if item["status"] not in TERMINAL_STATUSES and not item["excluded_by_user"]:
             remaining_seconds += int(item["estimated_seconds"] or 0)
+        state = item.get("outcome_state") or None
+        if state:
+            outcomes[str(state)] = outcomes.get(str(state), 0) + 1
         item_caps = item.get("caps") if isinstance(item.get("caps"), dict) else {}
         outcome = (item_caps or {}).get("outcome") or {}
         sources.append(
@@ -1635,6 +2200,16 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
                 # FR-185: how much of what it asked for was turned down, which
                 # a source that collected something used to be able to hide.
                 "requests_refused": outcome.get("refused"),
+                # FR-185: of those, what was a decision, what was a dead target
+                # and what actually failed.  The three add up to the refusals,
+                # and only the last is an error.
+                "requests_blocked": outcome.get("blocked"),
+                "requests_gone": outcome.get("gone"),
+                "outcome_state": item.get("outcome_state"),
+                "outcome_reason": item.get("outcome_reason"),
+                "blocked_count": item.get("blocked_count") or 0,
+                "gone_count": item.get("gone_count") or 0,
+                "failed_count": item.get("failed_count") or 0,
                 "records_dropped": outcome.get("dropped"),
                 "excluded_by_user": bool(item["excluded_by_user"]),
                 "records_collected": item["records_collected"],
@@ -1662,6 +2237,12 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
             "estimated_seconds_remaining": remaining_seconds,
         },
         "sources": sources,
+        # How the plan ended, counted by state.  The number an operator is
+        # asked to act on is ``outcome_states['failed']``; the rest are
+        # expected outcomes and are reported as such rather than as 538
+        # collection errors.  Named apart from the API layer's own richer
+        # ``outcomes`` block, which groups the same items and adds the reasons.
+        "outcome_states": outcomes,
         "collected": repo.collected_counts(campaign_id),
         "llm": repo.llm_totals(campaign_id),
         "budget": {
@@ -1692,8 +2273,25 @@ _OPTIONAL_STAGES: dict[str, tuple[str, str]] = {
     "company_profile": ("dreamjob.pipeline.company_profile", "rerun"),
     "financials": ("dreamjob.pipeline.financial", "rerun"),
     "opportunities": ("dreamjob.pipeline.opportunities", "rerun"),
+    "speculative": ("dreamjob.pipeline.speculative", "rerun"),
     "scoring": ("dreamjob.pipeline.scoring", "rerun"),
     "generation": ("dreamjob.pipeline.generation", "rerun"),
+}
+
+#: What an optional stage does, in the words the re-run screen shows.  A stage
+#: with no entry here falls back to naming its module, which is honest but says
+#: nothing to a user deciding whether to press the button.
+_OPTIONAL_STAGE_DESCRIPTIONS: dict[str, str] = {
+    "profiling": "Re-synthesise the composite profile from its sources (FR-121..126)",
+    "enrichment": "Re-run enrichment over the collected records (FR-201..207)",
+    "company_profile": "Rebuild the company profiles from what is stored (FR-221..225)",
+    "financials": "Re-read the filings and re-score ability to pay (FR-241..245)",
+    "opportunities": "Re-synthesise opportunities from the collected vacancies (FR-261)",
+    "speculative": (
+        "Propose unadvertised roles for companies with no matching vacancy (FR-262)"
+    ),
+    "scoring": "Re-score every opportunity in the campaign (FR-281)",
+    "generation": "Regenerate the application documents (FR-301..306)",
 }
 
 # Stages whose owning slice already re-runs a whole campaign from its persisted
@@ -1750,7 +2348,8 @@ def _resolve_stage(name: str) -> dict | None:
     if target:
         fn = _load(*target)
         if fn is not None:
-            register_stage(name, fn, description=f"provided by {target[0]}")
+            description = _OPTIONAL_STAGE_DESCRIPTIONS.get(name) or f"provided by {target[0]}"
+            register_stage(name, fn, description=description)
             return _STAGES[name]
     fallback = _CAMPAIGN_STAGES.get(name)
     if fallback:

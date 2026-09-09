@@ -29,6 +29,7 @@ from typing import Any
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import knowledge as repo
+from dreamjob.egress import client as egress_client
 from dreamjob.pipeline import dedup
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,13 @@ DEFAULT_STALENESS_DAYS: dict[str, int] = {
     # month is short enough to keep the registry honest and long enough that
     # liveness is re-verified in the monthly refresh, not in a campaign.
     "board_registry": 30,
+    # A national earnings survey is published every four years and is not
+    # superseded in between, so a year-old row is current, not stale (FR-343).
+    "compensation_observation": 1460,
+    # Whether an employer is an interim agency changes only when the company
+    # itself changes trade; six months matches the website rung's own
+    # expiry (docs/Interim_Agencies_Proposal.md C6).
+    "employer_kind": 180,
 }
 
 # Which entity a source of each type contributes to the knowledge base.
@@ -62,7 +70,7 @@ ENTITY_FOR_SOURCE_TYPE: dict[str, str | None] = {
     "linkedin": "company",
     "news": "hiring_signal",
     "events": "event",
-    "compensation": None,
+    "compensation": "compensation_observation",
 }
 
 DEFAULT_RECORDS_PER_PAGE = 25
@@ -150,6 +158,9 @@ _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "hiring_signal": ("company_id", "signal_type", "occurred_at"),
     "event": ("name", "starts_at"),
     "contact": ("company_id", "email"),
+    # One row per occupation per country per survey: re-running the adapter
+    # refreshes the figures rather than stacking another copy beside them.
+    "compensation_observation": ("source", "source_name", "normalised_title", "country"),
 }
 
 _EMPTY = (None, "", [], {})
@@ -595,6 +606,32 @@ def assess_reuse(
         if key:
             fresh_by_type["vacancy"][key] = max(fresh_by_type["vacancy"].get(key, 0), value)
 
+    # FR-342, N4: how many plan items each source carries decides *which*
+    # question freshness is.  A keyword source is planned once, so "has this
+    # source been read" and "has this item been read" are the same question and
+    # the corpus count answers both.  A per-target source - every ATS board,
+    # every EURES partition - is planned thousands of times, and the corpus
+    # count then answers a question nobody asked: one Greenhouse board read on
+    # Monday marked all 3,400 of them fresh, so every later campaign skipped
+    # boards it had never once fetched.  Those are asked of the fetch ledger,
+    # which holds one row per target actually read.
+    items_per_adapter: dict[str, int] = {}
+    for item in items:
+        items_per_adapter[item["adapter_key"]] = items_per_adapter.get(item["adapter_key"], 0) + 1
+    fresh_targets_cache: dict[str, set[str]] = {}
+
+    def fresh_targets_for(adapter_key: str, entity_type: str) -> set[str]:
+        if adapter_key not in fresh_targets_cache:
+            days = policy.get(entity_type) or DEFAULT_STALENESS_DAYS.get(entity_type) or 7
+            try:
+                fresh_targets_cache[adapter_key] = egress_client.fresh_targets(
+                    adapter_key, float(days)
+                )
+            except Exception:  # noqa: BLE001 - no ledger is "nothing is fresh", never a failure
+                log.warning("Could not read the fetch ledger for %s", adapter_key, exc_info=True)
+                fresh_targets_cache[adapter_key] = set()
+        return fresh_targets_cache[adapter_key]
+
     for item in items:
         entry = catalogue.get(item["adapter_key"], {})
         entity_type = ENTITY_FOR_SOURCE_TYPE.get(entry.get("source_type") or "", None)
@@ -608,16 +645,31 @@ def assess_reuse(
         cost = float(item_caps.get("planned_cost_eur") or item.get("estimated_cost_eur") or 0.0)
 
         reused = 0
-        if entity_type in ("vacancy", "company"):
+        per_target = entity_type is not None and items_per_adapter[item["adapter_key"]] > 1
+        target_fresh = False
+        if per_target:
+            target = _target_key_for(item)
+            target_fresh = target in fresh_targets_for(item["adapter_key"], entity_type)
+            reused = expected if target_fresh else 0
+        elif entity_type in ("vacancy", "company"):
             reused = min(expected, int(fresh_by_type[entity_type].get(item["adapter_key"], 0)))
 
-        if entity_type is None or reused == 0:
+        if entity_type is None:
             action, pages_after = "collect", pages
-            reason = (
-                "no comparable fresh records in the knowledge base"
-                if entity_type
-                else "source does not feed a reusable record type"
-            )
+            reason = "source does not feed a reusable record type"
+        elif per_target:
+            if target_fresh:
+                action, pages_after = "skip", 0
+                reason = (
+                    f"this target was read inside the {policy.get(entity_type)}-day staleness "
+                    "window"
+                )
+            else:
+                action, pages_after = "collect", pages
+                reason = "this target has not been read inside the staleness window"
+        elif reused == 0:
+            action, pages_after = "collect", pages
+            reason = "no comparable fresh records in the knowledge base"
         elif reused >= expected:
             action, pages_after = "skip", 0
             reason = (
@@ -678,6 +730,17 @@ def assess_reuse(
     return report
 
 
+def _target_key_for(item: dict) -> str:
+    """The fetch-ledger key of one plan item (N4).
+
+    ``planning`` owns the key and imports this module, so it is imported here
+    rather than at the top: one definition, no cycle.
+    """
+    from dreamjob.pipeline import planning  # noqa: PLC0415 - avoids a circular import
+
+    return planning.target_key(item["adapter_key"], item.get("native_query"))
+
+
 def _records_per_page(entry: dict, item: dict) -> int:
     caps = item.get("caps") or {}
     if isinstance(caps, dict) and caps.get("records_per_page"):
@@ -722,13 +785,15 @@ def browse_companies(
     country: str | None = None,
     sector: str | None = None,
     size_band: str | None = None,
+    ats_vendor: str | None = None,
     limit: int = 25,
     offset: int = 0,
     policy: dict[str, int] | None = None,
 ) -> dict:
     """Search the shared company knowledge base, independent of any campaign."""
     rows = repo.search_companies(
-        q, country=country, sector=sector, size_band=size_band, limit=limit, offset=offset
+        q, country=country, sector=sector, size_band=size_band, ats_vendor=ats_vendor,
+        limit=limit, offset=offset,
     )
     policy = policy or get_staleness_policy()
     items = []
@@ -739,10 +804,15 @@ def browse_companies(
         item["stale"] = is_stale("company", freshness, policy)
         items.append(item)
     return {
-        "total": repo.count_companies(q, country=country, sector=sector, size_band=size_band),
+        "total": repo.count_companies(
+            q, country=country, sector=sector, size_band=size_band, ats_vendor=ats_vendor
+        ),
         "limit": limit,
         "offset": offset,
         "items": items,
+        # FR-345: where this inventory came from, so a corpus that looks healthy
+        # at a thousand rows but was reached through one source says so.
+        "facets": repo.company_facets(),
     }
 
 

@@ -74,6 +74,12 @@ export default function CallLog() {
           <option value="">Any outcome</option>
           <option value="ok">Succeeded</option>
           <option value="error">Failed</option>
+          {/* A model can answer 200 with nothing in it — a reasoning model that
+              spent its whole budget thinking, or one that simply said nothing.
+              Both are logged as what they were rather than as successes, so
+              both have to be findable here. */}
+          <option value="truncated">Truncated</option>
+          <option value="empty">Empty answer</option>
         </select>
       </div>
 

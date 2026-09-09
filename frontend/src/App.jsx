@@ -41,6 +41,7 @@ const OpportunityDetailPage = lazy(() => import('./pages/OpportunityDetailPage')
 const CompaniesPage = lazy(() => import('./pages/CompaniesPage'))
 const CompanyDetailPage = lazy(() => import('./pages/CompanyDetailPage'))
 const ApplicationsPage = lazy(() => import('./pages/ApplicationsPage'))
+const ApplyBrowserPage = lazy(() => import('./pages/ApplyBrowserPage'))
 const PipelinePage = lazy(() => import('./pages/PipelinePage'))
 const ResponsesPage = lazy(() => import('./pages/ResponsesPage'))
 const InsightsPage = lazy(() => import('./pages/InsightsPage'))
@@ -91,6 +92,7 @@ const NAV = [
     label: 'Apply',
     phase: 'phase-4',
     items: [
+      { to: '/apply', icon: 'send', label: 'Apply browser' },
       { to: '/contacts', icon: 'contacts', label: 'Contacts' },
       { to: '/applications', icon: 'applications', label: 'Applications' },
       { to: '/networking', icon: 'networking', label: 'Networking' },
@@ -138,6 +140,7 @@ const TITLES = {
   '/opportunities': 'Opportunities',
   '/companies': 'Companies',
   '/intelligence': 'Dream-job intelligence',
+  '/apply': 'Apply browser',
   '/contacts': 'Hiring contacts',
   '/applications': 'Applications',
   '/networking': 'Networking and export',
@@ -231,6 +234,7 @@ function Shell({ session, onSignOut }) {
               <Route path="/opportunities/:id" element={<OpportunityDetailPage />} />
               <Route path="/companies" element={<CompaniesPage />} />
               <Route path="/companies/:id" element={<CompanyDetailPage />} />
+              <Route path="/apply" element={<ApplyBrowserPage />} />
               <Route path="/contacts" element={<ContactsPage />} />
               <Route path="/applications" element={<ApplicationsPage />} />
               <Route path="/pipeline" element={<PipelinePage />} />

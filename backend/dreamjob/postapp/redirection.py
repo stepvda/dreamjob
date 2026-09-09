@@ -44,18 +44,14 @@ log = logging.getLogger(__name__)
 
 PROMPT_VERSION = "1.0"
 
-#: Room for the answer *and* the reasoning model's own tokens.
-#:
-#: ``score.opportunity`` is in ``TASK_STRONG``, so this call is routed to
-#: ``DREAMJOB_LLM_MODEL_STRONG`` - deepseek-reasoner by default - and a
-#: reasoning model bills its private chain of thought against the same
-#: ``max_tokens`` ceiling as the answer.  Five proposals with a rationale each
-#: is a few hundred tokens of JSON, so the old 4096 default looked generous;
-#: measured on this exact prompt, the reasoner spent all 4096 on reasoning and
-#: returned an empty answer, which took the whole advice step down.  The same
-#: ceiling as the other reasoning-model calls (composite profile, dream-job
-#: model) leaves room for both.
-ADVICE_MAX_TOKENS = 24_000
+#: Room for five proposals with a rationale each, on a model that spends its
+#: tokens on the answer.
+ADVICE_MAX_TOKENS = 6_000
+
+#: Room for the answer *and* a reasoning model's private chain of thought,
+#: which is billed against the same ceiling.  Only used for the second attempt
+#: below; the same figure as the other reasoning-model calls in the pipeline.
+ADVICE_MAX_TOKENS_REASONING = 24_000
 
 SYSTEM = """You advise a job seeker on where to redirect their search, based on \
 measured outcome rates from applications they have already sent.
@@ -132,7 +128,8 @@ def _ask(
     user: str,
     job_seeker_id: str,
     *,
-    prefer_strong: bool | None = None,
+    prefer_strong: bool,
+    max_tokens: int,
 ) -> dict[str, Any]:
     """One attempt at the advice call, so the retry differs only in its model."""
     return llm.complete_json(
@@ -145,8 +142,8 @@ def _ask(
         entity_type="job_seeker",
         entity_id=job_seeker_id,
         temperature=0.3,
-        max_tokens=ADVICE_MAX_TOKENS,
         prefer_strong=prefer_strong,
+        max_tokens=max_tokens,
     )
 
 
@@ -195,18 +192,30 @@ def generate_advice(
     llm = LLMClient(campaign_id=campaign_id, job_seeker_id=job_seeker_id)
     try:
         try:
-            result = _ask(llm, user, job_seeker_id)
-        except TruncatedResponse as exc:
-            # The room above was not enough, or an administrator has pinned a
-            # reasoning model to this task with a longer chain of thought than
-            # the ceiling allows (FR-362).  Nothing here needs a reasoning
-            # model: segments.py has already found the pattern and this call
-            # only turns the figures into sentences, so the chat model is the
-            # right second attempt rather than a degradation.
-            log.warning(
-                "Redirection advice was truncated (%s); retrying on the chat model", exc
+            # The chat model, deliberately.  ``score.opportunity`` is in
+            # ``TASK_STRONG``, which routes to DREAMJOB_LLM_MODEL_STRONG - a
+            # *reasoning* model by default - and nothing in this step needs
+            # one: segments.py has already found the pattern and computed the
+            # rates, and ``_validate`` below discards anything the model
+            # invents.  What is left is writing five short paragraphs from a
+            # table.  Asked to do that, deepseek-reasoner spent its entire
+            # max_tokens budget on private reasoning and returned an empty
+            # answer, and even with room for both took over two minutes on a
+            # screen somebody is waiting in front of.
+            result = _ask(
+                llm, user, job_seeker_id,
+                prefer_strong=False, max_tokens=ADVICE_MAX_TOKENS,
             )
-            result = _ask(llm, user, job_seeker_id, prefer_strong=False)
+        except TruncatedResponse as exc:
+            # An administrator can pin a model per task (FR-362), and a
+            # reasoning model pinned here needs room for its chain of thought
+            # as well as its answer.  One retry with that room, so a
+            # configuration choice does not silently cost the whole feature.
+            log.warning("Redirection advice was truncated (%s); retrying with more room", exc)
+            result = _ask(
+                llm, user, job_seeker_id,
+                prefer_strong=False, max_tokens=ADVICE_MAX_TOKENS_REASONING,
+            )
     except Exception as exc:  # noqa: BLE001 - advice is optional, figures are not
         log.exception("Redirection advice failed for %s", job_seeker_id)
         return {
