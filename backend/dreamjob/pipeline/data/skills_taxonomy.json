@@ -1,0 +1,1902 @@
+{
+ "taxonomy": "esco",
+ "version": "2026-09-bundled",
+ "note": "Curated ESCO-style mapping bundled with Dream Job (FR-107). Codes are local ids, not official ESCO URIs.",
+ "skills": [
+  {
+   "code": "lang.python",
+   "label": "Python",
+   "group": "programming_language",
+   "synonyms": [
+    "python3",
+    "py",
+    "python 3"
+   ]
+  },
+  {
+   "code": "lang.java",
+   "label": "Java",
+   "group": "programming_language",
+   "synonyms": [
+    "java se",
+    "core java",
+    "java ee",
+    "j2ee"
+   ]
+  },
+  {
+   "code": "lang.javascript",
+   "label": "JavaScript",
+   "group": "programming_language",
+   "synonyms": [
+    "js",
+    "ecmascript",
+    "es6",
+    "node.js",
+    "nodejs",
+    "node"
+   ]
+  },
+  {
+   "code": "lang.typescript",
+   "label": "TypeScript",
+   "group": "programming_language",
+   "synonyms": [
+    "ts"
+   ]
+  },
+  {
+   "code": "lang.csharp",
+   "label": "C#",
+   "group": "programming_language",
+   "synonyms": [
+    "c sharp",
+    "csharp",
+    ".net c#"
+   ]
+  },
+  {
+   "code": "lang.cpp",
+   "label": "C++",
+   "group": "programming_language",
+   "synonyms": [
+    "cpp",
+    "c plus plus"
+   ]
+  },
+  {
+   "code": "lang.c",
+   "label": "C",
+   "group": "programming_language",
+   "synonyms": [
+    "ansi c"
+   ]
+  },
+  {
+   "code": "lang.go",
+   "label": "Go",
+   "group": "programming_language",
+   "synonyms": [
+    "golang"
+   ]
+  },
+  {
+   "code": "lang.rust",
+   "label": "Rust",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.php",
+   "label": "PHP",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.ruby",
+   "label": "Ruby",
+   "group": "programming_language",
+   "synonyms": [
+    "ruby on rails",
+    "rails"
+   ]
+  },
+  {
+   "code": "lang.swift",
+   "label": "Swift",
+   "group": "programming_language",
+   "synonyms": [
+    "swiftui"
+   ]
+  },
+  {
+   "code": "lang.kotlin",
+   "label": "Kotlin",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.scala",
+   "label": "Scala",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.r",
+   "label": "R",
+   "group": "programming_language",
+   "synonyms": [
+    "r language",
+    "r statistical"
+   ]
+  },
+  {
+   "code": "lang.matlab",
+   "label": "MATLAB",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.perl",
+   "label": "Perl",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.bash",
+   "label": "Shell scripting",
+   "group": "programming_language",
+   "synonyms": [
+    "bash",
+    "shell",
+    "zsh",
+    "powershell",
+    "ksh"
+   ]
+  },
+  {
+   "code": "lang.sql",
+   "label": "SQL",
+   "group": "programming_language",
+   "synonyms": [
+    "structured query language",
+    "t-sql",
+    "tsql",
+    "pl/sql",
+    "plsql",
+    "ansi sql"
+   ]
+  },
+  {
+   "code": "lang.abap",
+   "label": "ABAP",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.vba",
+   "label": "VBA",
+   "group": "programming_language",
+   "synonyms": [
+    "visual basic for applications",
+    "visual basic"
+   ]
+  },
+  {
+   "code": "lang.html",
+   "label": "HTML",
+   "group": "programming_language",
+   "synonyms": [
+    "html5"
+   ]
+  },
+  {
+   "code": "lang.css",
+   "label": "CSS",
+   "group": "programming_language",
+   "synonyms": [
+    "css3",
+    "sass",
+    "scss",
+    "less"
+   ]
+  },
+  {
+   "code": "lang.dart",
+   "label": "Dart",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.objectivec",
+   "label": "Objective-C",
+   "group": "programming_language",
+   "synonyms": [
+    "objective c"
+   ]
+  },
+  {
+   "code": "lang.elixir",
+   "label": "Elixir",
+   "group": "programming_language",
+   "synonyms": [
+    "erlang"
+   ]
+  },
+  {
+   "code": "lang.haskell",
+   "label": "Haskell",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "lang.solidity",
+   "label": "Solidity",
+   "group": "programming_language",
+   "synonyms": []
+  },
+  {
+   "code": "fw.react",
+   "label": "React",
+   "group": "framework",
+   "synonyms": [
+    "react.js",
+    "reactjs",
+    "react native"
+   ]
+  },
+  {
+   "code": "fw.angular",
+   "label": "Angular",
+   "group": "framework",
+   "synonyms": [
+    "angularjs",
+    "angular 2+"
+   ]
+  },
+  {
+   "code": "fw.vue",
+   "label": "Vue.js",
+   "group": "framework",
+   "synonyms": [
+    "vue",
+    "vuejs",
+    "nuxt"
+   ]
+  },
+  {
+   "code": "fw.svelte",
+   "label": "Svelte",
+   "group": "framework",
+   "synonyms": [
+    "sveltekit"
+   ]
+  },
+  {
+   "code": "fw.nextjs",
+   "label": "Next.js",
+   "group": "framework",
+   "synonyms": [
+    "nextjs"
+   ]
+  },
+  {
+   "code": "fw.django",
+   "label": "Django",
+   "group": "framework",
+   "synonyms": [
+    "django rest framework",
+    "drf"
+   ]
+  },
+  {
+   "code": "fw.flask",
+   "label": "Flask",
+   "group": "framework",
+   "synonyms": []
+  },
+  {
+   "code": "fw.fastapi",
+   "label": "FastAPI",
+   "group": "framework",
+   "synonyms": []
+  },
+  {
+   "code": "fw.spring",
+   "label": "Spring",
+   "group": "framework",
+   "synonyms": [
+    "spring boot",
+    "springboot"
+   ]
+  },
+  {
+   "code": "fw.dotnet",
+   "label": ".NET",
+   "group": "framework",
+   "synonyms": [
+    "dotnet",
+    ".net core",
+    "asp.net",
+    "asp.net core"
+   ]
+  },
+  {
+   "code": "fw.laravel",
+   "label": "Laravel",
+   "group": "framework",
+   "synonyms": []
+  },
+  {
+   "code": "fw.express",
+   "label": "Express.js",
+   "group": "framework",
+   "synonyms": [
+    "express"
+   ]
+  },
+  {
+   "code": "fw.flutter",
+   "label": "Flutter",
+   "group": "framework",
+   "synonyms": []
+  },
+  {
+   "code": "fw.jquery",
+   "label": "jQuery",
+   "group": "framework",
+   "synonyms": []
+  },
+  {
+   "code": "fw.tailwind",
+   "label": "Tailwind CSS",
+   "group": "framework",
+   "synonyms": [
+    "tailwind"
+   ]
+  },
+  {
+   "code": "fw.graphql",
+   "label": "GraphQL",
+   "group": "framework",
+   "synonyms": [
+    "apollo graphql"
+   ]
+  },
+  {
+   "code": "fw.rest",
+   "label": "REST API design",
+   "group": "framework",
+   "synonyms": [
+    "rest",
+    "restful api",
+    "rest api",
+    "api design",
+    "openapi",
+    "swagger"
+   ]
+  },
+  {
+   "code": "fw.grpc",
+   "label": "gRPC",
+   "group": "framework",
+   "synonyms": [
+    "protobuf",
+    "protocol buffers"
+   ]
+  },
+  {
+   "code": "db.postgres",
+   "label": "PostgreSQL",
+   "group": "database",
+   "synonyms": [
+    "postgres",
+    "psql",
+    "postgresql"
+   ]
+  },
+  {
+   "code": "db.mysql",
+   "label": "MySQL",
+   "group": "database",
+   "synonyms": [
+    "mariadb"
+   ]
+  },
+  {
+   "code": "db.sqlserver",
+   "label": "Microsoft SQL Server",
+   "group": "database",
+   "synonyms": [
+    "sql server",
+    "mssql",
+    "t-sql server"
+   ]
+  },
+  {
+   "code": "db.oracle",
+   "label": "Oracle Database",
+   "group": "database",
+   "synonyms": [
+    "oracle db",
+    "oracle rdbms"
+   ]
+  },
+  {
+   "code": "db.sqlite",
+   "label": "SQLite",
+   "group": "database",
+   "synonyms": []
+  },
+  {
+   "code": "db.mongodb",
+   "label": "MongoDB",
+   "group": "database",
+   "synonyms": [
+    "mongo"
+   ]
+  },
+  {
+   "code": "db.redis",
+   "label": "Redis",
+   "group": "database",
+   "synonyms": []
+  },
+  {
+   "code": "db.elasticsearch",
+   "label": "Elasticsearch",
+   "group": "database",
+   "synonyms": [
+    "opensearch",
+    "elastic",
+    "elk",
+    "elk stack"
+   ]
+  },
+  {
+   "code": "db.cassandra",
+   "label": "Cassandra",
+   "group": "database",
+   "synonyms": [
+    "apache cassandra"
+   ]
+  },
+  {
+   "code": "db.neo4j",
+   "label": "Neo4j",
+   "group": "database",
+   "synonyms": [
+    "graph database",
+    "graph databases",
+    "cypher"
+   ]
+  },
+  {
+   "code": "db.snowflake",
+   "label": "Snowflake",
+   "group": "database",
+   "synonyms": []
+  },
+  {
+   "code": "db.bigquery",
+   "label": "BigQuery",
+   "group": "database",
+   "synonyms": [
+    "google bigquery"
+   ]
+  },
+  {
+   "code": "db.redshift",
+   "label": "Amazon Redshift",
+   "group": "database",
+   "synonyms": [
+    "redshift"
+   ]
+  },
+  {
+   "code": "db.databricks",
+   "label": "Databricks",
+   "group": "database",
+   "synonyms": [
+    "delta lake",
+    "lakehouse"
+   ]
+  },
+  {
+   "code": "db.vector",
+   "label": "Vector databases",
+   "group": "database",
+   "synonyms": [
+    "vector database",
+    "pinecone",
+    "weaviate",
+    "qdrant",
+    "chroma",
+    "faiss",
+    "pgvector",
+    "vector search",
+    "vector and graph databases"
+   ]
+  },
+  {
+   "code": "db.nosql",
+   "label": "NoSQL",
+   "group": "database",
+   "synonyms": [
+    "nosql databases",
+    "document database",
+    "key-value store"
+   ]
+  },
+  {
+   "code": "db.datawarehouse",
+   "label": "Data warehousing",
+   "group": "database",
+   "synonyms": [
+    "data warehouse",
+    "dwh",
+    "dimensional modelling",
+    "dimensional modeling",
+    "star schema",
+    "kimball"
+   ]
+  },
+  {
+   "code": "db.datamodel",
+   "label": "Data modelling",
+   "group": "database",
+   "synonyms": [
+    "data modeling",
+    "data model design",
+    "entity relationship modelling",
+    "erd"
+   ]
+  },
+  {
+   "code": "de.etl",
+   "label": "ETL",
+   "group": "data_engineering",
+   "synonyms": [
+    "elt",
+    "etl pipelines",
+    "data pipelines",
+    "data pipeline",
+    "extract transform load"
+   ]
+  },
+  {
+   "code": "de.airflow",
+   "label": "Apache Airflow",
+   "group": "data_engineering",
+   "synonyms": [
+    "airflow"
+   ]
+  },
+  {
+   "code": "de.dbt",
+   "label": "dbt",
+   "group": "data_engineering",
+   "synonyms": [
+    "data build tool"
+   ]
+  },
+  {
+   "code": "de.spark",
+   "label": "Apache Spark",
+   "group": "data_engineering",
+   "synonyms": [
+    "spark",
+    "pyspark"
+   ]
+  },
+  {
+   "code": "de.kafka",
+   "label": "Apache Kafka",
+   "group": "data_engineering",
+   "synonyms": [
+    "kafka",
+    "event streaming"
+   ]
+  },
+  {
+   "code": "de.hadoop",
+   "label": "Hadoop",
+   "group": "data_engineering",
+   "synonyms": [
+    "hdfs",
+    "mapreduce",
+    "hive"
+   ]
+  },
+  {
+   "code": "de.orchestration",
+   "label": "Data orchestration",
+   "group": "data_engineering",
+   "synonyms": [
+    "orchestration",
+    "prefect",
+    "dagster",
+    "data engineering and orchestration"
+   ]
+  },
+  {
+   "code": "de.dataengineering",
+   "label": "Data engineering",
+   "group": "data_engineering",
+   "synonyms": [
+    "data engineer",
+    "data engineering"
+   ]
+  },
+  {
+   "code": "de.dataquality",
+   "label": "Data quality management",
+   "group": "data_engineering",
+   "synonyms": [
+    "data quality",
+    "data cleansing",
+    "data cleaning",
+    "data wrangling"
+   ]
+  },
+  {
+   "code": "de.datagovernance",
+   "label": "Data governance",
+   "group": "data_engineering",
+   "synonyms": [
+    "data stewardship",
+    "master data management",
+    "mdm"
+   ]
+  },
+  {
+   "code": "an.dataanalysis",
+   "label": "Data analysis",
+   "group": "analytics",
+   "synonyms": [
+    "data analytics",
+    "analytics",
+    "analyse data",
+    "data analyst"
+   ]
+  },
+  {
+   "code": "an.statistics",
+   "label": "Statistics",
+   "group": "analytics",
+   "synonyms": [
+    "statistical analysis",
+    "statistical modelling",
+    "statistical modeling",
+    "inferential statistics"
+   ]
+  },
+  {
+   "code": "an.dataviz",
+   "label": "Data visualisation",
+   "group": "analytics",
+   "synonyms": [
+    "data visualization",
+    "dataviz",
+    "visualisation",
+    "visualization",
+    "charting"
+   ]
+  },
+  {
+   "code": "an.powerbi",
+   "label": "Power BI",
+   "group": "analytics",
+   "synonyms": [
+    "powerbi",
+    "power bi dashboarding",
+    "microsoft power bi"
+   ]
+  },
+  {
+   "code": "an.tableau",
+   "label": "Tableau",
+   "group": "analytics",
+   "synonyms": []
+  },
+  {
+   "code": "an.looker",
+   "label": "Looker",
+   "group": "analytics",
+   "synonyms": [
+    "looker studio",
+    "google data studio"
+   ]
+  },
+  {
+   "code": "an.qlik",
+   "label": "Qlik",
+   "group": "analytics",
+   "synonyms": [
+    "qlikview",
+    "qlik sense"
+   ]
+  },
+  {
+   "code": "an.excel",
+   "label": "Microsoft Excel",
+   "group": "analytics",
+   "synonyms": [
+    "excel",
+    "advanced excel",
+    "spreadsheets"
+   ]
+  },
+  {
+   "code": "an.pandas",
+   "label": "pandas",
+   "group": "analytics",
+   "synonyms": [
+    "pandas dataframe"
+   ]
+  },
+  {
+   "code": "an.numpy",
+   "label": "NumPy",
+   "group": "analytics",
+   "synonyms": [
+    "numpy"
+   ]
+  },
+  {
+   "code": "an.abtesting",
+   "label": "A/B testing",
+   "group": "analytics",
+   "synonyms": [
+    "ab testing",
+    "experimentation",
+    "split testing"
+   ]
+  },
+  {
+   "code": "an.forecasting",
+   "label": "Forecasting",
+   "group": "analytics",
+   "synonyms": [
+    "time series",
+    "time series analysis",
+    "demand forecasting"
+   ]
+  },
+  {
+   "code": "an.bi",
+   "label": "Business intelligence",
+   "group": "analytics",
+   "synonyms": [
+    "bi",
+    "bi analyst",
+    "bi reporting",
+    "reporting"
+   ]
+  },
+  {
+   "code": "ai.ml",
+   "label": "Machine learning",
+   "group": "ai",
+   "synonyms": [
+    "ml",
+    "machine-learning",
+    "predictive models",
+    "predictive modelling",
+    "predictive modeling",
+    "supervised learning",
+    "unsupervised learning"
+   ]
+  },
+  {
+   "code": "ai.deeplearning",
+   "label": "Deep learning",
+   "group": "ai",
+   "synonyms": [
+    "neural networks",
+    "dl",
+    "cnn",
+    "rnn",
+    "transformers"
+   ]
+  },
+  {
+   "code": "ai.ai",
+   "label": "Artificial intelligence",
+   "group": "ai",
+   "synonyms": [
+    "ai",
+    "artificial intelligence (ai)",
+    "applied ai",
+    "a.i."
+   ]
+  },
+  {
+   "code": "ai.genai",
+   "label": "Generative AI",
+   "group": "ai",
+   "synonyms": [
+    "gen ai",
+    "genai",
+    "generative artificial intelligence"
+   ]
+  },
+  {
+   "code": "ai.llm",
+   "label": "Large language models",
+   "group": "ai",
+   "synonyms": [
+    "llm",
+    "llms",
+    "language models",
+    "local llm inference",
+    "llm inference"
+   ]
+  },
+  {
+   "code": "ai.prompt",
+   "label": "Prompt engineering",
+   "group": "ai",
+   "synonyms": [
+    "prompting",
+    "prompt design",
+    "prompt engineer"
+   ]
+  },
+  {
+   "code": "ai.rag",
+   "label": "Retrieval-augmented generation",
+   "group": "ai",
+   "synonyms": [
+    "rag",
+    "rag pipelines",
+    "retrieval augmented generation"
+   ]
+  },
+  {
+   "code": "ai.nlp",
+   "label": "Natural language processing",
+   "group": "ai",
+   "synonyms": [
+    "nlp",
+    "text mining",
+    "text analytics"
+   ]
+  },
+  {
+   "code": "ai.cv",
+   "label": "Computer vision",
+   "group": "ai",
+   "synonyms": [
+    "image recognition",
+    "object detection"
+   ]
+  },
+  {
+   "code": "ai.mlops",
+   "label": "MLOps",
+   "group": "ai",
+   "synonyms": [
+    "model deployment",
+    "model monitoring",
+    "ml engineering",
+    "ml engineer"
+   ]
+  },
+  {
+   "code": "ai.tensorflow",
+   "label": "TensorFlow",
+   "group": "ai",
+   "synonyms": [
+    "keras"
+   ]
+  },
+  {
+   "code": "ai.pytorch",
+   "label": "PyTorch",
+   "group": "ai",
+   "synonyms": [
+    "torch"
+   ]
+  },
+  {
+   "code": "ai.sklearn",
+   "label": "scikit-learn",
+   "group": "ai",
+   "synonyms": [
+    "sklearn",
+    "scikit learn"
+   ]
+  },
+  {
+   "code": "ai.recommender",
+   "label": "Recommender systems",
+   "group": "ai",
+   "synonyms": [
+    "recommendation engine",
+    "collaborative filtering"
+   ]
+  },
+  {
+   "code": "ai.aiassisted",
+   "label": "AI-assisted development",
+   "group": "ai",
+   "synonyms": [
+    "ai assisted development",
+    "ai-assisted development workflows",
+    "ai pair programming",
+    "copilot"
+   ]
+  },
+  {
+   "code": "ai.ethics",
+   "label": "AI ethics and governance",
+   "group": "ai",
+   "synonyms": [
+    "responsible ai",
+    "ai governance",
+    "ai act",
+    "trustworthy ai"
+   ]
+  },
+  {
+   "code": "cl.aws",
+   "label": "Amazon Web Services",
+   "group": "cloud",
+   "synonyms": [
+    "aws",
+    "amazon aws",
+    "aws cloud"
+   ]
+  },
+  {
+   "code": "cl.azure",
+   "label": "Microsoft Azure",
+   "group": "cloud",
+   "synonyms": [
+    "azure",
+    "ms azure"
+   ]
+  },
+  {
+   "code": "cl.gcp",
+   "label": "Google Cloud Platform",
+   "group": "cloud",
+   "synonyms": [
+    "gcp",
+    "google cloud"
+   ]
+  },
+  {
+   "code": "cl.cloud",
+   "label": "Cloud computing",
+   "group": "cloud",
+   "synonyms": [
+    "cloud",
+    "cloud architecture",
+    "cloud native",
+    "cloud migration"
+   ]
+  },
+  {
+   "code": "cl.docker",
+   "label": "Docker",
+   "group": "cloud",
+   "synonyms": [
+    "containers",
+    "containerisation",
+    "containerization"
+   ]
+  },
+  {
+   "code": "cl.kubernetes",
+   "label": "Kubernetes",
+   "group": "cloud",
+   "synonyms": [
+    "k8s",
+    "openshift",
+    "helm"
+   ]
+  },
+  {
+   "code": "cl.terraform",
+   "label": "Terraform",
+   "group": "cloud",
+   "synonyms": [
+    "infrastructure as code",
+    "iac",
+    "pulumi"
+   ]
+  },
+  {
+   "code": "cl.linux",
+   "label": "Linux",
+   "group": "cloud",
+   "synonyms": [
+    "unix",
+    "ubuntu",
+    "rhel",
+    "debian"
+   ]
+  },
+  {
+   "code": "cl.cicd",
+   "label": "CI/CD",
+   "group": "cloud",
+   "synonyms": [
+    "continuous integration",
+    "continuous delivery",
+    "continuous deployment",
+    "jenkins",
+    "github actions",
+    "gitlab ci",
+    "azure devops"
+   ]
+  },
+  {
+   "code": "cl.devops",
+   "label": "DevOps",
+   "group": "cloud",
+   "synonyms": [
+    "sre",
+    "site reliability engineering",
+    "platform engineering"
+   ]
+  },
+  {
+   "code": "cl.monitoring",
+   "label": "Observability",
+   "group": "cloud",
+   "synonyms": [
+    "monitoring",
+    "prometheus",
+    "grafana",
+    "datadog",
+    "logging"
+   ]
+  },
+  {
+   "code": "cl.serverless",
+   "label": "Serverless",
+   "group": "cloud",
+   "synonyms": [
+    "aws lambda",
+    "azure functions",
+    "cloud functions"
+   ]
+  },
+  {
+   "code": "cl.networking",
+   "label": "Networking",
+   "group": "cloud",
+   "synonyms": [
+    "tcp/ip",
+    "dns",
+    "load balancing",
+    "vpn"
+   ]
+  },
+  {
+   "code": "se.ood",
+   "label": "Object-oriented design",
+   "group": "software_engineering",
+   "synonyms": [
+    "object oriented design",
+    "ood",
+    "object-oriented analysis and design",
+    "object-oriented analysis",
+    "object oriented analysis",
+    "ooad",
+    "oop",
+    "object-oriented programming"
+   ]
+  },
+  {
+   "code": "se.architecture",
+   "label": "Software architecture",
+   "group": "software_engineering",
+   "synonyms": [
+    "solution architecture",
+    "component architecture",
+    "technical architecture",
+    "architectural design",
+    "system design",
+    "enterprise architecture"
+   ]
+  },
+  {
+   "code": "se.microservices",
+   "label": "Microservices",
+   "group": "software_engineering",
+   "synonyms": [
+    "microservice architecture",
+    "service oriented architecture",
+    "soa"
+   ]
+  },
+  {
+   "code": "se.softwaredesign",
+   "label": "Software design",
+   "group": "software_engineering",
+   "synonyms": [
+    "software designer",
+    "application design",
+    "functional design",
+    "design patterns"
+   ]
+  },
+  {
+   "code": "se.webdev",
+   "label": "Web application development",
+   "group": "software_engineering",
+   "synonyms": [
+    "web development",
+    "web applications",
+    "full-stack development",
+    "full stack",
+    "frontend development",
+    "backend development",
+    "web app development"
+   ]
+  },
+  {
+   "code": "se.mobile",
+   "label": "Mobile application development",
+   "group": "software_engineering",
+   "synonyms": [
+    "mobile development",
+    "ios development",
+    "android development",
+    "mobile/web app design"
+   ]
+  },
+  {
+   "code": "se.git",
+   "label": "Git",
+   "group": "software_engineering",
+   "synonyms": [
+    "github",
+    "gitlab",
+    "bitbucket",
+    "version control",
+    "source control"
+   ]
+  },
+  {
+   "code": "se.testing",
+   "label": "Software testing",
+   "group": "software_engineering",
+   "synonyms": [
+    "unit testing",
+    "test automation",
+    "qa",
+    "quality assurance",
+    "pytest",
+    "integration testing",
+    "tdd"
+   ]
+  },
+  {
+   "code": "se.agile",
+   "label": "Agile methodologies",
+   "group": "software_engineering",
+   "synonyms": [
+    "agile",
+    "scrum",
+    "kanban",
+    "safe",
+    "sprint planning"
+   ]
+  },
+  {
+   "code": "se.appsec",
+   "label": "Application security",
+   "group": "software_engineering",
+   "synonyms": [
+    "software security",
+    "secure coding",
+    "owasp",
+    "appsec",
+    "security by design",
+    "application security and trustworthy software design"
+   ]
+  },
+  {
+   "code": "se.cryptography",
+   "label": "Cryptography",
+   "group": "software_engineering",
+   "synonyms": [
+    "encryption",
+    "pki",
+    "tls",
+    "key management"
+   ]
+  },
+  {
+   "code": "se.performance",
+   "label": "Performance engineering",
+   "group": "software_engineering",
+   "synonyms": [
+    "performance tuning",
+    "optimisation",
+    "optimization",
+    "scalability"
+   ]
+  },
+  {
+   "code": "se.documentation",
+   "label": "Technical documentation",
+   "group": "software_engineering",
+   "synonyms": [
+    "technical writing",
+    "documentation"
+   ]
+  },
+  {
+   "code": "se.codereview",
+   "label": "Code review",
+   "group": "software_engineering",
+   "synonyms": [
+    "peer review",
+    "pull requests"
+   ]
+  },
+  {
+   "code": "se.refactoring",
+   "label": "Refactoring",
+   "group": "software_engineering",
+   "synonyms": [
+    "legacy modernisation",
+    "legacy modernization",
+    "technical debt"
+   ]
+  },
+  {
+   "code": "se.realtime",
+   "label": "Real-time communications",
+   "group": "software_engineering",
+   "synonyms": [
+    "webrtc",
+    "websockets",
+    "real time communications",
+    "realtime"
+   ]
+  },
+  {
+   "code": "sec.infosec",
+   "label": "Information security",
+   "group": "security",
+   "synonyms": [
+    "cybersecurity",
+    "cyber security",
+    "security",
+    "iso 27001"
+   ]
+  },
+  {
+   "code": "sec.privacy",
+   "label": "Data privacy",
+   "group": "security",
+   "synonyms": [
+    "gdpr",
+    "privacy by design",
+    "digital privacy",
+    "data protection",
+    "dpo"
+   ]
+  },
+  {
+   "code": "sec.iam",
+   "label": "Identity and access management",
+   "group": "security",
+   "synonyms": [
+    "iam",
+    "sso",
+    "oauth",
+    "oidc",
+    "saml",
+    "authentication",
+    "authorisation"
+   ]
+  },
+  {
+   "code": "sec.riskmanagement",
+   "label": "Risk management",
+   "group": "security",
+   "synonyms": [
+    "risk assessment",
+    "risk analysis"
+   ]
+  },
+  {
+   "code": "sec.compliance",
+   "label": "Regulatory compliance",
+   "group": "security",
+   "synonyms": [
+    "compliance",
+    "audit",
+    "sox",
+    "nis2"
+   ]
+  },
+  {
+   "code": "sec.neurorights",
+   "label": "Neuro-rights",
+   "group": "security",
+   "synonyms": [
+    "neurorights",
+    "cognitive liberty",
+    "mental privacy",
+    "neuro-rights, digital privacy"
+   ]
+  },
+  {
+   "code": "mg.projectmanagement",
+   "label": "Project management",
+   "group": "management",
+   "synonyms": [
+    "programme management",
+    "program management",
+    "pmp",
+    "prince2",
+    "project delivery"
+   ]
+  },
+  {
+   "code": "mg.productmanagement",
+   "label": "Product management",
+   "group": "management",
+   "synonyms": [
+    "product owner",
+    "product manager",
+    "roadmapping",
+    "product direction",
+    "product strategy"
+   ]
+  },
+  {
+   "code": "mg.strategy",
+   "label": "Business strategy",
+   "group": "management",
+   "synonyms": [
+    "strategy",
+    "corporate strategy",
+    "strategic planning",
+    "portfolio management",
+    "enterprise strategy"
+   ]
+  },
+  {
+   "code": "mg.leadership",
+   "label": "Team leadership",
+   "group": "management",
+   "synonyms": [
+    "people management",
+    "line management",
+    "team lead",
+    "leading teams",
+    "business-unit management",
+    "business unit management"
+   ]
+  },
+  {
+   "code": "mg.changemanagement",
+   "label": "Change management",
+   "group": "management",
+   "synonyms": [
+    "organisational change",
+    "organizational change",
+    "transformation"
+   ]
+  },
+  {
+   "code": "mg.stakeholder",
+   "label": "Stakeholder management",
+   "group": "management",
+   "synonyms": [
+    "stakeholder engagement",
+    "client management",
+    "account management"
+   ]
+  },
+  {
+   "code": "mg.budget",
+   "label": "Budget management",
+   "group": "management",
+   "synonyms": [
+    "cost control",
+    "p&l",
+    "financial planning"
+   ]
+  },
+  {
+   "code": "mg.vendor",
+   "label": "Vendor management",
+   "group": "management",
+   "synonyms": [
+    "supplier management",
+    "outsourcing",
+    "procurement"
+   ]
+  },
+  {
+   "code": "mg.consulting",
+   "label": "Consulting",
+   "group": "management",
+   "synonyms": [
+    "management consulting",
+    "advisory",
+    "senior consultant"
+   ]
+  },
+  {
+   "code": "mg.presales",
+   "label": "Pre-sales",
+   "group": "management",
+   "synonyms": [
+    "presales",
+    "solution consulting",
+    "sales engineering",
+    "bid management",
+    "proposal writing"
+   ]
+  },
+  {
+   "code": "mg.businessanalysis",
+   "label": "Business analysis",
+   "group": "management",
+   "synonyms": [
+    "business analyst",
+    "requirements engineering",
+    "requirements gathering",
+    "process analysis"
+   ]
+  },
+  {
+   "code": "mg.processimprovement",
+   "label": "Process improvement",
+   "group": "management",
+   "synonyms": [
+    "lean",
+    "six sigma",
+    "continuous improvement",
+    "business process management",
+    "bpm"
+   ]
+  },
+  {
+   "code": "mg.negotiation",
+   "label": "Negotiation",
+   "group": "management",
+   "synonyms": [
+    "contract negotiation"
+   ]
+  },
+  {
+   "code": "mg.coaching",
+   "label": "Coaching and mentoring",
+   "group": "management",
+   "synonyms": [
+    "mentoring",
+    "coaching",
+    "talent development"
+   ]
+  },
+  {
+   "code": "mg.training",
+   "label": "Training and facilitation",
+   "group": "management",
+   "synonyms": [
+    "training delivery",
+    "workshop facilitation",
+    "facilitation"
+   ]
+  },
+  {
+   "code": "hr.hrtech",
+   "label": "HR technology",
+   "group": "hr",
+   "synonyms": [
+    "hr tech",
+    "hcm",
+    "human capital management",
+    "hris",
+    "hr systems",
+    "hr-technology"
+   ]
+  },
+  {
+   "code": "hr.payroll",
+   "label": "Payroll",
+   "group": "hr",
+   "synonyms": [
+    "payroll administration",
+    "payroll processing",
+    "global payroll"
+   ]
+  },
+  {
+   "code": "hr.sap",
+   "label": "SAP",
+   "group": "hr",
+   "synonyms": [
+    "sap hcm",
+    "sap successfactors",
+    "successfactors",
+    "sap erp"
+   ]
+  },
+  {
+   "code": "hr.workday",
+   "label": "Workday",
+   "group": "hr",
+   "synonyms": []
+  },
+  {
+   "code": "hr.recruitment",
+   "label": "Recruitment",
+   "group": "hr",
+   "synonyms": [
+    "talent acquisition",
+    "sourcing",
+    "hiring",
+    "staffing"
+   ]
+  },
+  {
+   "code": "hr.hrbp",
+   "label": "HR business partnering",
+   "group": "hr",
+   "synonyms": [
+    "hrbp",
+    "human resources",
+    "hr management"
+   ]
+  },
+  {
+   "code": "hr.compensation",
+   "label": "Compensation and benefits",
+   "group": "hr",
+   "synonyms": [
+    "comp and ben",
+    "reward management",
+    "payroll benefits"
+   ]
+  },
+  {
+   "code": "hr.employeerelations",
+   "label": "Employee relations",
+   "group": "hr",
+   "synonyms": [
+    "labour relations",
+    "labor relations",
+    "works council"
+   ]
+  },
+  {
+   "code": "hr.learning",
+   "label": "Learning and development",
+   "group": "hr",
+   "synonyms": [
+    "l&d",
+    "training management"
+   ]
+  },
+  {
+   "code": "hr.performance",
+   "label": "Performance management",
+   "group": "hr",
+   "synonyms": [
+    "appraisals",
+    "okr",
+    "performance reviews"
+   ]
+  },
+  {
+   "code": "hr.workforce",
+   "label": "Workforce planning",
+   "group": "hr",
+   "synonyms": [
+    "headcount planning",
+    "capacity planning"
+   ]
+  },
+  {
+   "code": "hr.hroutsourcing",
+   "label": "HR outsourcing",
+   "group": "hr",
+   "synonyms": [
+    "hro",
+    "bpo",
+    "business process outsourcing"
+   ]
+  },
+  {
+   "code": "cm.ecm",
+   "label": "Enterprise content management",
+   "group": "content",
+   "synonyms": [
+    "ecm",
+    "content management",
+    "enterprise content management (ecm)"
+   ]
+  },
+  {
+   "code": "cm.dm",
+   "label": "Document management",
+   "group": "content",
+   "synonyms": [
+    "dms",
+    "document management system",
+    "documentum",
+    "sharepoint"
+   ]
+  },
+  {
+   "code": "cm.km",
+   "label": "Knowledge management",
+   "group": "content",
+   "synonyms": [
+    "km",
+    "knowledge base",
+    "knowledge sharing"
+   ]
+  },
+  {
+   "code": "cm.cms",
+   "label": "Web content management",
+   "group": "content",
+   "synonyms": [
+    "cms",
+    "wordpress",
+    "drupal",
+    "headless cms"
+   ]
+  },
+  {
+   "code": "cm.search",
+   "label": "Enterprise search",
+   "group": "content",
+   "synonyms": [
+    "search engine",
+    "information retrieval"
+   ]
+  },
+  {
+   "code": "cm.ticketing",
+   "label": "Service management",
+   "group": "content",
+   "synonyms": [
+    "itil",
+    "service desk",
+    "ticketing",
+    "itsm",
+    "servicenow"
+   ]
+  },
+  {
+   "code": "ux.ux",
+   "label": "User experience design",
+   "group": "design",
+   "synonyms": [
+    "ux",
+    "ux design",
+    "user experience",
+    "interaction design"
+   ]
+  },
+  {
+   "code": "ux.ui",
+   "label": "User interface design",
+   "group": "design",
+   "synonyms": [
+    "ui",
+    "ui design",
+    "visual design"
+   ]
+  },
+  {
+   "code": "ux.research",
+   "label": "User research",
+   "group": "design",
+   "synonyms": [
+    "usability testing",
+    "user testing"
+   ]
+  },
+  {
+   "code": "ux.figma",
+   "label": "Figma",
+   "group": "design",
+   "synonyms": [
+    "sketch",
+    "adobe xd"
+   ]
+  },
+  {
+   "code": "ux.accessibility",
+   "label": "Accessibility",
+   "group": "design",
+   "synonyms": [
+    "a11y",
+    "wcag"
+   ]
+  },
+  {
+   "code": "mk.digitalmarketing",
+   "label": "Digital marketing",
+   "group": "marketing",
+   "synonyms": [
+    "online marketing",
+    "growth marketing"
+   ]
+  },
+  {
+   "code": "mk.seo",
+   "label": "SEO",
+   "group": "marketing",
+   "synonyms": [
+    "search engine optimisation",
+    "search engine optimization",
+    "sem"
+   ]
+  },
+  {
+   "code": "mk.content",
+   "label": "Content marketing",
+   "group": "marketing",
+   "synonyms": [
+    "copywriting",
+    "content strategy",
+    "blogging"
+   ]
+  },
+  {
+   "code": "mk.crm",
+   "label": "CRM",
+   "group": "marketing",
+   "synonyms": [
+    "salesforce",
+    "hubspot",
+    "customer relationship management"
+   ]
+  },
+  {
+   "code": "mk.sales",
+   "label": "Sales",
+   "group": "marketing",
+   "synonyms": [
+    "business development",
+    "b2b sales",
+    "new business"
+   ]
+  },
+  {
+   "code": "mk.marketresearch",
+   "label": "Market research",
+   "group": "marketing",
+   "synonyms": [
+    "competitive analysis",
+    "market analysis"
+   ]
+  },
+  {
+   "code": "fi.financialanalysis",
+   "label": "Financial analysis",
+   "group": "finance",
+   "synonyms": [
+    "financial modelling",
+    "financial modeling",
+    "fp&a"
+   ]
+  },
+  {
+   "code": "fi.accounting",
+   "label": "Accounting",
+   "group": "finance",
+   "synonyms": [
+    "bookkeeping",
+    "ifrs",
+    "gaap"
+   ]
+  },
+  {
+   "code": "fi.controlling",
+   "label": "Controlling",
+   "group": "finance",
+   "synonyms": [
+    "management accounting",
+    "cost accounting"
+   ]
+  },
+  {
+   "code": "so.communication",
+   "label": "Communication",
+   "group": "transversal",
+   "synonyms": [
+    "written communication",
+    "verbal communication",
+    "presentation skills",
+    "public speaking"
+   ]
+  },
+  {
+   "code": "so.problemsolving",
+   "label": "Problem solving",
+   "group": "transversal",
+   "synonyms": [
+    "analytical thinking",
+    "critical thinking",
+    "troubleshooting"
+   ]
+  },
+  {
+   "code": "so.teamwork",
+   "label": "Teamwork",
+   "group": "transversal",
+   "synonyms": [
+    "collaboration",
+    "cross-functional collaboration",
+    "working with international clients and delivery teams"
+   ]
+  },
+  {
+   "code": "so.adaptability",
+   "label": "Adaptability",
+   "group": "transversal",
+   "synonyms": [
+    "flexibility",
+    "resilience"
+   ]
+  },
+  {
+   "code": "so.creativity",
+   "label": "Creativity",
+   "group": "transversal",
+   "synonyms": [
+    "innovation",
+    "ideation"
+   ]
+  },
+  {
+   "code": "so.autonomy",
+   "label": "Autonomy",
+   "group": "transversal",
+   "synonyms": [
+    "self-directed",
+    "independent working",
+    "ownership"
+   ]
+  },
+  {
+   "code": "so.research",
+   "label": "Research",
+   "group": "transversal",
+   "synonyms": [
+    "r&d",
+    "research and development",
+    "applied research"
+   ]
+  },
+  {
+   "code": "so.writing",
+   "label": "Authoring and publishing",
+   "group": "transversal",
+   "synonyms": [
+    "author",
+    "book writing",
+    "technical authoring",
+    "publishing"
+   ]
+  },
+  {
+   "code": "so.multilingual",
+   "label": "Multilingual working",
+   "group": "transversal",
+   "synonyms": [
+    "languages",
+    "international environment"
+   ]
+  }
+ ]
+}

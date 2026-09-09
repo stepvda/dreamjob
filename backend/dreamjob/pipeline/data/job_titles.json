@@ -1,0 +1,1341 @@
+{
+ "version": "2026-09-08",
+ "note": "Bundled title/synonym catalogue for the FR-142 auto-complete. Multilingual synonyms (EN/NL/FR) matter because the source queries target Benelux boards (NFR-501).",
+ "function_families": [
+  {
+   "key": "executive",
+   "labels": {
+    "en": "Executive / C-level",
+    "nl": "Directie / C-level",
+    "fr": "Direction générale"
+   }
+  },
+  {
+   "key": "general_management",
+   "labels": {
+    "en": "General management",
+    "nl": "Algemeen management",
+    "fr": "Management général"
+   }
+  },
+  {
+   "key": "engineering",
+   "labels": {
+    "en": "Software engineering",
+    "nl": "Software engineering",
+    "fr": "Ingénierie logicielle"
+   }
+  },
+  {
+   "key": "data",
+   "labels": {
+    "en": "Data & analytics",
+    "nl": "Data & analytics",
+    "fr": "Data & analytique"
+   }
+  },
+  {
+   "key": "it_infrastructure",
+   "labels": {
+    "en": "IT & infrastructure",
+    "nl": "IT & infrastructuur",
+    "fr": "IT & infrastructure"
+   }
+  },
+  {
+   "key": "product",
+   "labels": {
+    "en": "Product management",
+    "nl": "Productmanagement",
+    "fr": "Gestion de produit"
+   }
+  },
+  {
+   "key": "design",
+   "labels": {
+    "en": "Design & UX",
+    "nl": "Design & UX",
+    "fr": "Design & UX"
+   }
+  },
+  {
+   "key": "sales",
+   "labels": {
+    "en": "Sales & business development",
+    "nl": "Sales & business development",
+    "fr": "Vente & développement commercial"
+   }
+  },
+  {
+   "key": "marketing",
+   "labels": {
+    "en": "Marketing & communication",
+    "nl": "Marketing & communicatie",
+    "fr": "Marketing & communication"
+   }
+  },
+  {
+   "key": "customer_success",
+   "labels": {
+    "en": "Customer success & support",
+    "nl": "Customer success & support",
+    "fr": "Succès client & support"
+   }
+  },
+  {
+   "key": "finance",
+   "labels": {
+    "en": "Finance & control",
+    "nl": "Finance & controlling",
+    "fr": "Finance & contrôle de gestion"
+   }
+  },
+  {
+   "key": "hr",
+   "labels": {
+    "en": "HR & talent",
+    "nl": "HR & talent",
+    "fr": "RH & talents"
+   }
+  },
+  {
+   "key": "operations",
+   "labels": {
+    "en": "Operations",
+    "nl": "Operations",
+    "fr": "Opérations"
+   }
+  },
+  {
+   "key": "supply_chain",
+   "labels": {
+    "en": "Supply chain & logistics",
+    "nl": "Supply chain & logistiek",
+    "fr": "Chaîne logistique"
+   }
+  },
+  {
+   "key": "project_management",
+   "labels": {
+    "en": "Project & programme management",
+    "nl": "Project- & programmamanagement",
+    "fr": "Gestion de projet & programme"
+   }
+  },
+  {
+   "key": "consulting",
+   "labels": {
+    "en": "Consulting & advisory",
+    "nl": "Consulting & advies",
+    "fr": "Conseil"
+   }
+  },
+  {
+   "key": "legal",
+   "labels": {
+    "en": "Legal & compliance",
+    "nl": "Legal & compliance",
+    "fr": "Juridique & conformité"
+   }
+  },
+  {
+   "key": "research",
+   "labels": {
+    "en": "Research & development",
+    "nl": "Onderzoek & ontwikkeling",
+    "fr": "Recherche & développement"
+   }
+  },
+  {
+   "key": "manufacturing",
+   "labels": {
+    "en": "Manufacturing & engineering",
+    "nl": "Productie & engineering",
+    "fr": "Production & ingénierie"
+   }
+  },
+  {
+   "key": "quality",
+   "labels": {
+    "en": "Quality & HSE",
+    "nl": "Kwaliteit & HSE",
+    "fr": "Qualité & HSE"
+   }
+  }
+ ],
+ "titles": [
+  {
+   "canonical": "Chief Executive Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CEO",
+    "Managing Director",
+    "General Manager",
+    "Gedelegeerd Bestuurder",
+    "Algemeen Directeur",
+    "Directeur Général",
+    "Administrateur Délégué"
+   ],
+   "labels": {
+    "en": "Chief Executive Officer",
+    "nl": "Algemeen Directeur",
+    "fr": "Directeur Général"
+   }
+  },
+  {
+   "canonical": "Chief Technology Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CTO",
+    "Chief Technical Officer",
+    "Head of Technology",
+    "Technisch Directeur",
+    "Directeur Technique"
+   ],
+   "labels": {
+    "en": "Chief Technology Officer",
+    "nl": "Chief Technology Officer",
+    "fr": "Directeur Technique"
+   }
+  },
+  {
+   "canonical": "Chief Information Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CIO",
+    "IT Director",
+    "Directeur Informatique",
+    "IT-Directeur"
+   ],
+   "labels": {
+    "en": "Chief Information Officer",
+    "nl": "IT-Directeur",
+    "fr": "Directeur des Systèmes d'Information"
+   }
+  },
+  {
+   "canonical": "Chief Financial Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CFO",
+    "Finance Director",
+    "Financieel Directeur",
+    "Directeur Financier"
+   ],
+   "labels": {
+    "en": "Chief Financial Officer",
+    "nl": "Financieel Directeur",
+    "fr": "Directeur Financier"
+   }
+  },
+  {
+   "canonical": "Chief Operating Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "COO",
+    "Operations Director",
+    "Operationeel Directeur",
+    "Directeur des Opérations"
+   ],
+   "labels": {
+    "en": "Chief Operating Officer",
+    "nl": "Operationeel Directeur",
+    "fr": "Directeur des Opérations"
+   }
+  },
+  {
+   "canonical": "Chief Commercial Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CCO",
+    "Commercial Director",
+    "Commercieel Directeur",
+    "Directeur Commercial"
+   ],
+   "labels": {
+    "en": "Chief Commercial Officer",
+    "nl": "Commercieel Directeur",
+    "fr": "Directeur Commercial"
+   }
+  },
+  {
+   "canonical": "Chief Marketing Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CMO",
+    "Marketing Director",
+    "Marketingdirecteur",
+    "Directeur Marketing"
+   ],
+   "labels": {
+    "en": "Chief Marketing Officer",
+    "nl": "Marketingdirecteur",
+    "fr": "Directeur Marketing"
+   }
+  },
+  {
+   "canonical": "Chief Data Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CDO",
+    "Chief Analytics Officer",
+    "Head of Data"
+   ],
+   "labels": {
+    "en": "Chief Data Officer",
+    "nl": "Chief Data Officer",
+    "fr": "Directeur des Données"
+   }
+  },
+  {
+   "canonical": "Chief Product Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CPO",
+    "Head of Product",
+    "VP Product"
+   ],
+   "labels": {
+    "en": "Chief Product Officer",
+    "nl": "Chief Product Officer",
+    "fr": "Directeur Produit"
+   }
+  },
+  {
+   "canonical": "Chief Information Security Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CISO",
+    "Head of Information Security",
+    "Security Director"
+   ],
+   "labels": {
+    "en": "Chief Information Security Officer",
+    "nl": "Chief Information Security Officer",
+    "fr": "Responsable de la Sécurité des SI"
+   }
+  },
+  {
+   "canonical": "Chief Human Resources Officer",
+   "family": "executive",
+   "seniority": "c_level",
+   "synonyms": [
+    "CHRO",
+    "HR Director",
+    "HR-Directeur",
+    "Directeur des Ressources Humaines",
+    "DRH"
+   ],
+   "labels": {
+    "en": "Chief Human Resources Officer",
+    "nl": "HR-Directeur",
+    "fr": "Directeur des Ressources Humaines"
+   }
+  },
+  {
+   "canonical": "Managing Director",
+   "family": "general_management",
+   "seniority": "director",
+   "synonyms": [
+    "Country Manager",
+    "Site Director",
+    "Business Unit Director",
+    "Directeur",
+    "Zaakvoerder"
+   ],
+   "labels": {
+    "en": "Managing Director",
+    "nl": "Directeur",
+    "fr": "Directeur Général"
+   }
+  },
+  {
+   "canonical": "Business Unit Manager",
+   "family": "general_management",
+   "seniority": "manager",
+   "synonyms": [
+    "BU Manager",
+    "Division Manager",
+    "Afdelingshoofd",
+    "Responsable de Division"
+   ],
+   "labels": {
+    "en": "Business Unit Manager",
+    "nl": "Business Unit Manager",
+    "fr": "Responsable d'Unité"
+   }
+  },
+  {
+   "canonical": "Software Engineer",
+   "family": "engineering",
+   "seniority": "medior",
+   "synonyms": [
+    "Developer",
+    "Software Developer",
+    "Programmer",
+    "Ontwikkelaar",
+    "Softwareontwikkelaar",
+    "Développeur",
+    "Ingénieur Logiciel"
+   ],
+   "labels": {
+    "en": "Software Engineer",
+    "nl": "Softwareontwikkelaar",
+    "fr": "Ingénieur Logiciel"
+   }
+  },
+  {
+   "canonical": "Senior Software Engineer",
+   "family": "engineering",
+   "seniority": "senior",
+   "synonyms": [
+    "Senior Developer",
+    "Senior Software Developer",
+    "Senior Ontwikkelaar",
+    "Développeur Senior"
+   ],
+   "labels": {
+    "en": "Senior Software Engineer",
+    "nl": "Senior Softwareontwikkelaar",
+    "fr": "Développeur Senior"
+   }
+  },
+  {
+   "canonical": "Backend Engineer",
+   "family": "engineering",
+   "seniority": "medior",
+   "synonyms": [
+    "Back-end Developer",
+    "Server-side Engineer",
+    "API Developer"
+   ],
+   "labels": {
+    "en": "Backend Engineer",
+    "nl": "Backend Ontwikkelaar",
+    "fr": "Développeur Backend"
+   }
+  },
+  {
+   "canonical": "Frontend Engineer",
+   "family": "engineering",
+   "seniority": "medior",
+   "synonyms": [
+    "Front-end Developer",
+    "UI Developer",
+    "JavaScript Developer"
+   ],
+   "labels": {
+    "en": "Frontend Engineer",
+    "nl": "Frontend Ontwikkelaar",
+    "fr": "Développeur Frontend"
+   }
+  },
+  {
+   "canonical": "Full Stack Engineer",
+   "family": "engineering",
+   "seniority": "medior",
+   "synonyms": [
+    "Full-stack Developer",
+    "Fullstack Developer"
+   ],
+   "labels": {
+    "en": "Full Stack Engineer",
+    "nl": "Full Stack Ontwikkelaar",
+    "fr": "Développeur Full Stack"
+   }
+  },
+  {
+   "canonical": "Engineering Manager",
+   "family": "engineering",
+   "seniority": "manager",
+   "synonyms": [
+    "Development Manager",
+    "Team Lead Engineering",
+    "Head of Engineering",
+    "Teamleider Development"
+   ],
+   "labels": {
+    "en": "Engineering Manager",
+    "nl": "Engineering Manager",
+    "fr": "Responsable Ingénierie"
+   }
+  },
+  {
+   "canonical": "Tech Lead",
+   "family": "engineering",
+   "seniority": "lead",
+   "synonyms": [
+    "Technical Lead",
+    "Lead Developer",
+    "Lead Engineer",
+    "Teamlead Development"
+   ],
+   "labels": {
+    "en": "Tech Lead",
+    "nl": "Technisch Teamleider",
+    "fr": "Lead Technique"
+   }
+  },
+  {
+   "canonical": "Software Architect",
+   "family": "engineering",
+   "seniority": "principal",
+   "synonyms": [
+    "Solution Architect",
+    "Technical Architect",
+    "Enterprise Architect",
+    "Softwarearchitect",
+    "Architecte Logiciel"
+   ],
+   "labels": {
+    "en": "Software Architect",
+    "nl": "Softwarearchitect",
+    "fr": "Architecte Logiciel"
+   }
+  },
+  {
+   "canonical": "DevOps Engineer",
+   "family": "it_infrastructure",
+   "seniority": "medior",
+   "synonyms": [
+    "Platform Engineer",
+    "Site Reliability Engineer",
+    "SRE",
+    "Cloud Engineer",
+    "Infrastructure Engineer"
+   ],
+   "labels": {
+    "en": "DevOps Engineer",
+    "nl": "DevOps Engineer",
+    "fr": "Ingénieur DevOps"
+   }
+  },
+  {
+   "canonical": "System Administrator",
+   "family": "it_infrastructure",
+   "seniority": "medior",
+   "synonyms": [
+    "Sysadmin",
+    "Systems Engineer",
+    "Systeembeheerder",
+    "Administrateur Système"
+   ],
+   "labels": {
+    "en": "System Administrator",
+    "nl": "Systeembeheerder",
+    "fr": "Administrateur Système"
+   }
+  },
+  {
+   "canonical": "IT Manager",
+   "family": "it_infrastructure",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of IT",
+    "ICT Manager",
+    "IT-Manager",
+    "Responsable Informatique"
+   ],
+   "labels": {
+    "en": "IT Manager",
+    "nl": "ICT-Manager",
+    "fr": "Responsable Informatique"
+   }
+  },
+  {
+   "canonical": "Security Engineer",
+   "family": "it_infrastructure",
+   "seniority": "medior",
+   "synonyms": [
+    "Cyber Security Engineer",
+    "Information Security Engineer",
+    "Security Analyst"
+   ],
+   "labels": {
+    "en": "Security Engineer",
+    "nl": "Security Engineer",
+    "fr": "Ingénieur Sécurité"
+   }
+  },
+  {
+   "canonical": "Data Scientist",
+   "family": "data",
+   "seniority": "medior",
+   "synonyms": [
+    "Machine Learning Scientist",
+    "Applied Scientist",
+    "Data Wetenschapper",
+    "Scientifique des Données"
+   ],
+   "labels": {
+    "en": "Data Scientist",
+    "nl": "Data Scientist",
+    "fr": "Data Scientist"
+   }
+  },
+  {
+   "canonical": "Senior Data Scientist",
+   "family": "data",
+   "seniority": "senior",
+   "synonyms": [
+    "Lead Data Scientist",
+    "Principal Data Scientist"
+   ],
+   "labels": {
+    "en": "Senior Data Scientist",
+    "nl": "Senior Data Scientist",
+    "fr": "Data Scientist Senior"
+   }
+  },
+  {
+   "canonical": "Machine Learning Engineer",
+   "family": "data",
+   "seniority": "medior",
+   "synonyms": [
+    "ML Engineer",
+    "AI Engineer",
+    "MLOps Engineer",
+    "Deep Learning Engineer"
+   ],
+   "labels": {
+    "en": "Machine Learning Engineer",
+    "nl": "Machine Learning Engineer",
+    "fr": "Ingénieur Machine Learning"
+   }
+  },
+  {
+   "canonical": "Data Engineer",
+   "family": "data",
+   "seniority": "medior",
+   "synonyms": [
+    "Analytics Engineer",
+    "ETL Developer",
+    "Big Data Engineer",
+    "Data-ingenieur"
+   ],
+   "labels": {
+    "en": "Data Engineer",
+    "nl": "Data Engineer",
+    "fr": "Ingénieur Données"
+   }
+  },
+  {
+   "canonical": "Data Analyst",
+   "family": "data",
+   "seniority": "junior",
+   "synonyms": [
+    "Business Intelligence Analyst",
+    "BI Analyst",
+    "Reporting Analyst",
+    "Data-analist",
+    "Analyste de Données"
+   ],
+   "labels": {
+    "en": "Data Analyst",
+    "nl": "Data-analist",
+    "fr": "Analyste de Données"
+   }
+  },
+  {
+   "canonical": "Head of Data",
+   "family": "data",
+   "seniority": "director",
+   "synonyms": [
+    "Director of Data",
+    "Data Director",
+    "Head of Analytics",
+    "Head of Data & AI"
+   ],
+   "labels": {
+    "en": "Head of Data",
+    "nl": "Head of Data",
+    "fr": "Responsable Data"
+   }
+  },
+  {
+   "canonical": "AI Product Manager",
+   "family": "product",
+   "seniority": "senior",
+   "synonyms": [
+    "AI Product Owner",
+    "Machine Learning Product Manager"
+   ],
+   "labels": {
+    "en": "AI Product Manager",
+    "nl": "AI Product Manager",
+    "fr": "Chef de Produit IA"
+   }
+  },
+  {
+   "canonical": "Product Manager",
+   "family": "product",
+   "seniority": "medior",
+   "synonyms": [
+    "Product Owner",
+    "Productmanager",
+    "Chef de Produit"
+   ],
+   "labels": {
+    "en": "Product Manager",
+    "nl": "Productmanager",
+    "fr": "Chef de Produit"
+   }
+  },
+  {
+   "canonical": "Senior Product Manager",
+   "family": "product",
+   "seniority": "senior",
+   "synonyms": [
+    "Lead Product Manager",
+    "Group Product Manager"
+   ],
+   "labels": {
+    "en": "Senior Product Manager",
+    "nl": "Senior Productmanager",
+    "fr": "Chef de Produit Senior"
+   }
+  },
+  {
+   "canonical": "Head of Product",
+   "family": "product",
+   "seniority": "director",
+   "synonyms": [
+    "Director of Product",
+    "VP Product Management"
+   ],
+   "labels": {
+    "en": "Head of Product",
+    "nl": "Head of Product",
+    "fr": "Directeur Produit"
+   }
+  },
+  {
+   "canonical": "UX Designer",
+   "family": "design",
+   "seniority": "medior",
+   "synonyms": [
+    "User Experience Designer",
+    "Product Designer",
+    "Interaction Designer",
+    "UX-ontwerper",
+    "Designer UX"
+   ],
+   "labels": {
+    "en": "UX Designer",
+    "nl": "UX-ontwerper",
+    "fr": "Designer UX"
+   }
+  },
+  {
+   "canonical": "UI Designer",
+   "family": "design",
+   "seniority": "medior",
+   "synonyms": [
+    "Visual Designer",
+    "Interface Designer",
+    "Grafisch Vormgever"
+   ],
+   "labels": {
+    "en": "UI Designer",
+    "nl": "UI-ontwerper",
+    "fr": "Designer UI"
+   }
+  },
+  {
+   "canonical": "Design Lead",
+   "family": "design",
+   "seniority": "lead",
+   "synonyms": [
+    "Head of Design",
+    "Creative Director",
+    "Design Manager"
+   ],
+   "labels": {
+    "en": "Design Lead",
+    "nl": "Design Lead",
+    "fr": "Responsable Design"
+   }
+  },
+  {
+   "canonical": "Account Executive",
+   "family": "sales",
+   "seniority": "medior",
+   "synonyms": [
+    "Sales Executive",
+    "Sales Representative",
+    "Accountmanager",
+    "Chargé d'Affaires"
+   ],
+   "labels": {
+    "en": "Account Executive",
+    "nl": "Accountmanager",
+    "fr": "Chargé d'Affaires"
+   }
+  },
+  {
+   "canonical": "Business Development Manager",
+   "family": "sales",
+   "seniority": "manager",
+   "synonyms": [
+    "BD Manager",
+    "New Business Manager",
+    "Business Developer",
+    "Développeur d'Affaires"
+   ],
+   "labels": {
+    "en": "Business Development Manager",
+    "nl": "Business Developer",
+    "fr": "Responsable Développement Commercial"
+   }
+  },
+  {
+   "canonical": "Sales Manager",
+   "family": "sales",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of Sales",
+    "Salesmanager",
+    "Responsable des Ventes"
+   ],
+   "labels": {
+    "en": "Sales Manager",
+    "nl": "Salesmanager",
+    "fr": "Responsable des Ventes"
+   }
+  },
+  {
+   "canonical": "Key Account Manager",
+   "family": "sales",
+   "seniority": "senior",
+   "synonyms": [
+    "Strategic Account Manager",
+    "Enterprise Account Manager",
+    "Key Accountmanager"
+   ],
+   "labels": {
+    "en": "Key Account Manager",
+    "nl": "Key Accountmanager",
+    "fr": "Responsable Grands Comptes"
+   }
+  },
+  {
+   "canonical": "Sales Director",
+   "family": "sales",
+   "seniority": "director",
+   "synonyms": [
+    "VP Sales",
+    "Commercial Director",
+    "Verkoopdirecteur"
+   ],
+   "labels": {
+    "en": "Sales Director",
+    "nl": "Verkoopdirecteur",
+    "fr": "Directeur des Ventes"
+   }
+  },
+  {
+   "canonical": "Marketing Manager",
+   "family": "marketing",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of Marketing",
+    "Marketingmanager",
+    "Responsable Marketing"
+   ],
+   "labels": {
+    "en": "Marketing Manager",
+    "nl": "Marketingmanager",
+    "fr": "Responsable Marketing"
+   }
+  },
+  {
+   "canonical": "Digital Marketing Manager",
+   "family": "marketing",
+   "seniority": "manager",
+   "synonyms": [
+    "Online Marketing Manager",
+    "Growth Marketing Manager",
+    "Performance Marketing Manager"
+   ],
+   "labels": {
+    "en": "Digital Marketing Manager",
+    "nl": "Digital Marketing Manager",
+    "fr": "Responsable Marketing Digital"
+   }
+  },
+  {
+   "canonical": "Communications Manager",
+   "family": "marketing",
+   "seniority": "manager",
+   "synonyms": [
+    "PR Manager",
+    "Corporate Communications Manager",
+    "Communicatieverantwoordelijke"
+   ],
+   "labels": {
+    "en": "Communications Manager",
+    "nl": "Communicatiemanager",
+    "fr": "Responsable Communication"
+   }
+  },
+  {
+   "canonical": "Growth Manager",
+   "family": "marketing",
+   "seniority": "medior",
+   "synonyms": [
+    "Growth Lead",
+    "Growth Hacker",
+    "Demand Generation Manager"
+   ],
+   "labels": {
+    "en": "Growth Manager",
+    "nl": "Growth Manager",
+    "fr": "Responsable Croissance"
+   }
+  },
+  {
+   "canonical": "Customer Success Manager",
+   "family": "customer_success",
+   "seniority": "medior",
+   "synonyms": [
+    "CSM",
+    "Client Success Manager",
+    "Customer Experience Manager"
+   ],
+   "labels": {
+    "en": "Customer Success Manager",
+    "nl": "Customer Success Manager",
+    "fr": "Responsable Succès Client"
+   }
+  },
+  {
+   "canonical": "Support Engineer",
+   "family": "customer_success",
+   "seniority": "junior",
+   "synonyms": [
+    "Technical Support Engineer",
+    "Helpdesk Engineer",
+    "Servicedesk Medewerker"
+   ],
+   "labels": {
+    "en": "Support Engineer",
+    "nl": "Support Engineer",
+    "fr": "Ingénieur Support"
+   }
+  },
+  {
+   "canonical": "Financial Controller",
+   "family": "finance",
+   "seniority": "senior",
+   "synonyms": [
+    "Business Controller",
+    "Finance Controller",
+    "Controller",
+    "Contrôleur de Gestion"
+   ],
+   "labels": {
+    "en": "Financial Controller",
+    "nl": "Controller",
+    "fr": "Contrôleur de Gestion"
+   }
+  },
+  {
+   "canonical": "Finance Manager",
+   "family": "finance",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of Finance",
+    "Financieel Manager",
+    "Responsable Financier"
+   ],
+   "labels": {
+    "en": "Finance Manager",
+    "nl": "Financieel Manager",
+    "fr": "Responsable Financier"
+   }
+  },
+  {
+   "canonical": "Accountant",
+   "family": "finance",
+   "seniority": "medior",
+   "synonyms": [
+    "Bookkeeper",
+    "Boekhouder",
+    "Comptable",
+    "General Ledger Accountant"
+   ],
+   "labels": {
+    "en": "Accountant",
+    "nl": "Boekhouder",
+    "fr": "Comptable"
+   }
+  },
+  {
+   "canonical": "HR Manager",
+   "family": "hr",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of HR",
+    "People Manager",
+    "Personeelsverantwoordelijke",
+    "Responsable RH"
+   ],
+   "labels": {
+    "en": "HR Manager",
+    "nl": "HR-Manager",
+    "fr": "Responsable RH"
+   }
+  },
+  {
+   "canonical": "Talent Acquisition Manager",
+   "family": "hr",
+   "seniority": "manager",
+   "synonyms": [
+    "Recruitment Manager",
+    "Head of Talent",
+    "Recruteringsverantwoordelijke"
+   ],
+   "labels": {
+    "en": "Talent Acquisition Manager",
+    "nl": "Talent Acquisition Manager",
+    "fr": "Responsable Recrutement"
+   }
+  },
+  {
+   "canonical": "Recruiter",
+   "family": "hr",
+   "seniority": "medior",
+   "synonyms": [
+    "Talent Acquisition Specialist",
+    "Corporate Recruiter",
+    "Rekruteerder",
+    "Recruteur"
+   ],
+   "labels": {
+    "en": "Recruiter",
+    "nl": "Recruiter",
+    "fr": "Recruteur"
+   }
+  },
+  {
+   "canonical": "Operations Manager",
+   "family": "operations",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of Operations",
+    "Operationeel Manager",
+    "Responsable des Opérations"
+   ],
+   "labels": {
+    "en": "Operations Manager",
+    "nl": "Operationeel Manager",
+    "fr": "Responsable des Opérations"
+   }
+  },
+  {
+   "canonical": "Plant Manager",
+   "family": "manufacturing",
+   "seniority": "director",
+   "synonyms": [
+    "Production Manager",
+    "Site Manager",
+    "Fabrieksdirecteur",
+    "Directeur d'Usine"
+   ],
+   "labels": {
+    "en": "Plant Manager",
+    "nl": "Productiemanager",
+    "fr": "Directeur d'Usine"
+   }
+  },
+  {
+   "canonical": "Process Engineer",
+   "family": "manufacturing",
+   "seniority": "medior",
+   "synonyms": [
+    "Manufacturing Engineer",
+    "Industrial Engineer",
+    "Procesingenieur",
+    "Ingénieur Procédés"
+   ],
+   "labels": {
+    "en": "Process Engineer",
+    "nl": "Procesingenieur",
+    "fr": "Ingénieur Procédés"
+   }
+  },
+  {
+   "canonical": "Maintenance Manager",
+   "family": "manufacturing",
+   "seniority": "manager",
+   "synonyms": [
+    "Technical Manager",
+    "Onderhoudsverantwoordelijke",
+    "Responsable Maintenance"
+   ],
+   "labels": {
+    "en": "Maintenance Manager",
+    "nl": "Onderhoudsmanager",
+    "fr": "Responsable Maintenance"
+   }
+  },
+  {
+   "canonical": "Supply Chain Manager",
+   "family": "supply_chain",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of Supply Chain",
+    "Logistics Manager",
+    "Logistiek Manager",
+    "Responsable Logistique"
+   ],
+   "labels": {
+    "en": "Supply Chain Manager",
+    "nl": "Supply Chain Manager",
+    "fr": "Responsable Supply Chain"
+   }
+  },
+  {
+   "canonical": "Procurement Manager",
+   "family": "supply_chain",
+   "seniority": "manager",
+   "synonyms": [
+    "Purchasing Manager",
+    "Head of Procurement",
+    "Aankoopmanager",
+    "Responsable Achats"
+   ],
+   "labels": {
+    "en": "Procurement Manager",
+    "nl": "Aankoopmanager",
+    "fr": "Responsable Achats"
+   }
+  },
+  {
+   "canonical": "Project Manager",
+   "family": "project_management",
+   "seniority": "medior",
+   "synonyms": [
+    "Projectleider",
+    "Chef de Projet",
+    "Delivery Manager"
+   ],
+   "labels": {
+    "en": "Project Manager",
+    "nl": "Projectleider",
+    "fr": "Chef de Projet"
+   }
+  },
+  {
+   "canonical": "Programme Manager",
+   "family": "project_management",
+   "seniority": "senior",
+   "synonyms": [
+    "Program Manager",
+    "Portfolio Manager",
+    "Programmamanager"
+   ],
+   "labels": {
+    "en": "Programme Manager",
+    "nl": "Programmamanager",
+    "fr": "Directeur de Programme"
+   }
+  },
+  {
+   "canonical": "Scrum Master",
+   "family": "project_management",
+   "seniority": "medior",
+   "synonyms": [
+    "Agile Coach",
+    "Iteration Manager"
+   ],
+   "labels": {
+    "en": "Scrum Master",
+    "nl": "Scrum Master",
+    "fr": "Scrum Master"
+   }
+  },
+  {
+   "canonical": "Management Consultant",
+   "family": "consulting",
+   "seniority": "senior",
+   "synonyms": [
+    "Strategy Consultant",
+    "Business Consultant",
+    "Adviseur",
+    "Consultant en Stratégie"
+   ],
+   "labels": {
+    "en": "Management Consultant",
+    "nl": "Managementconsultant",
+    "fr": "Consultant en Management"
+   }
+  },
+  {
+   "canonical": "IT Consultant",
+   "family": "consulting",
+   "seniority": "medior",
+   "synonyms": [
+    "Technology Consultant",
+    "Solution Consultant",
+    "IT-Consultant"
+   ],
+   "labels": {
+    "en": "IT Consultant",
+    "nl": "IT-Consultant",
+    "fr": "Consultant IT"
+   }
+  },
+  {
+   "canonical": "Data & AI Consultant",
+   "family": "consulting",
+   "seniority": "senior",
+   "synonyms": [
+    "Analytics Consultant",
+    "AI Consultant",
+    "Data Consultant"
+   ],
+   "labels": {
+    "en": "Data & AI Consultant",
+    "nl": "Data & AI Consultant",
+    "fr": "Consultant Data & IA"
+   }
+  },
+  {
+   "canonical": "Legal Counsel",
+   "family": "legal",
+   "seniority": "senior",
+   "synonyms": [
+    "Corporate Counsel",
+    "In-house Lawyer",
+    "Bedrijfsjurist",
+    "Juriste d'Entreprise"
+   ],
+   "labels": {
+    "en": "Legal Counsel",
+    "nl": "Bedrijfsjurist",
+    "fr": "Juriste d'Entreprise"
+   }
+  },
+  {
+   "canonical": "Compliance Officer",
+   "family": "legal",
+   "seniority": "medior",
+   "synonyms": [
+    "Regulatory Affairs Officer",
+    "Risk & Compliance Officer",
+    "Compliance Verantwoordelijke"
+   ],
+   "labels": {
+    "en": "Compliance Officer",
+    "nl": "Compliance Officer",
+    "fr": "Responsable Conformité"
+   }
+  },
+  {
+   "canonical": "Data Protection Officer",
+   "family": "legal",
+   "seniority": "senior",
+   "synonyms": [
+    "DPO",
+    "Privacy Officer",
+    "Functionaris Gegevensbescherming",
+    "Délégué à la Protection des Données"
+   ],
+   "labels": {
+    "en": "Data Protection Officer",
+    "nl": "Functionaris Gegevensbescherming",
+    "fr": "Délégué à la Protection des Données"
+   }
+  },
+  {
+   "canonical": "R&D Manager",
+   "family": "research",
+   "seniority": "manager",
+   "synonyms": [
+    "Head of R&D",
+    "Research Manager",
+    "Onderzoeksmanager",
+    "Responsable R&D"
+   ],
+   "labels": {
+    "en": "R&D Manager",
+    "nl": "R&D-Manager",
+    "fr": "Responsable R&D"
+   }
+  },
+  {
+   "canonical": "Research Scientist",
+   "family": "research",
+   "seniority": "senior",
+   "synonyms": [
+    "Senior Researcher",
+    "Principal Investigator",
+    "Onderzoeker",
+    "Chercheur"
+   ],
+   "labels": {
+    "en": "Research Scientist",
+    "nl": "Onderzoeker",
+    "fr": "Chercheur"
+   }
+  },
+  {
+   "canonical": "Quality Manager",
+   "family": "quality",
+   "seniority": "manager",
+   "synonyms": [
+    "QA Manager",
+    "Head of Quality",
+    "Kwaliteitsverantwoordelijke",
+    "Responsable Qualité"
+   ],
+   "labels": {
+    "en": "Quality Manager",
+    "nl": "Kwaliteitsmanager",
+    "fr": "Responsable Qualité"
+   }
+  },
+  {
+   "canonical": "QA Engineer",
+   "family": "quality",
+   "seniority": "medior",
+   "synonyms": [
+    "Test Engineer",
+    "Quality Assurance Engineer",
+    "Software Tester",
+    "Testingenieur"
+   ],
+   "labels": {
+    "en": "QA Engineer",
+    "nl": "Testingenieur",
+    "fr": "Ingénieur Qualité Logicielle"
+   }
+  },
+  {
+   "canonical": "HSE Manager",
+   "family": "quality",
+   "seniority": "manager",
+   "synonyms": [
+    "Health Safety Environment Manager",
+    "Preventieadviseur",
+    "Conseiller en Prévention"
+   ],
+   "labels": {
+    "en": "HSE Manager",
+    "nl": "Preventieadviseur",
+    "fr": "Responsable HSE"
+   }
+  }
+ ]
+}

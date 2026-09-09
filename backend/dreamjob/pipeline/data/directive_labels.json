@@ -1,0 +1,648 @@
+{
+ "version": "2026-09-08",
+ "locales": [
+  "en",
+  "nl",
+  "fr"
+ ],
+ "groups": {
+  "size_band": [
+   {
+    "key": "lt10",
+    "labels": {
+     "en": "Fewer than 10 FTE",
+     "nl": "Minder dan 10 VTE",
+     "fr": "Moins de 10 ETP"
+    }
+   },
+   {
+    "key": "b10_50",
+    "labels": {
+     "en": "10 to 50 FTE",
+     "nl": "10 tot 50 VTE",
+     "fr": "10 à 50 ETP"
+    }
+   },
+   {
+    "key": "b50_250",
+    "labels": {
+     "en": "50 to 250 FTE",
+     "nl": "50 tot 250 VTE",
+     "fr": "50 à 250 ETP"
+    }
+   },
+   {
+    "key": "b250_1000",
+    "labels": {
+     "en": "250 to 1000 FTE",
+     "nl": "250 tot 1000 VTE",
+     "fr": "250 à 1000 ETP"
+    }
+   },
+   {
+    "key": "gt1000",
+    "labels": {
+     "en": "More than 1000 FTE",
+     "nl": "Meer dan 1000 VTE",
+     "fr": "Plus de 1000 ETP"
+    }
+   }
+  ],
+  "stage": [
+   {
+    "key": "startup",
+    "labels": {
+     "en": "Start-up",
+     "nl": "Start-up",
+     "fr": "Start-up"
+    }
+   },
+   {
+    "key": "scaleup",
+    "labels": {
+     "en": "Scale-up",
+     "nl": "Scale-up",
+     "fr": "Scale-up"
+    }
+   },
+   {
+    "key": "established",
+    "labels": {
+     "en": "Established",
+     "nl": "Gevestigd",
+     "fr": "Établie"
+    }
+   },
+   {
+    "key": "listed",
+    "labels": {
+     "en": "Listed",
+     "nl": "Beursgenoteerd",
+     "fr": "Cotée en bourse"
+    }
+   },
+   {
+    "key": "public_sector",
+    "labels": {
+     "en": "Public sector",
+     "nl": "Overheid",
+     "fr": "Secteur public"
+    }
+   },
+   {
+    "key": "nonprofit",
+    "labels": {
+     "en": "Non-profit",
+     "nl": "Non-profit",
+     "fr": "Association sans but lucratif"
+    }
+   }
+  ],
+  "trajectory": [
+   {
+    "key": "growing",
+    "labels": {
+     "en": "Growing",
+     "nl": "Groeiend",
+     "fr": "En croissance"
+    }
+   },
+   {
+    "key": "stable",
+    "labels": {
+     "en": "Stable",
+     "nl": "Stabiel",
+     "fr": "Stable"
+    }
+   },
+   {
+    "key": "declining",
+    "labels": {
+     "en": "Declining",
+     "nl": "Krimpend",
+     "fr": "En déclin"
+    }
+   },
+   {
+    "key": "restructuring",
+    "labels": {
+     "en": "Restructuring",
+     "nl": "In herstructurering",
+     "fr": "En restructuration"
+    }
+   }
+  ],
+  "ownership": [
+   {
+    "key": "founder_led",
+    "labels": {
+     "en": "Founder-led",
+     "nl": "Geleid door de oprichter",
+     "fr": "Dirigée par le fondateur"
+    }
+   },
+   {
+    "key": "family_owned",
+    "labels": {
+     "en": "Family-owned",
+     "nl": "Familiebedrijf",
+     "fr": "Entreprise familiale"
+    }
+   },
+   {
+    "key": "pe_backed",
+    "labels": {
+     "en": "PE-backed",
+     "nl": "Private equity",
+     "fr": "Détenue par un fonds"
+    }
+   },
+   {
+    "key": "vc_backed",
+    "labels": {
+     "en": "VC-backed",
+     "nl": "Risicokapitaal",
+     "fr": "Financée par capital-risque"
+    }
+   },
+   {
+    "key": "subsidiary",
+    "labels": {
+     "en": "Subsidiary",
+     "nl": "Dochteronderneming",
+     "fr": "Filiale"
+    }
+   },
+   {
+    "key": "cooperative",
+    "labels": {
+     "en": "Cooperative",
+     "nl": "Coöperatie",
+     "fr": "Coopérative"
+    }
+   },
+   {
+    "key": "state_owned",
+    "labels": {
+     "en": "State-owned",
+     "nl": "Overheidsbedrijf",
+     "fr": "Entreprise publique"
+    }
+   }
+  ],
+  "seniority": [
+   {
+    "key": "intern",
+    "labels": {
+     "en": "Intern",
+     "nl": "Stagiair",
+     "fr": "Stagiaire"
+    }
+   },
+   {
+    "key": "junior",
+    "labels": {
+     "en": "Junior",
+     "nl": "Junior",
+     "fr": "Junior"
+    }
+   },
+   {
+    "key": "medior",
+    "labels": {
+     "en": "Medior",
+     "nl": "Medior",
+     "fr": "Confirmé"
+    }
+   },
+   {
+    "key": "senior",
+    "labels": {
+     "en": "Senior",
+     "nl": "Senior",
+     "fr": "Senior"
+    }
+   },
+   {
+    "key": "lead",
+    "labels": {
+     "en": "Lead",
+     "nl": "Lead",
+     "fr": "Lead"
+    }
+   },
+   {
+    "key": "principal",
+    "labels": {
+     "en": "Principal / Expert",
+     "nl": "Principal / Expert",
+     "fr": "Expert principal"
+    }
+   },
+   {
+    "key": "manager",
+    "labels": {
+     "en": "Manager",
+     "nl": "Manager",
+     "fr": "Manager"
+    }
+   },
+   {
+    "key": "director",
+    "labels": {
+     "en": "Director",
+     "nl": "Directeur",
+     "fr": "Directeur"
+    }
+   },
+   {
+    "key": "vp",
+    "labels": {
+     "en": "Vice-President",
+     "nl": "Vicepresident",
+     "fr": "Vice-président"
+    }
+   },
+   {
+    "key": "c_level",
+    "labels": {
+     "en": "C-level",
+     "nl": "C-level",
+     "fr": "Direction générale"
+    }
+   },
+   {
+    "key": "board",
+    "labels": {
+     "en": "Board",
+     "nl": "Bestuur",
+     "fr": "Conseil d'administration"
+    }
+   }
+  ],
+  "management_scope": [
+   {
+    "key": "individual_contributor",
+    "labels": {
+     "en": "No direct reports",
+     "nl": "Geen leidinggevende rol",
+     "fr": "Sans encadrement"
+    }
+   },
+   {
+    "key": "team_lead",
+    "labels": {
+     "en": "Team lead",
+     "nl": "Teamleider",
+     "fr": "Chef d'équipe"
+    }
+   },
+   {
+    "key": "manager_of_managers",
+    "labels": {
+     "en": "Manager of managers",
+     "nl": "Manager van managers",
+     "fr": "Manager de managers"
+    }
+   },
+   {
+    "key": "department_head",
+    "labels": {
+     "en": "Department head",
+     "nl": "Afdelingshoofd",
+     "fr": "Chef de département"
+    }
+   },
+   {
+    "key": "executive",
+    "labels": {
+     "en": "Executive",
+     "nl": "Directie",
+     "fr": "Direction"
+    }
+   }
+  ],
+  "work_arrangement": [
+   {
+    "key": "onsite",
+    "labels": {
+     "en": "On-site",
+     "nl": "Op kantoor",
+     "fr": "Sur site"
+    }
+   },
+   {
+    "key": "hybrid",
+    "labels": {
+     "en": "Hybrid",
+     "nl": "Hybride",
+     "fr": "Hybride"
+    }
+   },
+   {
+    "key": "remote",
+    "labels": {
+     "en": "Fully remote",
+     "nl": "Volledig op afstand",
+     "fr": "Entièrement à distance"
+    }
+   }
+  ],
+  "employment_type": [
+   {
+    "key": "full_time",
+    "labels": {
+     "en": "Full-time",
+     "nl": "Voltijds",
+     "fr": "Temps plein"
+    }
+   },
+   {
+    "key": "part_time",
+    "labels": {
+     "en": "Part-time",
+     "nl": "Deeltijds",
+     "fr": "Temps partiel"
+    }
+   }
+  ],
+  "contract_type": [
+   {
+    "key": "permanent",
+    "labels": {
+     "en": "Permanent",
+     "nl": "Vast contract",
+     "fr": "Contrat à durée indéterminée"
+    }
+   },
+   {
+    "key": "fixed_term",
+    "labels": {
+     "en": "Fixed-term",
+     "nl": "Bepaalde duur",
+     "fr": "Contrat à durée déterminée"
+    }
+   },
+   {
+    "key": "freelance",
+    "labels": {
+     "en": "Freelance / contractor",
+     "nl": "Freelance",
+     "fr": "Freelance / indépendant"
+    }
+   },
+   {
+    "key": "interim",
+    "labels": {
+     "en": "Interim",
+     "nl": "Interim",
+     "fr": "Intérim"
+    }
+   }
+  ],
+  "travel_tolerance": [
+   {
+    "key": "none",
+    "labels": {
+     "en": "No travel",
+     "nl": "Geen verplaatsingen",
+     "fr": "Aucun déplacement"
+    }
+   },
+   {
+    "key": "occasional",
+    "labels": {
+     "en": "Occasional (up to 10%)",
+     "nl": "Occasioneel (tot 10%)",
+     "fr": "Occasionnel (jusqu'à 10%)"
+    }
+   },
+   {
+    "key": "regular",
+    "labels": {
+     "en": "Regular (up to 25%)",
+     "nl": "Regelmatig (tot 25%)",
+     "fr": "Régulier (jusqu'à 25%)"
+    }
+   },
+   {
+    "key": "frequent",
+    "labels": {
+     "en": "Frequent (up to 50%)",
+     "nl": "Frequent (tot 50%)",
+     "fr": "Fréquent (jusqu'à 50%)"
+    }
+   },
+   {
+    "key": "extensive",
+    "labels": {
+     "en": "Extensive (over 50%)",
+     "nl": "Zeer frequent (meer dan 50%)",
+     "fr": "Très fréquent (plus de 50%)"
+    }
+   }
+  ],
+  "commute_mode": [
+   {
+    "key": "walk",
+    "labels": {
+     "en": "On foot",
+     "nl": "Te voet",
+     "fr": "À pied"
+    }
+   },
+   {
+    "key": "bike",
+    "labels": {
+     "en": "Bicycle",
+     "nl": "Fiets",
+     "fr": "Vélo"
+    }
+   },
+   {
+    "key": "ebike",
+    "labels": {
+     "en": "E-bike / speed pedelec",
+     "nl": "Elektrische fiets",
+     "fr": "Vélo électrique"
+    }
+   },
+   {
+    "key": "public_transport",
+    "labels": {
+     "en": "Public transport",
+     "nl": "Openbaar vervoer",
+     "fr": "Transports en commun"
+    }
+   },
+   {
+    "key": "car",
+    "labels": {
+     "en": "Car",
+     "nl": "Auto",
+     "fr": "Voiture"
+    }
+   },
+   {
+    "key": "motorcycle",
+    "labels": {
+     "en": "Motorcycle",
+     "nl": "Motor",
+     "fr": "Moto"
+    }
+   }
+  ],
+  "pay_component_treatment": [
+   {
+    "key": "ignore",
+    "labels": {
+     "en": "Ignore",
+     "nl": "Buiten beschouwing",
+     "fr": "Ignorer"
+    }
+   },
+   {
+    "key": "partial",
+    "labels": {
+     "en": "Counts partially",
+     "nl": "Telt gedeeltelijk mee",
+     "fr": "Compte partiellement"
+    }
+   },
+   {
+    "key": "full",
+    "labels": {
+     "en": "Counts fully",
+     "nl": "Telt volledig mee",
+     "fr": "Compte entièrement"
+    }
+   },
+   {
+    "key": "required",
+    "labels": {
+     "en": "Required",
+     "nl": "Vereist",
+     "fr": "Exigé"
+    }
+   }
+  ],
+  "compensation_period": [
+   {
+    "key": "annual",
+    "labels": {
+     "en": "Per year",
+     "nl": "Per jaar",
+     "fr": "Par an"
+    }
+   },
+   {
+    "key": "monthly",
+    "labels": {
+     "en": "Per month",
+     "nl": "Per maand",
+     "fr": "Par mois"
+    }
+   },
+   {
+    "key": "daily",
+    "labels": {
+     "en": "Per day",
+     "nl": "Per dag",
+     "fr": "Par jour"
+    }
+   }
+  ],
+  "company_exclusion_reason": [
+   {
+    "key": "current_employer",
+    "labels": {
+     "en": "Current employer",
+     "nl": "Huidige werkgever",
+     "fr": "Employeur actuel"
+    }
+   },
+   {
+    "key": "group_entity",
+    "labels": {
+     "en": "Entity of the current employer's group",
+     "nl": "Entiteit van dezelfde groep",
+     "fr": "Entité du même groupe"
+    }
+   },
+   {
+    "key": "flagged_sensitive",
+    "labels": {
+     "en": "Flagged as sensitive",
+     "nl": "Als gevoelig gemarkeerd",
+     "fr": "Signalée comme sensible"
+    }
+   },
+   {
+    "key": "former_employer",
+    "labels": {
+     "en": "Former employer",
+     "nl": "Vorige werkgever",
+     "fr": "Ancien employeur"
+    }
+   },
+   {
+    "key": "user_excluded",
+    "labels": {
+     "en": "Excluded by the job seeker",
+     "nl": "Uitgesloten door de kandidaat",
+     "fr": "Exclue par le candidat"
+    }
+   },
+   {
+    "key": "other",
+    "labels": {
+     "en": "Other",
+     "nl": "Andere",
+     "fr": "Autre"
+    }
+   }
+  ],
+  "contact_exclusion_reason": [
+   {
+    "key": "current_colleague",
+    "labels": {
+     "en": "Current colleague",
+     "nl": "Huidige collega",
+     "fr": "Collègue actuel"
+    }
+   },
+   {
+    "key": "employer_recruiter",
+    "labels": {
+     "en": "Recruiter of the current employer",
+     "nl": "Recruiter van de huidige werkgever",
+     "fr": "Recruteur de l'employeur actuel"
+    }
+   },
+   {
+    "key": "excluded_company",
+    "labels": {
+     "en": "Works at an excluded company",
+     "nl": "Werkt bij een uitgesloten bedrijf",
+     "fr": "Travaille dans une entreprise exclue"
+    }
+   },
+   {
+    "key": "flagged_sensitive",
+    "labels": {
+     "en": "Flagged as sensitive",
+     "nl": "Als gevoelig gemarkeerd",
+     "fr": "Signalé comme sensible"
+    }
+   },
+   {
+    "key": "other",
+    "labels": {
+     "en": "Other",
+     "nl": "Andere",
+     "fr": "Autre"
+    }
+   }
+  ]
+ }
+}
