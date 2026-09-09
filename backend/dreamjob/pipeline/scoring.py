@@ -23,6 +23,24 @@ That split is deliberate, and it is what makes the ranking usable:
   ``score_detail`` (FR-282).  An LLM number can only be explained by asking it
   again.
 
+A campaign now collects far more than it used to - the gathering plan sizes
+one campaign at ~93 000 opportunities (docs/Data_Gathering_Plan.md N11) - and
+one scoring call is ~10 000 tokens, so scoring every row with the model would
+cost ~100 M tokens and the default 2 M budget would degrade after roughly two
+hundred of them.  :func:`score_campaign` therefore ranks in **two stages**:
+
+1. **Deterministic pre-rank over the whole corpus.**  Every opportunity is
+   scored with the arithmetic above and written to the database.  No tokens, no
+   cap, reproducible (FR-281).
+2. **LLM scoring of the top N only** (``DREAMJOB_LLM_SCORED_LIMIT``, 500 by
+   default) for the semantic dream fit and the written rationale (FR-282).
+
+The rest keep their deterministic scores, and the report says so out loud:
+how many were pre-ranked, how many reached the model, how many carry
+deterministic scores only, and how many were not looked at at all.  A cut
+nobody is told about reads as "we looked at everything" when we did not, which
+is why :class:`ScoringReport` carries a ``coverage`` block (NFR-104, FR-282).
+
 The score is advisory (NFR-305, CR-405).  Nothing here decides anything: it
 orders a list, and every decision - to keep, to reject, to re-order, to apply -
 stays with the job seeker (FR-284).
@@ -34,14 +52,17 @@ scale; ``score_plausibility`` is its 0-100 projection.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
@@ -55,6 +76,16 @@ from dreamjob.pipeline.opportunities import KIND_SPECULATIVE
 log = logging.getLogger(__name__)
 
 PROMPT_NAME = "score_rationale"
+
+#: N11 (docs/Data_Gathering_Plan.md 5.2): how many pre-ranked opportunities earn
+#: an LLM call when the setting is absent.  500 x ~10k tokens is ~5 M tokens, so
+#: a campaign that wants the whole corpus scored semantically has to say so and
+#: pay for it (NFR-104).
+DEFAULT_LLM_SCORED_LIMIT = 500
+
+#: The pre-rank reads the corpus in pages so that 93 000 opportunities never sit
+#: in memory at once.
+PRERANK_PAGE_SIZE = 500
 
 #: FR-281's component list, and the default weights.  A job seeker's own
 #: weights live in ``scoring_weights`` and override these (FR-285).
@@ -219,6 +250,7 @@ class ScoringContext:
     language: str = "en"
     _companies: dict[str, dict] = field(default_factory=dict)
     _company_scores: dict[str, SubScore] = field(default_factory=dict)
+    _reachability: dict[str, dict] = field(default_factory=dict)
 
     def company(self, company_id: str | None) -> dict | None:
         if not company_id:
@@ -226,6 +258,40 @@ class ScoringContext:
         if company_id not in self._companies:
             self._companies[company_id] = repo.get_company(company_id) or {}
         return self._companies[company_id] or None
+
+    def company_score(self, company_id: str | None) -> SubScore:
+        """FR-281 company attractiveness, computed once per company per run.
+
+        A pre-rank over a whole campaign (N11) meets the same employer on
+        dozens of openings, and the sub-score is a pure function of that
+        employer's rows - financial analysis, hiring signals, review summary -
+        none of which change while the run is in flight.  Reading them once per
+        company instead of once per opportunity is the difference between four
+        queries per row and four queries per employer.
+        """
+        if not company_id:
+            return company_attractiveness(None)
+        cached = self._company_scores.get(company_id)
+        if cached is None:
+            cached = company_attractiveness(
+                company_id, company=self.company(company_id) or {}
+            )
+            self._company_scores[company_id] = cached
+        return cached
+
+    def reachability_inputs(self, company_id: str | None) -> dict:
+        """FR-281 reachability inputs, read once per company per run.
+
+        Contacts and introduction paths belong to the employer, not to the
+        opening, so a board with fifteen vacancies is two queries rather than
+        thirty (N11).
+        """
+        key = company_id or ""
+        cached = self._reachability.get(key)
+        if cached is None:
+            cached = repo.reachability_inputs(self.job_seeker_id, company_id)
+            self._reachability[key] = cached
+        return cached
 
 
 def _block(row: dict | None, key: str) -> Any:
@@ -764,7 +830,7 @@ def plausibility_fit(opportunity: dict) -> SubScore:
 
 def reachability(opportunity: dict, ctx: ScoringContext) -> SubScore:
     """FR-281: is there a validated contact, or an introduction path?"""
-    inputs = repo.reachability_inputs(ctx.job_seeker_id, opportunity.get("company_id"))
+    inputs = ctx.reachability_inputs(opportunity.get("company_id"))
     contacts = inputs["contacts"]
     reasons: list[str] = []
 
@@ -1199,7 +1265,7 @@ def score_opportunity(
     subscores: dict[str, SubScore] = {
         "profile_fit": profile_fit(opportunity, ctx),
         "directive_fit": directive_fit(opportunity, ctx),
-        "company": company_attractiveness(opportunity.get("company_id")),
+        "company": ctx.company_score(opportunity.get("company_id")),
         "compensation": compensation_fit(opportunity, ctx),
         "plausibility": plausibility_fit(opportunity),
         "reachability": reachability(opportunity, ctx),
@@ -1298,11 +1364,101 @@ def _fallback_rationale(opportunity: dict, subscores: dict[str, SubScore]) -> st
 
 @dataclass
 class ScoringReport:
+    """What one run of :func:`score_campaign` actually did.
+
+    ``scored`` is the number of opportunities that were given a fresh
+    deterministic score; ``with_llm`` the number whose dream fit and rationale
+    came back from the model.  The two are no longer the same number on a large
+    corpus, so the difference is spelled out rather than left to be inferred
+    (N11, NFR-104).
+    """
+
     campaign_id: str
     scored: int = 0
     with_llm: int = 0
     manual_ranks_preserved: int = 0
     errors: list[str] = field(default_factory=list)
+    #: Opportunities in the campaign, whether or not this run reached them.
+    total: int = 0
+    #: Rows given a deterministic score and written back.
+    pre_ranked: int = 0
+    #: Rows for which an LLM call was attempted (``with_llm`` is how many of
+    #: those calls came back usable).
+    llm_scored: int = 0
+    #: Rows the pre-rank could not score at all (their message is in
+    #: ``errors``); they are neither ranked nor silently forgotten.
+    failed: int = 0
+    #: The cut that was in force, and the cap on the pre-rank if one was asked
+    #: for.  ``llm_limit`` is 0 when no model was available at all.
+    llm_limit: int = 0
+    prerank_limit: int | None = None
+
+    @property
+    def deterministic_only(self) -> int:
+        """Rows carrying a deterministic score and no model opinion."""
+        return max(self.pre_ranked - self.llm_scored, 0)
+
+    @property
+    def not_scored(self) -> int:
+        """Rows this run never looked at, because ``limit`` stopped it."""
+        return max(self.total - self.pre_ranked - self.failed, 0)
+
+    def coverage(self) -> dict[str, Any]:
+        """FR-282/NFR-104: the cut, in numbers the campaign screen can show.
+
+        Silence here would read as "we looked at everything"; every row of the
+        corpus is accounted for in exactly one of ``llm_scored``,
+        ``deterministic_only``, ``failed`` and ``not_scored``.
+        """
+        return {
+            "total": self.total,
+            "pre_ranked": self.pre_ranked,
+            "llm_scored": self.llm_scored,
+            "llm_succeeded": self.with_llm,
+            "llm_failed": max(self.llm_scored - self.with_llm, 0),
+            "deterministic_only": self.deterministic_only,
+            "failed": self.failed,
+            "not_scored": self.not_scored,
+            "llm_limit": self.llm_limit,
+            "prerank_limit": self.prerank_limit,
+            "truncated": self.not_scored > 0,
+            "note": self.note(),
+        }
+
+    def note(self) -> str:
+        """The same numbers as a sentence, for the places that show prose."""
+        noun = "opportunity" if self.total == 1 else "opportunities"
+        parts = [
+            f"{self.pre_ranked} of {self.total} {noun} were ranked deterministically"
+        ]
+        if self.llm_limit <= 0:
+            parts.append(
+                "no model was used, so every score is arithmetic over the collected data"
+            )
+        elif self.llm_scored:
+            parts.append(
+                f"the top {self.llm_scored} went to the model for the semantic dream-job "
+                "match and the written rationale"
+            )
+        if self.deterministic_only:
+            parts.append(
+                f"the other {self.deterministic_only} carry deterministic scores only - "
+                "they were scored and ranked, not skipped"
+            )
+        failed_calls = max(self.llm_scored - self.with_llm, 0)
+        if failed_calls:
+            parts.append(
+                f"{failed_calls} model call(s) failed or ran out of token budget and fell "
+                "back to the deterministic dream fit"
+            )
+        if self.failed:
+            parts.append(f"{self.failed} row(s) could not be scored at all")
+        if self.not_scored:
+            parts.append(
+                f"{self.not_scored} {noun} were not looked at, because this run was capped "
+                f"at {self.prerank_limit}"
+            )
+        return "; ".join(parts) + "."
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1311,8 +1467,91 @@ class ScoringReport:
             "with_llm": self.with_llm,
             "manual_ranks_preserved": self.manual_ranks_preserved,
             "errors": self.errors,
+            "coverage": self.coverage(),
             "advisory": ADVISORY_NOTE,
         }
+
+
+class _Shortlist:
+    """The best ``size`` opportunities seen so far, in O(size) memory.
+
+    The pre-rank walks a corpus that can run to six figures, so the shortlist
+    cannot be "sort everything at the end".  Ties are broken by the order the
+    rows were read - ``created_at`` - so the same corpus always produces the
+    same shortlist, which is what makes a re-run reproducible (FR-281).
+    """
+
+    def __init__(self, size: int) -> None:
+        self.size = max(0, int(size))
+        self._heap: list[tuple[float, int, dict]] = []
+        self._seen = 0
+
+    def offer(self, opportunity: dict, columns: dict[str, Any]) -> None:
+        if self.size == 0:
+            return
+        self._seen += 1
+        score = columns.get("score")
+        # A row no component could score ranks below every scored row, but it
+        # still competes: it is a real opportunity, not a hole in the corpus.
+        entry = (-1.0 if score is None else float(score), -self._seen, opportunity)
+        if len(self._heap) < self.size:
+            heapq.heappush(self._heap, entry)
+        elif entry > self._heap[0]:
+            heapq.heapreplace(self._heap, entry)
+
+    def ranked(self) -> list[dict]:
+        """Best first, so the model is spent on the strongest rows first."""
+        return [entry[2] for entry in sorted(self._heap, reverse=True)]
+
+
+def _iter_opportunities(
+    job_seeker_id: str, campaign_id: str, limit: int | None
+) -> Iterator[dict]:
+    """Every opportunity in the campaign, in pages, without losing any.
+
+    Ordering is by ``created_at`` rather than by the default ``score``: the
+    pre-rank writes ``score`` on every row it reads, and a page ordered by a
+    column the loop is rewriting would let rows move between pages - some read
+    twice, some never read at all.  ``created_at`` is never written by scoring.
+    Identifiers already yielded are remembered anyway, so that a tie the
+    database orders differently from one page to the next can duplicate work
+    but can never duplicate a row in the report.
+    """
+    offset = 0
+    seen: set[str] = set()
+    yielded = 0
+    while limit is None or yielded < limit:
+        page = PRERANK_PAGE_SIZE if limit is None else min(PRERANK_PAGE_SIZE, limit - yielded)
+        rows = repo.list_opportunities(
+            job_seeker_id,
+            campaign_id=campaign_id,
+            sort="created",
+            respect_manual_order=False,
+            limit=page,
+            offset=offset,
+        )
+        if not rows:
+            return
+        offset += len(rows)
+        for row in rows:
+            identifier = str(row.get("id"))
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            yielded += 1
+            yield row
+        if len(rows) < page:
+            return
+
+
+def _scored_by_llm(columns: dict[str, Any]) -> bool:
+    method = (
+        (columns.get("score_detail") or {})
+        .get("components", {})
+        .get("dream_fit", {})
+        .get("method", "")
+    )
+    return str(method).startswith("llm")
 
 
 def score_campaign(
@@ -1320,10 +1559,18 @@ def score_campaign(
     *,
     use_llm: bool = True,
     llm: LLMClient | None = None,
-    limit: int = 1000,
+    limit: int | None = None,
+    llm_limit: int | None = None,
     language: str | None = None,
 ) -> ScoringReport:
-    """Recalculate every opportunity in a campaign (FR-281, FR-284).
+    """Recalculate every opportunity in a campaign (FR-281, FR-284, NFR-104).
+
+    Two stages (N11 of docs/Data_Gathering_Plan.md).  Every opportunity is
+    scored deterministically and written back - that pass costs no tokens, so
+    there is no reason to cap it and by default ``limit`` is ``None``.  Only the
+    top ``llm_limit`` rows of that ranking then get the one call that buys the
+    semantic dream fit and the rationale (FR-282); below the limit the two
+    stages collapse into a single pass and the behaviour is what it always was.
 
     The seeker's manual order is read before and counted after: recomputation
     writes only the ``score_*`` columns, so a manual position is arithmetically
@@ -1343,25 +1590,62 @@ def score_campaign(
     if not use_llm:
         llm = None
 
-    rows = repo.list_opportunities(
-        seeker_id, campaign_id=campaign_id, limit=limit, respect_manual_order=False
-    )
-    for opportunity in rows:
+    if llm_limit is None:
+        llm_limit = getattr(get_settings(), "llm_scored_limit", DEFAULT_LLM_SCORED_LIMIT)
+    llm_limit = max(0, int(llm_limit))
+
+    report.total = repo.count_opportunities(seeker_id, campaign_id=campaign_id)
+    report.prerank_limit = None if limit is None else max(0, int(limit))
+    report.llm_limit = llm_limit if llm is not None else 0
+
+    # A corpus that already fits inside the cut is scored in one pass, exactly
+    # as it was before the cut existed; a larger one is pre-ranked first and the
+    # model is spent afterwards, on the rows that earned it.
+    inline_llm = llm if report.llm_limit and report.total <= report.llm_limit else None
+    shortlist = _Shortlist(0 if inline_llm is not None else report.llm_limit)
+
+    for opportunity in _iter_opportunities(seeker_id, campaign_id, report.prerank_limit):
         if opportunity.get("manual_rank") is not None:
             report.manual_ranks_preserved += 1
-        try:
-            columns = score_opportunity(opportunity, ctx, llm=llm)
-        except Exception as exc:  # noqa: BLE001 - one bad row must not stop the run
-            log.exception("Scoring failed for opportunity %s", opportunity.get("id"))
-            report.errors.append(f"{opportunity.get('id')}: {exc}")
+        columns = _score_one(opportunity, ctx, inline_llm, seeker_id, report)
+        if columns is None:
+            report.failed += 1
             continue
-        repo.save_scores(opportunity["id"], columns, job_seeker_id=seeker_id)
-        report.scored += 1
-        if (columns.get("score_detail") or {}).get("components", {}).get(
-            "dream_fit", {}
-        ).get("method", "").startswith("llm"):
-            report.with_llm += 1
+        report.pre_ranked += 1
+        if inline_llm is not None:
+            report.llm_scored += 1
+            report.with_llm += 1 if _scored_by_llm(columns) else 0
+        else:
+            shortlist.offer(opportunity, columns)
+    report.scored = report.pre_ranked
+
+    for opportunity in shortlist.ranked():
+        columns = _score_one(opportunity, ctx, llm, seeker_id, report)
+        if columns is None:
+            continue
+        report.llm_scored += 1
+        report.with_llm += 1 if _scored_by_llm(columns) else 0
+
+    log.info("Scored campaign %s: %s", campaign_id, report.note())
     return report
+
+
+def _score_one(
+    opportunity: dict,
+    ctx: ScoringContext,
+    llm: LLMClient | None,
+    job_seeker_id: str,
+    report: ScoringReport,
+) -> dict[str, Any] | None:
+    """Score and store one row; one bad row must never stop the run."""
+    try:
+        columns = score_opportunity(opportunity, ctx, llm=llm)
+    except Exception as exc:  # noqa: BLE001 - one bad row must not stop the run
+        log.exception("Scoring failed for opportunity %s", opportunity.get("id"))
+        report.errors.append(f"{opportunity.get('id')}: {exc}")
+        return None
+    repo.save_scores(opportunity["id"], columns, job_seeker_id=job_seeker_id)
+    return columns
 
 
 # ---------------------------------------------------------------------------

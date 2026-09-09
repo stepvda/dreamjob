@@ -36,6 +36,7 @@ from dreamjob.adapters.base import (
     SourceAdapter,
     SourceType,
 )
+from dreamjob.adapters.query_errors import UnusableQuery
 from dreamjob.db.repositories import financials as repo
 from dreamjob.db.repositories.knowledge import get_setting
 from dreamjob.pipeline import filing_extract as fx
@@ -148,15 +149,23 @@ class RegistryAdapter(SourceAdapter):
 
     # -- egress -------------------------------------------------------------
     @asynccontextmanager
-    async def session(self) -> Any:
-        """Use the caller's egress client, or open one for the duration (IR-102)."""
-        if self.egress is not None:
-            yield self.egress
+    async def session(self, egress: Any = None) -> Any:
+        """The caller's egress client, or one opened for the duration (IR-102).
+
+        ``egress=None`` used to mean ``egress.fetch`` on ``None``: every request
+        raised ``AttributeError``, every adapter caught it under its outage
+        handler, and a company that is in the register was reported as absent
+        from it.  A client is never optional here - it is opened rather than
+        assumed.
+        """
+        client = egress if egress is not None else self.egress
+        if client is not None:
+            yield client
             return
         from dreamjob.egress.client import EgressClient  # noqa: PLC0415 - avoids a cycle
 
-        async with EgressClient() as client:
-            yield client
+        async with EgressClient() as opened:
+            yield opened
 
     # -- the registry contract ---------------------------------------------
     async def collect(
@@ -234,14 +243,92 @@ class RegistryAdapter(SourceAdapter):
         return not code or code in {j.upper() for j in self.jurisdictions}
 
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        company = dict(item.native_query.get("company") or {})
-        years = int(item.native_query.get("years") or DEFAULT_YEARS)
-        async with self.session() as egress:
-            result = await self.collect(company, years=years, egress=egress)
-        return self.result_to_raw(result, company)
+        """Ask the register about every company this plan item resolves to.
 
-    @staticmethod
-    def result_to_raw(result: RegistryResult, company: dict) -> list[RawRecord]:
+        A register is asked about companies, and the campaign planner does not
+        name any: it writes ``{"country", "legal_ids", "sector_codes"}``.  So
+        the plan item is read for whatever companies it does carry, and when it
+        carries none the knowledge base is asked for the companies in this
+        jurisdiction whose filings are still missing (FR-241, FR-342) - which
+        is exactly what :meth:`plan` would have produced had it been called.
+
+        A plan item that resolves to no company at all is not "nothing to
+        collect": it is an unrunnable query, and it says so (FR-181, NFR-403).
+        """
+        query = plan_query(item)
+        if not self.available():
+            # RK-06 keeps the *figures* honest by marking them estimated; it does
+            # not ask the source to pretend it ran.  A plan item that says which
+            # key is missing is what an administrator can act on (FR-363).
+            raise UnusableQuery(self.key, self.unavailable_reason())
+        years = int(query.get("years") or DEFAULT_YEARS)
+        limit = self._company_limit(item, query)
+        companies = self.query_targets(query, years=years, limit=limit)
+        if not companies:
+            raise UnusableQuery(
+                self.key,
+                "no company to ask the register about: the plan item names none and the "
+                "knowledge base holds no company in this jurisdiction with filings still "
+                "missing - run company discovery before the registries (FR-241)",
+                expected=("company", "companies", "legal_ids"),
+            )
+
+        raws: list[RawRecord] = []
+        async with self.session() as egress:
+            for company in companies:
+                result = await self.collect(company, years=years, egress=egress)
+                # DR-103 belongs on the collection path too, not only on the
+                # per-company path in pipeline.financial: an unpriced non-EUR
+                # filing is read downstream as though 1 USD were 1 EUR.
+                priced = await attach_fx(result.facts, egress=egress)
+                raws.extend(self.result_to_raw(result, company, priced=priced))
+        return raws
+
+    def _company_limit(self, item: PlanItem, query: dict) -> int:
+        caps = getattr(item, "caps", None) or {}
+        for value in (caps.get("max_companies"), query.get("max_companies")):
+            try:
+                if value:
+                    return max(1, int(value))
+            except (TypeError, ValueError):
+                continue
+        return DEFAULT_MAX_COMPANIES
+
+    def query_targets(self, query: dict, *, years: int, limit: int) -> list[dict]:
+        """The companies one plan item stands for, in the order they were named."""
+        country = _first_country(query) or (self.jurisdictions[0] if self.jurisdictions else "")
+        rows: list[dict] = []
+
+        explicit = query.get("company")
+        if isinstance(explicit, dict) and any(v for v in explicit.values()):
+            rows.append(dict(explicit))
+        for entry in query.get("companies") or []:
+            if isinstance(entry, dict) and any(v for v in entry.values()):
+                rows.append(dict(entry))
+            elif isinstance(entry, str) and entry.strip():
+                rows.append({"name": entry.strip(), "country": country})
+        for legal_id in query.get("legal_ids") or []:
+            if str(legal_id or "").strip():
+                rows.append(
+                    {
+                        "legal_id": str(legal_id).strip(),
+                        "country": country,
+                        "jurisdiction": country,
+                    }
+                )
+
+        named = [row for row in rows if self.covers(row)]
+        if named:
+            return named[:limit]
+        return self.targets({}, {"financial_years": years}, limit)
+
+    def result_to_raw(
+        self,
+        result: RegistryResult,
+        company: dict,
+        *,
+        priced: list[dict[str, Any]] | None = None,
+    ) -> list[RawRecord]:
         """Carry the structured result through the generic adapter pipeline."""
         raws: list[RawRecord] = []
         if result.identity:
@@ -253,7 +340,14 @@ class RegistryAdapter(SourceAdapter):
                     meta={"kind": "company", "data": result.identity},
                 )
             )
+        # The registry knows the company by its legal identifier; the knowledge
+        # base knows it by a row id.  Resolving the two here - once - is what
+        # lets a filing be stored on a first campaign, when the company row is
+        # created by this very answer (DR-101, FR-184).
+        company_id = self.resolve_company_id(company, result.identity) if result.facts else None
+        rates = {id(entry["facts"]): entry for entry in (priced or [])}
         for facts in result.facts:
+            entry = rates.get(id(facts), {})
             raws.append(
                 RawRecord(
                     url="",
@@ -262,13 +356,54 @@ class RegistryAdapter(SourceAdapter):
                     meta={
                         "kind": "financial_year",
                         "facts": facts,
-                        "company_id": company.get("id"),
+                        "company_id": company_id,
+                        "company": {
+                            k: company.get(k)
+                            for k in ("name", "legal_id", "legal_id_type", "vat_number",
+                                      "domain", "country")
+                        },
+                        "identity": result.identity,
+                        "fx_rate_to_eur": entry.get("fx_rate_to_eur"),
+                        "fx_date": entry.get("fx_date"),
                         "estimated": result.estimated,
                     },
                     raw_document_id=facts.filing_document_id,
                 )
             )
         return raws
+
+    def resolve_company_id(self, company: dict, identity: dict | None = None) -> str | None:
+        """Which knowledge-base row these figures belong to (DR-101, FR-184).
+
+        The caller's row id wins.  Otherwise the de-duplicator is asked on the
+        legal identifier the registry just returned, and if that company is not
+        in the knowledge base yet its identity is written first - a filing whose
+        company row does not exist yet is dropped by ``financial_year``'s NOT
+        NULL constraint, which is the registry half of the chicken-and-egg.
+        """
+        if company.get("id"):
+            return str(company["id"])
+        from dreamjob.pipeline.knowledge_base import (  # noqa: PLC0415 - avoids a cycle
+            KnowledgeBaseWriter,
+            resolve_company,
+        )
+
+        for candidate in (identity, company):
+            if not candidate:
+                continue
+            try:
+                found, _matched = resolve_company(dict(candidate))
+            except Exception:  # noqa: BLE001 - an unreadable row must not lose the filing
+                log.exception("[%s] company resolution failed", self.key)
+                found = None
+            if found:
+                return str(found["id"])
+        if not identity:
+            return None
+        outcome = KnowledgeBaseWriter(adapter_key=self.key).write(
+            {"entity_type": "company", "data": dict(identity), "confidence": 0.95}
+        )
+        return outcome.entity_id if outcome else None
 
     def parse(self, raw: RawRecord) -> list[dict]:
         return [raw.meta] if raw.meta else []
@@ -285,11 +420,24 @@ class RegistryAdapter(SourceAdapter):
                 provenance={"adapter_key": self.key},
             )
         if kind == "financial_year":
-            company_id = parsed.get("company_id")
+            company_id = parsed.get("company_id") or self.resolve_company_id(
+                dict(parsed.get("company") or {}), parsed.get("identity")
+            )
             if not company_id:
+                log.warning(
+                    "[%s] a filing was read but no company row could be resolved for it; "
+                    "the figures are dropped (DR-101)",
+                    self.key,
+                )
                 return None
             facts: fx.FilingFacts = parsed["facts"]
-            row = fx.to_financial_year_row(str(company_id), facts, source=self.key)
+            row = fx.to_financial_year_row(
+                str(company_id),
+                facts,
+                fx_rate_to_eur=parsed.get("fx_rate_to_eur"),
+                fx_date=parsed.get("fx_date"),
+                source=self.key,
+            )
             if parsed.get("estimated"):
                 row["is_estimated"] = 1
             return NormalisedRecord(
@@ -307,6 +455,33 @@ class RegistryAdapter(SourceAdapter):
 # ---------------------------------------------------------------------------
 
 _DIGITS = re.compile(r"\D+")
+
+
+def plan_query(item: Any) -> dict[str, Any]:
+    """The native query of a plan item, whether it is a ``PlanItem`` or a row."""
+    query = getattr(item, "native_query", None)
+    if query is None and isinstance(item, dict):
+        query = item.get("native_query")
+    if isinstance(query, str):
+        from dreamjob.db.connection import from_json  # noqa: PLC0415 - avoids a cycle
+
+        query = from_json(query)
+    return dict(query or {})
+
+
+def _first_country(query: dict) -> str:
+    """The ISO-2 code a registry plan item is scoped to, however it is written."""
+    for key in ("country", "jurisdiction"):
+        value = query.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().upper()[:2]
+    for key in ("countries", "jurisdictions"):
+        values = query.get(key)
+        if isinstance(values, list):
+            for value in values:
+                if isinstance(value, str) and value.strip():
+                    return value.strip().upper()[:2]
+    return ""
 
 
 def enterprise_number(company: dict) -> str | None:

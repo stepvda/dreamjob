@@ -27,6 +27,7 @@ import json
 import logging
 import re
 from typing import Any
+from urllib.parse import quote
 
 from dreamjob.adapters.base import AccessMethod, AdapterCapabilities, SourceType, register_adapter
 from dreamjob.adapters.registries.common import (
@@ -38,12 +39,31 @@ from dreamjob.adapters.registries.common import (
     identity_record,
 )
 from dreamjob.egress.client import RobotsDisallowed
+from dreamjob.pipeline.dedup import company_similarity
 
 log = logging.getLogger(__name__)
 
 KBO_PUBLIC_SEARCH = "https://kbopub.economie.fgov.be/kbopub/toonondernemingps.html"
 KBO_NAME_SEARCH = "https://kbopub.economie.fgov.be/kbopub/zoeknaamfonetischform.html"
 VIES_CHECK = "https://ec.europa.eu/taxation_customs/vies/rest-api/ms/{country}/vat/{number}"
+
+#: The public search form is a GET form with paired checkbox markers: Spring
+#: answers 404 when the ``_name=on`` half of a checkbox is missing, so the whole
+#: set is sent exactly as the form posts it.
+NAME_SEARCH_FORM = (
+    "oudeBenaming=true&_oudeBenaming=on"
+    "&ondNP=true&_ondNP=on"
+    "&ondRP=true&_ondRP=on"
+    "&vest=true&_vest=on"
+    "&filterEnkelActieve=true&_filterEnkelActieve=on"
+    "&actionNPRP=Search"
+)
+
+#: A name is the weakest DR-101 key, so a result row has to look like the
+#: company that was asked for before its number is believed.
+NAME_MATCH_FLOOR = 0.60
+
+_ENTERPRISE_HREF = re.compile(r"ondernemingsnummer=(\d{9,10})")
 
 _TAGS = re.compile(r"<[^>]+>")
 _WS = re.compile(r"[ \t\xa0]+")
@@ -119,16 +139,17 @@ class KBOAdapter(RegistryAdapter):
     ) -> RegistryResult:
         """Identity only: the KBO holds no figures - those live at the NBB (FR-241)."""
         result = RegistryResult(adapter_key=self.key)
-        number = enterprise_number(company)
-        if number is None and company.get("name"):
-            number = await self.search_by_name(str(company["name"]), egress=egress)
-        if number is None:
-            result.note("No enterprise number could be resolved for this company")
-            return result
+        async with self.session(egress) as client:
+            number = enterprise_number(company)
+            if number is None and company.get("name"):
+                number = await self.search_by_name(str(company["name"]), egress=client)
+            if number is None:
+                result.note("No enterprise number could be resolved for this company")
+                return result
 
-        identity = await self.lookup(number, egress=egress, company=company)
-        if identity is None:
-            identity = await self.vies_identity(number, egress=egress, company=company)
+            identity = await self.lookup(number, egress=client, company=company)
+            if identity is None:
+                identity = await self.vies_identity(number, egress=client, company=company)
         if identity is None:
             result.note(f"Enterprise {format_enterprise_number(number)} not found in the register")
             return result
@@ -165,7 +186,13 @@ class KBOAdapter(RegistryAdapter):
         status_raw = (_labelled(text, "Status:", "Toestand:", "Statut:") or "").lower()
         legal_form = _labelled(text, "Legal form:", "Rechtsvorm:", "Forme légale:")
         address = _labelled(
-            text, "Address of the seat:", "Adres van de zetel:", "Adresse du siège:"
+            text,
+            "Registered seat's address:",
+            "Address of the seat:",
+            "Adres van de zetel:",
+            "Adres van de maatschappelijke zetel:",
+            "Adresse du siège:",
+            "Adresse du siège social:",
         )
         start_date = _labelled(text, "Start date:", "Begindatum:", "Date de début:")
         nace = sorted({code for code in re.findall(r"\b\d{2}\.\d{2,3}\b", text)})
@@ -228,20 +255,76 @@ class KBOAdapter(RegistryAdapter):
 
     async def search_by_name(self, name: str, *, egress: Any) -> str | None:
         """Phonetic name search - the weakest DR-101 key, so it is the last resort."""
-        url = (
-            f"{KBO_NAME_SEARCH}?searchWord={name}"
-            "&pstcdeNPRP=&postgemeente1=&ondNP=true&ondEx=true"
-        )
+        url = f"{KBO_NAME_SEARCH}?searchWord={quote(name)}&{NAME_SEARCH_FORM}"
         try:
             response = await egress.fetch(url)
         except Exception as exc:  # noqa: BLE001
             log.info("[%s] name search unavailable (%s)", self.key, exc)
             return None
         if not response.ok:
+            log.info(
+                "[%s] name search for %r returned HTTP %s", self.key, name, response.status_code
+            )
             return None
-        matches = re.findall(r"ondernemingsnummer=(\d{10})", response.text)
-        if not matches:
-            matches = [
-                m.replace(".", "") for m in re.findall(r"\b0\d{3}\.\d{3}\.\d{3}\b", response.text)
-            ]
-        return matches[0] if matches else None
+        return self.pick_search_result(response.text, name)
+
+    @staticmethod
+    def parse_search_results(markup: str) -> list[dict[str, Any]]:
+        """The result rows of the public search, as ``{kind, number, name}``.
+
+        The result hrefs drop the leading zero (``ondernemingsnummer=473191041``
+        for 0473.191.041), so a global ten-digit regex silently skips every
+        classic Belgian enterprise and matches whatever else on the page happens
+        to have ten digits.  The rows are read structurally instead, keeping the
+        registered-entity/establishment-unit distinction the register draws.
+        """
+        try:
+            from selectolax.parser import HTMLParser  # noqa: PLC0415 - optional at import time
+        except ImportError:  # pragma: no cover - selectolax is a declared dependency
+            return []
+        out: list[dict[str, Any]] = []
+        for row in HTMLParser(markup).css("tr"):
+            cells = row.css("td")
+            if len(cells) < 5:
+                continue
+            href = " ".join(
+                (a.attributes or {}).get("href") or "" for a in row.css("a")
+            )
+            match = _ENTERPRISE_HREF.search(href)
+            if not match:
+                continue
+            kind_text = _WS.sub(" ", cells[1].text(separator=" ")).strip()
+            name_node = row.css_first("td.benaming")
+            out.append(
+                {
+                    "kind": "ENT" if kind_text.upper().startswith("ENT") else "VE",
+                    "status": "active" if "actief" in kind_text.lower() else "",
+                    "number": match.group(1).zfill(10),
+                    "name": _WS.sub(" ", (name_node.text() if name_node else "")).strip(),
+                }
+            )
+        return out
+
+    @classmethod
+    def pick_search_result(cls, markup: str, wanted: str) -> str | None:
+        """The enterprise number of the row that is actually this company.
+
+        The register answers a phonetic search, so the first row is frequently
+        a different company with a similar-sounding name; taking it would anchor
+        DR-101 on the wrong legal entity for good.
+        """
+        scored = [
+            (row["kind"] == "ENT", company_similarity(wanted, row["name"]), row)
+            for row in cls.parse_search_results(markup)
+        ]
+        scored.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        for is_entity, score, row in scored:
+            if score >= NAME_MATCH_FLOOR:
+                log.info(
+                    "[registry.kbo] %r resolved to %s (%s, name score %.2f)",
+                    wanted, format_enterprise_number(row["number"]),
+                    "entity" if is_entity else "establishment unit", score,
+                )
+                return row["number"]
+        log.info("[registry.kbo] no register row matched %r closely enough", wanted)
+        return None

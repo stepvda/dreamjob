@@ -1,0 +1,453 @@
+{
+  "schema": "dreamjob.e2e.persona/1",
+  "generated_at": "2026-09-09",
+  "as_of": "2026-09",
+  "requirements": [
+    "FR-102",
+    "FR-103",
+    "FR-109",
+    "FR-364"
+  ],
+  "notice": "Entirely fictional test data generated for the Dream Job end-to-end test. The person, the employers, the publications and the projects do not exist; the address is in the RFC 2606 reserved domain.",
+  "identity": {
+    "first_name": "Lena",
+    "last_name": "Vermeulen",
+    "city": "Antwerp",
+    "region": "Flanders",
+    "country": "Belgium",
+    "headline": "AI Engineer | Building LLM-powered systems for industry | ex-data engineer",
+    "name": "Lena Vermeulen",
+    "email": "lena.vermeulen@example.com",
+    "phone": "+32 439 76 12 99",
+    "linkedin_url": "www.linkedin.com/in/lenavermeulen",
+    "website": "lenavermeulen.example.com",
+    "location_full": "Antwerp, Flanders, Belgium",
+    "location_short": "Antwerp, Belgium"
+  },
+  "summary": "AI engineer with 10 years of experience spanning data engineering and machine learning. I design and deploy LLM-based solutions that turn unstructured data into actionable insights for manufacturing and logistics. Known for bridging the gap between research and production, with a focus on reliability and measurable business impact.",
+  "experience": [
+    {
+      "employer": "Cortexa AI",
+      "title": "Lead AI Engineer, LLM Systems",
+      "location": "Antwerp, Belgium",
+      "start": "2024-08",
+      "end": null,
+      "current": true,
+      "summary": "Currently building production-grade LLM applications for document understanding and conversational analytics in the manufacturing sector.",
+      "achievements": [
+        "Developed a retrieval-augmented generation (RAG) pipeline that reduced document search time by 70% for engineers.",
+        "Fine-tuned a domain-specific LLM on technical manuals, achieving 92% accuracy on Q&A benchmarks.",
+        "Led the integration of LLM outputs into existing BI dashboards, enabling natural language queries for non-technical users."
+      ],
+      "technologies": [
+        "Python",
+        "LangChain",
+        "LlamaIndex",
+        "OpenAI API",
+        "Hugging Face Transformers",
+        "Pinecone",
+        "Weaviate",
+        "FastAPI",
+        "Docker",
+        "Kubernetes",
+        "Ray",
+        "MLflow",
+        "Prompt Engineering",
+        "RAG",
+        "Vector Databases",
+        "LLMOps"
+      ],
+      "employer_cv": "Cortexa AI",
+      "cv_end": null,
+      "employer_total_duration": null,
+      "linkedin_dates": "August 2024 - Present (2 years 2 months)",
+      "cv_dates": "August 2024 – Present"
+    },
+    {
+      "employer": "Volta Energy",
+      "title": "Senior AI Engineer",
+      "location": "Brussels, Belgium",
+      "start": "2022-12",
+      "end": "2024-07",
+      "current": false,
+      "summary": "Led AI initiatives for a renewable energy company, focusing on forecasting and optimization of energy grids.",
+      "achievements": [
+        "Designed a time-series forecasting model that improved wind energy prediction accuracy by 15%.",
+        "Implemented a reinforcement learning agent for battery storage optimization, increasing revenue by 12%.",
+        "Mentored a team of 3 junior engineers and established MLOps best practices."
+      ],
+      "technologies": [
+        "Python",
+        "PyTorch",
+        "Prophet",
+        "Gradient Boosting",
+        "Reinforcement Learning",
+        "Stable Baselines3",
+        "AWS SageMaker",
+        "Docker",
+        "Kubernetes",
+        "Terraform",
+        "MLflow",
+        "Pandas",
+        "NumPy",
+        "Time Series Analysis"
+      ],
+      "employer_cv": "Volta Energy NV",
+      "cv_end": "2024-07",
+      "employer_total_duration": null,
+      "linkedin_dates": "December 2022 - July 2024 (1 year 8 months)",
+      "cv_dates": "December 2022 – July 2024"
+    },
+    {
+      "employer": "Nexa Robotics",
+      "title": "AI Engineer",
+      "location": "Ghent, Belgium",
+      "start": "2020-06",
+      "end": "2022-11",
+      "current": false,
+      "summary": "Joined a robotics spin-off to develop computer vision and NLP capabilities for autonomous warehouse robots.",
+      "achievements": [
+        "Built a real-time object detection system using YOLOv5 that improved picking accuracy by 22%.",
+        "Created a natural language interface for robot commands, enabling non-technical staff to operate robots.",
+        "Optimized model inference on edge devices, reducing latency from 200ms to 50ms."
+      ],
+      "technologies": [
+        "Python",
+        "PyTorch",
+        "OpenCV",
+        "YOLO",
+        "Transformers",
+        "ONNX",
+        "TensorRT",
+        "ROS",
+        "C++",
+        "Docker",
+        "Kubernetes",
+        "REST APIs",
+        "NLP",
+        "Computer Vision"
+      ],
+      "employer_cv": "Nexa Robotics",
+      "cv_end": "2022-11",
+      "employer_total_duration": null,
+      "linkedin_dates": "June 2020 - November 2022 (2 years 6 months)",
+      "cv_dates": "June 2020 – November 2022"
+    },
+    {
+      "employer": "Dataflow Analytics",
+      "title": "Machine Learning Engineer",
+      "location": "Antwerp, Belgium",
+      "start": "2018-09",
+      "end": "2020-05",
+      "current": false,
+      "summary": "Transitioned to building ML models for predictive maintenance and demand forecasting, taking ownership of the full ML lifecycle.",
+      "achievements": [
+        "Developed a predictive maintenance model that reduced unplanned downtime by 18% for a major client.",
+        "Implemented a feature store that accelerated model development by 50%.",
+        "Led the deployment of real-time inference endpoints using Kubernetes, handling 10k requests per second."
+      ],
+      "technologies": [
+        "Python",
+        "scikit-learn",
+        "XGBoost",
+        "TensorFlow",
+        "Kubernetes",
+        "FastAPI",
+        "PostgreSQL",
+        "Redis",
+        "MLflow",
+        "Docker",
+        "CI/CD",
+        "Feature Engineering"
+      ],
+      "employer_cv": "Dataflow Analytics",
+      "cv_end": "2020-05",
+      "employer_total_duration": "4 years 3 months",
+      "linkedin_dates": "September 2018 - May 2020 (1 year 9 months)",
+      "cv_dates": "September 2018 – May 2020"
+    },
+    {
+      "employer": "Dataflow Analytics",
+      "title": "Data Engineer",
+      "location": "Antwerp, Belgium",
+      "start": "2016-03",
+      "end": "2018-08",
+      "current": false,
+      "summary": "Built and maintained data pipelines for a logistics analytics platform, ensuring reliable data delivery for downstream reporting.",
+      "achievements": [
+        "Reduced pipeline runtime by 40% by optimizing Spark jobs and introducing incremental processing.",
+        "Designed a data quality monitoring system that cut data errors by 25%.",
+        "Migrated on-premise Hadoop cluster to AWS EMR, saving 30% in infrastructure costs."
+      ],
+      "technologies": [
+        "Python",
+        "SQL",
+        "Apache Spark",
+        "Hadoop",
+        "Airflow",
+        "AWS",
+        "Docker",
+        "Git",
+        "Agile",
+        "Data Warehousing",
+        "ETL"
+      ],
+      "employer_cv": "Dataflow Analytics",
+      "cv_end": "2018-05",
+      "employer_total_duration": null,
+      "linkedin_dates": "March 2016 - August 2018 (2 years 6 months)",
+      "cv_dates": "March 2016 – May 2018"
+    }
+  ],
+  "experience_order": "reverse_chronological",
+  "education": [
+    {
+      "school": "KU Leuven",
+      "degree": "Master of Science",
+      "field": "Computer Science",
+      "location": "Leuven, Belgium",
+      "start_year": 2011,
+      "end_year": 2015,
+      "linkedin_detail": "Master of Science, Computer Science · (2011 - 2015)",
+      "cv_dates": "2011 – 2015"
+    }
+  ],
+  "certifications": [
+    {
+      "title": "AWS Certified Machine Learning – Specialty",
+      "issuer": "Amazon Web Services",
+      "year": 2020
+    },
+    {
+      "title": "Deep Learning Specialization",
+      "issuer": "Coursera",
+      "year": 2019
+    },
+    {
+      "title": "TensorFlow Developer Certificate",
+      "issuer": "Google",
+      "year": 2021
+    }
+  ],
+  "languages": [
+    {
+      "language": "Dutch",
+      "proficiency": "Native"
+    },
+    {
+      "language": "English",
+      "proficiency": "Fluent"
+    },
+    {
+      "language": "French",
+      "proficiency": "Professional working proficiency"
+    }
+  ],
+  "skills": [
+    "Python",
+    "SQL",
+    "Apache Spark",
+    "Airflow",
+    "AWS",
+    "Docker",
+    "Git",
+    "Agile",
+    "Data Warehousing",
+    "ETL",
+    "scikit-learn",
+    "XGBoost",
+    "TensorFlow",
+    "Kubernetes",
+    "FastAPI",
+    "PostgreSQL",
+    "Redis",
+    "MLflow",
+    "PyTorch",
+    "OpenCV",
+    "Transformers",
+    "NLP",
+    "Computer Vision",
+    "LangChain",
+    "Pinecone",
+    "Prompt Engineering",
+    "RAG",
+    "LLMOps",
+    "Time Series Analysis",
+    "Reinforcement Learning"
+  ],
+  "skill_groups": [
+    {
+      "label": "Programming & Data",
+      "skills": [
+        "Python",
+        "SQL"
+      ]
+    },
+    {
+      "label": "Data Engineering",
+      "skills": [
+        "Apache Spark",
+        "Airflow",
+        "Data Warehousing",
+        "ETL"
+      ]
+    },
+    {
+      "label": "Machine Learning & AI",
+      "skills": [
+        "scikit-learn",
+        "XGBoost",
+        "TensorFlow",
+        "PyTorch",
+        "Transformers",
+        "NLP",
+        "Computer Vision",
+        "Time Series Analysis",
+        "Reinforcement Learning"
+      ]
+    },
+    {
+      "label": "LLM & GenAI",
+      "skills": [
+        "LangChain",
+        "Pinecone",
+        "Prompt Engineering",
+        "RAG",
+        "LLMOps"
+      ]
+    },
+    {
+      "label": "DevOps & MLOps",
+      "skills": [
+        "Docker",
+        "Kubernetes",
+        "AWS",
+        "Git",
+        "MLflow",
+        "FastAPI",
+        "PostgreSQL",
+        "Redis"
+      ]
+    },
+    {
+      "label": "Practices",
+      "skills": [
+        "Agile",
+        "OpenCV"
+      ]
+    }
+  ],
+  "top_skills": [
+    "Python",
+    "PyTorch",
+    "LangChain",
+    "RAG",
+    "Kubernetes"
+  ],
+  "publications": [
+    {
+      "title": "Efficient Retrieval-Augmented Generation for Industrial Maintenance Manuals",
+      "venue": "NeurIPS Workshop on Efficient Natural Language Processing",
+      "year": 2025,
+      "kind": "paper"
+    },
+    {
+      "title": "From Data Pipelines to LLMs: A Practitioner's Journey",
+      "venue": "PyData Brussels",
+      "year": 2024,
+      "kind": "talk"
+    },
+    {
+      "title": "Real-Time Object Detection on Edge Devices for Warehouse Robotics",
+      "venue": "ICRA Workshop on Robotics and Automation",
+      "year": 2022,
+      "kind": "paper"
+    }
+  ],
+  "projects": [
+    {
+      "name": "docchat",
+      "url": "https://github.com/lenav/docchat",
+      "description": "An open-source tool for chatting with PDF documents using RAG, built with LangChain and Streamlit.",
+      "technologies": [
+        "Python",
+        "LangChain",
+        "OpenAI API",
+        "Streamlit",
+        "FAISS"
+      ]
+    },
+    {
+      "name": "mlops-starter",
+      "url": "https://github.com/lenav/mlops-starter",
+      "description": "A template repository for production-ready ML projects with CI/CD, Docker, and MLflow integration.",
+      "technologies": [
+        "Python",
+        "Docker",
+        "GitHub Actions",
+        "MLflow",
+        "FastAPI"
+      ]
+    }
+  ],
+  "dream_job": {
+    "statement": "I want to keep building LLM systems that actually work in production, not just demos. The sweet spot for me is a role where I'm the technical lead for a small team of engineers, designing and shipping RAG pipelines, agentic workflows, and fine-tuned models that solve real business problems. Day to day, that means writing Python, wrestling with LangChain or raw APIs, tuning prompts, and debugging why a retrieval call is slow or returning garbage. I want to be deep in the code, but also setting the technical direction and mentoring others. The ideal company is one that already has data infrastructure and is serious about putting LLMs into customer-facing products—maybe in manufacturing, logistics, or energy, where I've built domain expertise. I want to work with a platform team that values MLOps and LLMOps, where we use MLflow, Kubernetes, and proper CI/CD. I'm done with being the guy who just wires up APIs without thinking about evaluation, cost, or latency. I want to stop doing endless stakeholder demos and slide decks. I want to stop maintaining legacy data pipelines that have nothing to do with AI. And I absolutely won't take a role that's just 'prompt engineer' with no engineering ownership. Deal-breakers: no real engineering ownership; no existing data infrastructure; no budget for GPU or cloud compute.",
+    "deal_breakers": [
+      {
+        "constraint": "Must have real engineering ownership",
+        "quote": "no real engineering ownership",
+        "hard": true
+      },
+      {
+        "constraint": "Must have existing data infrastructure",
+        "quote": "no existing data infrastructure",
+        "hard": true
+      },
+      {
+        "constraint": "Must have budget for GPU or cloud compute",
+        "quote": "no budget for GPU or cloud compute",
+        "hard": true
+      }
+    ],
+    "target_roles": [
+      "Lead AI Engineer",
+      "Staff Machine Learning Engineer"
+    ],
+    "must_haves": [
+      "Technical leadership of a small team",
+      "Production LLM systems",
+      "RAG pipelines",
+      "MLOps/LLMOps",
+      "Existing data infrastructure",
+      "Budget for compute"
+    ]
+  },
+  "planted_conflicts": [
+    {
+      "kind": "employer",
+      "requirement": "FR-103",
+      "expected_field_path": "experience.1.company",
+      "role_index": 1,
+      "anchor": {
+        "employer": "Volta Energy",
+        "title": "Senior AI Engineer"
+      },
+      "value_linkedin": "Volta Energy",
+      "value_cv": "Volta Energy NV",
+      "why": "The CV states the legal entity, the export states the brand. The merge still pairs the role because company_variants strips the legal form, so the disagreement is reported rather than read as two separate jobs."
+    },
+    {
+      "kind": "date",
+      "requirement": "FR-103",
+      "expected_field_path": "experience.4.end",
+      "role_index": 4,
+      "anchor": {
+        "employer": "Dataflow Analytics",
+        "title": "Data Engineer"
+      },
+      "value_linkedin": "2018-08",
+      "value_cv": "2018-05",
+      "why": "The CV ends the role three months before the export does - the ordinary drift of a CV rewritten from memory. Both readings are month-precise, so _same_date reports a real disagreement rather than a rounding gap."
+    }
+  ]
+}

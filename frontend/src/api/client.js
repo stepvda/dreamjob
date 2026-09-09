@@ -8,6 +8,8 @@
  * generic "request failed".
  */
 
+import { observeApi } from '../observability/logger'
+
 const BASE = '/api'
 
 export class ApiError extends Error {
@@ -38,7 +40,18 @@ async function request(path, { method = 'GET', body, headers = {}, raw = false }
     opts.body = JSON.stringify(body)
   }
 
-  const res = await fetch(`${BASE}${path}`, opts)
+  // NFR-701: this is the one funnel every screen's traffic passes through, so
+  // it is the only place a failed or slow call has to be noticed. The logger
+  // sees the path, the status and the duration - never the body.
+  const started = performance.now()
+  let res
+  try {
+    res = await fetch(`${BASE}${path}`, opts)
+  } catch (err) {
+    observeApi({ method, path, ms: performance.now() - started, error: err })
+    throw err
+  }
+  observeApi({ method, path, status: res.status, ms: performance.now() - started, res })
 
   if (res.status === 401) {
     onUnauthorized()

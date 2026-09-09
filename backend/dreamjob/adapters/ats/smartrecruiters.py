@@ -10,11 +10,25 @@ structured metadata only; the advert itself lives on the detail call under
 ``jobAd.sections`` (companyDescription, jobDescription, qualifications,
 additionalInformation).  Qualifications are a genuine "required skills"
 section, so they drive ``required_skills`` rather than a whole-page guess.
+
+**This source is catalogued as disabled** (FR-182, IR-101).
+``api.smartrecruiters.com/robots.txt`` reads ``User-agent: * / Disallow: /``
+and allows ``/v1/companies/`` to ``LinkedInBot`` alone, so the egress layer
+refuses every call above and the adapter can only ever collect nothing.  It
+stayed in the catalogue as an enabled, keyless API that quietly returned no
+vacancies, which is the one thing the FR-185 dashboard must not say; see
+:meth:`SmartRecruitersAdapter.register`.  The ~1,000 boards behind this vendor
+are reachable only by writing an HTML adapter against
+``jobs.smartrecruiters.com/{slug}`` (whose robots.txt is a 404, i.e. permitted)
+or by an arrangement with the ATS or the employer.  Sending a ``LinkedInBot``
+User-Agent to get at the API is not an option this product takes
+(docs/Data_Gathering_Plan.md section 6.2).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from dreamjob.adapters.ats.common import ATSAdapter
@@ -40,6 +54,9 @@ from dreamjob.adapters.vacancy_source import (
     split_skills,
     title_matches,
 )
+from dreamjob.db.connection import execute
+
+log = logging.getLogger(__name__)
 
 LIST_API = (
     "https://api.smartrecruiters.com/v1/companies/{slug}/postings"
@@ -57,87 +74,111 @@ class SmartRecruitersAdapter(ATSAdapter):
     tos_status = ToSStatus.RESTRICTED
     requires_ack = True
     legal_notes = (
-        "The posting API is public and keyless, but api.smartrecruiters.com/robots.txt "
-        "reads 'User-agent: * / Disallow: /' (only LinkedInBot is allowed under "
-        "/v1/companies/). FR-182 makes that binding, so the egress layer refuses these "
-        "calls and the adapter collects nothing until an administrator acknowledges it "
-        "and has an arrangement with the ATS or the employer (IR-101)."
+        "Disabled: api.smartrecruiters.com/robots.txt reads 'User-agent: * / Disallow: /' "
+        "and allows /v1/companies/ for LinkedInBot only. FR-182 makes that binding, so "
+        "every call is refused at the egress layer and this source collects nothing. It "
+        "stays off until an administrator has an arrangement with the ATS or the employer "
+        "and acknowledges it (IR-101); jobs.smartrecruiters.com serves no robots.txt and "
+        "would need an HTML adapter."
     )
     capabilities = AdapterCapabilities(
         keyword_search=False, company_lookup=True, pagination=True, max_results_per_query=500
     )
 
+    def register(self) -> None:
+        """FR-161/FR-182: catalogue this source as disabled, with the reason.
+
+        ``register()`` writes the terms-of-service status and the legal notes but
+        leaves ``enabled`` at its default of 1, so the FR-185 dashboard listed a
+        keyless API that every campaign planned and no campaign could ever read:
+        a source that reports zero vacancies because robots.txt refuses it looks
+        exactly like a source with no vacancies.
+
+        The administrator's own decision wins: once the source is acknowledged
+        (IR-101) this leaves ``enabled`` alone, so an arrangement with the ATS or
+        the employer is not undone by the next restart.
+        """
+        super().register()
+        changed = execute(
+            "UPDATE source_catalogue SET enabled = 0 "
+            "WHERE adapter_key = ? AND acknowledged_at IS NULL AND enabled = 1",
+            (self.key,),
+        )
+        if changed:
+            log.info(
+                "[%s] catalogued as disabled: api.smartrecruiters.com/robots.txt disallows "
+                "every user agent but LinkedInBot, so the egress layer refuses these calls "
+                "(FR-182, IR-101)", self.key,
+            )
+
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        slug = self.slug_of(item)
+        query = self.native_query(item)
         limit = self.limit_of(item)
-        keywords = item.native_query.get("keywords") or []
-        filtering = bool(item.native_query.get("title_filter"))
-        want_details = item.native_query.get("fetch_details", True) is not False
-
-        meta_base = {
-            "slug": slug,
-            "company_id": item.native_query.get("company_id"),
-            "company_name": item.native_query.get("company_name"),
-        }
-
-        # Each summary keeps its listing page's document id so a record built from
-        # the summary alone still carries provenance (FR-183).
-        summaries: list[tuple[dict, str | None]] = []
-        one_page = requested_page(item.native_query)
-        offset = (one_page - 1) * PAGE_SIZE if one_page else 0
-        budget = min(limit, PAGE_SIZE) if one_page else limit
-        while len(summaries) < budget:
-            page = min(PAGE_SIZE, budget - len(summaries))
-            url = LIST_API.format(slug=slug, limit=page, offset=offset)
-            page_result = await self._get(url)
-            if page_result is None:
-                break
-            try:
-                payload = json.loads(page_result.text)
-            except ValueError:
-                break
-            content = payload.get("content") or []
-            summaries.extend((posting, page_result.raw_document_id) for posting in content)
-            offset += page
-            if len(content) < page or offset >= int(payload.get("totalFound") or 0):
-                break
-            if one_page:
-                break
-
-        if filtering:
-            summaries = [
-                (summary, doc_id)
-                for summary, doc_id in summaries
-                if title_matches(str(summary.get("name") or ""), keywords)
-            ]
+        keywords = query.get("keywords") or []
+        filtering = bool(query.get("title_filter"))
+        want_details = query.get("fetch_details", True) is not False
+        one_page = requested_page(query)
 
         records: list[RawRecord] = []
-        for summary, listing_doc_id in summaries[:budget]:
-            if not want_details:
+        for slug in self.slugs_of(item):
+            meta_base = self.board_meta(item, slug)
+
+            # Each summary keeps its listing page's document id so a record built
+            # from the summary alone still carries provenance (FR-183).
+            summaries: list[tuple[dict, str | None]] = []
+            offset = (one_page - 1) * PAGE_SIZE if one_page else 0
+            budget = min(limit, PAGE_SIZE) if one_page else limit
+            while len(summaries) < budget:
+                page = min(PAGE_SIZE, budget - len(summaries))
+                url = LIST_API.format(slug=slug, limit=page, offset=offset)
+                page_result = await self._get(url)
+                if page_result is None:
+                    break
+                try:
+                    payload = json.loads(page_result.text)
+                except ValueError:
+                    break
+                content = payload.get("content") or []
+                summaries.extend((posting, page_result.raw_document_id) for posting in content)
+                offset += page
+                if len(content) < page or offset >= int(payload.get("totalFound") or 0):
+                    break
+                if one_page:
+                    break
+
+            if filtering:
+                summaries = [
+                    (summary, doc_id)
+                    for summary, doc_id in summaries
+                    if title_matches(str(summary.get("name") or ""), keywords)
+                ]
+
+            for summary, listing_doc_id in summaries[:budget]:
+                detail_url = DETAIL_API.format(slug=slug, posting_id=summary.get("id"))
+                if not want_details:
+                    records.append(
+                        RawRecord(
+                            url=detail_url,
+                            content=json.dumps(summary),
+                            content_type="application/json",
+                            raw_document_id=listing_doc_id,
+                            meta={**meta_base, "kind": "summary"},
+                        )
+                    )
+                    continue
+                detail = await self._get(detail_url)
+                if detail is None:
+                    continue
                 records.append(
                     RawRecord(
-                        url=DETAIL_API.format(slug=slug, posting_id=summary.get("id")),
-                        content=json.dumps(summary),
+                        url=detail_url,
+                        content=detail.text,
                         content_type="application/json",
-                        raw_document_id=listing_doc_id,
-                        meta={**meta_base, "kind": "summary"},
+                        raw_document_id=detail.raw_document_id,
+                        meta={**meta_base, "kind": "detail", "summary": summary},
                     )
                 )
-                continue
-            detail_url = DETAIL_API.format(slug=slug, posting_id=summary.get("id"))
-            detail = await self._get(detail_url)
-            if detail is None:
-                continue
-            records.append(
-                RawRecord(
-                    url=detail_url,
-                    content=detail.text,
-                    content_type="application/json",
-                    raw_document_id=detail.raw_document_id,
-                    meta={**meta_base, "kind": "detail", "summary": summary},
-                )
-            )
-        return records
+        return self.settle(records, nothing_to_fetch=self.no_board_named())
 
     def parse(self, raw: RawRecord) -> list[dict]:
         posting = json.loads(raw.content)

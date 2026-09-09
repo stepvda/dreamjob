@@ -140,7 +140,63 @@ def load_planning_inputs(campaign: dict) -> dict:
         "dream_job_model": dream,
         "profile_version": profile,
         "do_not_disclose": do_not_disclose_paths(seeker),
+        # The company inventory the company-scoped sources are planned from
+        # (ATS boards, website crawls, registry filings).  Shared knowledge, not
+        # this seeker's own data, so it carries no ``job_seeker_id`` (FR-344).
+        "companies_in_scope": companies_in_scope(),
     }
+
+
+# Columns of ``company`` that a plan item may be seeded from.  A collection
+# seed is an identity plus a route, never a profile.
+_COMPANY_SEED_COLUMNS = (
+    "id", "name", "domain", "careers_url", "country", "jurisdiction",
+    "legal_id", "legal_id_type", "vat_number", "ats_vendor", "ats_slug",
+)
+
+
+def companies_in_scope(countries: list[str] | None = None, limit: int = 200) -> list[dict]:
+    """Knowledge-base companies this campaign may collect against (FR-162, FR-342).
+
+    The planner needs an inventory before it can plan a company-scoped source:
+    an ATS board needs a slug, a website crawl needs a home page, a registry
+    needs a legal identifier.  Without this the planner had nothing to name and
+    every one of those sources was planned with an empty query, which is why
+    they all reported "done" having fetched nothing.
+    """
+    columns = ", ".join(_COMPANY_SEED_COLUMNS)
+    sql = f"SELECT {columns} FROM company"
+    params: list[Any] = []
+    codes = [c.upper()[:2] for c in (countries or []) if c]
+    if codes:
+        marks = ", ".join("?" for _ in codes)
+        sql += f" WHERE (country IS NULL OR country IN ({marks}))"
+        params.extend(codes)
+    sql += " ORDER BY COALESCE(refreshed_at, collected_at) DESC LIMIT ?"
+    params.append(limit)
+    return query_all(sql, tuple(params))
+
+
+def companies_with_ats_board(vendor: str | None = None, limit: int = 200) -> list[dict]:
+    """Companies whose ATS board is already known (FR-162).
+
+    ``website.crawl`` fills ``ats_vendor``/``ats_slug`` through ``detect_ats``;
+    this is the read-back that lets the harvest stage use what discovery found,
+    in the same run or in the next campaign.
+    """
+    columns = ", ".join(_COMPANY_SEED_COLUMNS)
+    sql = (
+        f"SELECT {columns} FROM company "
+        "WHERE ats_slug IS NOT NULL AND TRIM(ats_slug) <> '' "
+        "AND ats_vendor IS NOT NULL AND TRIM(ats_vendor) <> ''"
+    )
+    params: list[Any] = []
+    if vendor:
+        sql += " AND LOWER(ats_vendor) = ?"
+        params.append(vendor.lower())
+    sql += " ORDER BY COALESCE(refreshed_at, collected_at) DESC LIMIT ?"
+    params.append(limit)
+    return query_all(sql, tuple(params))
 
 
 def do_not_disclose_paths(job_seeker_id: str) -> set[str]:
@@ -222,11 +278,72 @@ def insert_plan_item(campaign_id: str, values: dict) -> str:
 
 
 def list_plan_items(campaign_id: str, include_excluded: bool = True) -> list[dict]:
+    """The campaign's plan, in the order collection must execute it (FR-181).
+
+    Ordering is by *stage* first (see :func:`plan_item_stage`), because the plan
+    is a dependency chain and not a flat list: registries, directories and job
+    boards discover companies, the website crawl reads their careers pages and
+    fills ``company.ats_vendor``/``ats_slug``, and only then can an ATS board be
+    read.  Ordering by ``created_at, adapter_key`` alone ran that chain
+    backwards - every row of a plan is written in the same second, so the
+    tie-break was alphabetical and ``ats.*`` came first.
+    """
     sql = "SELECT * FROM source_plan_item WHERE campaign_id = ?"
     if not include_excluded:
         sql += " AND excluded_by_user = 0"
     sql += " ORDER BY created_at, adapter_key"
-    return [_decode(r, PLAN_JSON_COLUMNS) or {} for r in query_all(sql, (campaign_id,))]
+    rows = [_decode(r, PLAN_JSON_COLUMNS) or {} for r in query_all(sql, (campaign_id,))]
+    return sorted(rows, key=lambda r: (plan_item_stage(r), r.get("created_at") or "",
+                                       r.get("adapter_key") or ""))
+
+
+# Execution stages (FR-181).  Discovery first, deepening second, harvesting
+# last, so a source that needs a company runs after the sources that find one.
+STAGE_DISCOVER = 1
+STAGE_DEEPEN = 2
+STAGE_HARVEST = 3
+
+STAGE_BY_SOURCE_TYPE: dict[str, int] = {
+    "registry": STAGE_DISCOVER,
+    "directory": STAGE_DISCOVER,
+    "job_board": STAGE_DISCOVER,
+    "compensation": STAGE_DISCOVER,
+    "website": STAGE_DEEPEN,
+    "news": STAGE_DEEPEN,
+    "events": STAGE_DEEPEN,
+    "linkedin": STAGE_DEEPEN,
+    "ats": STAGE_HARVEST,
+}
+
+# Fall-back for rows planned before the planner recorded a stage of its own.
+_STAGE_BY_PREFIX = (
+    ("ats.", STAGE_HARVEST),
+    ("website.", STAGE_DEEPEN),
+    ("news.", STAGE_DEEPEN),
+    ("events.", STAGE_DEEPEN),
+    ("linkedin", STAGE_DEEPEN),
+)
+
+
+def plan_item_stage(item: dict) -> int:
+    """Which collection stage this plan item belongs to (FR-181).
+
+    The planner stamps ``caps["stage"]``; a row from an older plan is placed by
+    its adapter key so that ordering never depends on a migration.
+    """
+    caps = item.get("caps")
+    if isinstance(caps, dict):
+        try:
+            stage = int(caps.get("stage"))
+        except (TypeError, ValueError):
+            stage = 0
+        if stage:
+            return stage
+    key = str(item.get("adapter_key") or "")
+    for prefix, stage in _STAGE_BY_PREFIX:
+        if key.startswith(prefix):
+            return stage
+    return STAGE_DISCOVER
 
 
 def get_plan_item(plan_item_id: str, campaign_id: str | None = None) -> dict | None:

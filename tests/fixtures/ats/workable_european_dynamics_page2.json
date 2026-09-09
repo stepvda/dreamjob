@@ -1,0 +1,105 @@
+{
+ "total": 156,
+ "results": [
+  {
+   "id": 1199467,
+   "shortcode": "D72F706248",
+   "title": "Energy Engineer (Design of Energy Software/ Energy Engineering)",
+   "remote": true,
+   "location": {
+    "country": "Greece",
+    "countryCode": "GR",
+    "city": "Athens",
+    "region": "Attica"
+   },
+   "locations": [
+    {
+     "country": "Greece",
+     "countryCode": "GR",
+     "city": "Athens",
+     "region": "Attica",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "EEE/09/26",
+   "published": "2026-09-01T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [
+    "PRR"
+   ],
+   "accountUid": "76bb50c5-04fa-42dc-a813-7b1e377d324d",
+   "approvalStatus": "approved",
+   "workplace": "remote"
+  },
+  {
+   "id": 1286336,
+   "shortcode": "8D4A378D4B",
+   "title": "Service Management Support Officer, for international e-Government projects",
+   "remote": false,
+   "location": {
+    "country": "Greece",
+    "countryCode": "GR",
+    "city": "Athens",
+    "region": "Attica"
+   },
+   "locations": [
+    {
+     "country": "Greece",
+     "countryCode": "GR",
+     "city": "Athens",
+     "region": "Attica",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "SMSO/09/26",
+   "published": "2026-09-01T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [
+    "PRA"
+   ],
+   "accountUid": "76bb50c5-04fa-42dc-a813-7b1e377d324d",
+   "approvalStatus": "approved",
+   "workplace": "on_site"
+  },
+  {
+   "id": 1392815,
+   "shortcode": "E90C927430",
+   "title": "Data Analytics Consultant",
+   "remote": false,
+   "location": {
+    "country": "Greece",
+    "countryCode": "GR",
+    "city": "Athens",
+    "region": "Attica"
+   },
+   "locations": [
+    {
+     "country": "Greece",
+     "countryCode": "GR",
+     "city": "Athens",
+     "region": "Attica",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "DAC/09/26",
+   "published": "2026-09-01T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [
+    "PRA"
+   ],
+   "accountUid": "76bb50c5-04fa-42dc-a813-7b1e377d324d",
+   "approvalStatus": "approved",
+   "workplace": "hybrid"
+  }
+ ],
+ "nextPage": "WzE3ODgyMjA4MDAwMDAsMTU3NjIwOF0="
+}

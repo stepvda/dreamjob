@@ -244,9 +244,34 @@ function ConflictRow({ conflict, saving, draft, onDraft, onChoose }) {
         </button>
       </div>
 
+      <label
+        className={`checkline conflict-blank${conflict.resolution === 'blank' ? ' chosen' : ''}`}
+        style={{ marginTop: 4 }}
+      >
+        <input
+          type="radio"
+          name={`conflict-${conflict.id}`}
+          checked={conflict.resolution === 'blank'}
+          onChange={() => onChoose(conflict, 'blank')}
+        />
+        <Icon name="trash" size={13} />
+        Leave blank — drop this field from the profile
+        <HelpTip title="Leave blank">
+          Neither value is used: the field is removed from the profile entirely.
+          For a start date that means the entry simply has no start date, rather
+          than inheriting either the LinkedIn or the CV value. Choose this when a
+          value is wrong in both, or you would rather not state it.
+        </HelpTip>
+      </label>
+
       {conflict.resolution === 'manual' && conflict.resolved_value && (
         <p className="small muted" style={{ margin: '6px 0 0' }}>
           Stored as “{conflict.resolved_value}”.
+        </p>
+      )}
+      {conflict.resolution === 'blank' && (
+        <p className="small muted" style={{ margin: '6px 0 0' }}>
+          This field will be left out when the conflicts are written into the profile.
         </p>
       )}
     </div>

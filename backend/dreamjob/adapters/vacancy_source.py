@@ -14,6 +14,12 @@ they do with it afterwards is identical, so it lives here once:
 * **NFR-403** - :meth:`VacancySourceAdapter.report_extraction_rate` writes the
   observed extraction rate back to the source catalogue, which is how a site
   layout change surfaces to the administrator within one campaign.
+* **FR-182/FR-185** - :class:`FetchOutcome` counts what each plan item actually
+  did: requests issued, requests answered, HTTP failures and robots blocks.
+  :meth:`VacancySourceAdapter.settle` turns "issued requests, every one failed"
+  into a raised :class:`SourceUnavailable` and "the query names nothing to
+  fetch" into :class:`UnusableQuery`, so the collection worker records a failed
+  plan item instead of ``done`` with zero records and zero errors.
 
 Language is detected per posting (nl/fr/en/de) because the generated letter and
 CV must later be written in the language of the advertisement (NFR-501).
@@ -25,12 +31,14 @@ import html as html_lib
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from dreamjob.adapters.base import NormalisedRecord, RawRecord, SourceAdapter
+from dreamjob.adapters.base import NormalisedRecord, PlanItem, RawRecord, SourceAdapter
 from dreamjob.db.connection import upsert_row, utcnow
+from dreamjob.egress.client import FetchResult, RateLimited, RobotsDisallowed
 from dreamjob.llm.client import LLMClient
 
 try:  # pragma: no cover - exercised implicitly; the fallback keeps tests portable
@@ -41,6 +49,47 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 MAX_DESCRIPTION_CHARS = 20_000
+
+
+# ---------------------------------------------------------------------------
+# Fetch outcomes (FR-182, FR-185, NFR-403)
+# ---------------------------------------------------------------------------
+
+
+class SourceUnavailable(RuntimeError):
+    """Every request this plan item issued failed (403, 404, 5xx, transport).
+
+    Raised instead of returning an empty list so the collection worker records
+    the plan item as failed with a reason, rather than as ``done`` with zero
+    records and zero errors.
+    """
+
+
+class UnusableQuery(ValueError):
+    """The plan item's ``native_query`` names nothing this adapter can fetch.
+
+    A missing board slug, a board with neither a URL template nor start URLs, a
+    hosted-search mode with no credentials: all of them used to return ``[]``,
+    which is indistinguishable from "this source has no matching vacancies".
+    """
+
+
+@dataclass
+class FetchOutcome:
+    """What one plan item's fetch actually did (FR-185, NFR-403)."""
+
+    requests: int = 0
+    ok: int = 0
+    blocked: list[str] = field(default_factory=list)          # robots.txt (FR-182)
+    rate_limited: list[str] = field(default_factory=list)     # 429/503 after back-off
+    failures: list[tuple[str, str]] = field(default_factory=list)
+
+    def summary(self) -> str:
+        reasons = sorted({reason for _, reason in self.failures})
+        return (
+            f"{self.requests} request(s), {self.ok} answered"
+            + (f"; {', '.join(reasons)}" if reasons else "")
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +143,13 @@ _LDJSON_RE = re.compile(
 )
 
 
+#: Keys whose value nests further JSON-LD nodes.  ``item`` is the one Google's
+#: own documentation uses for a page that lists several postings
+#: (``ItemList`` -> ``ListItem`` -> ``item`` -> ``JobPosting``); without it the
+#: walk stops on the ``ListItem`` wrappers and the whole listing extracts zero.
+_LDJSON_CHILD_KEYS = ("@graph", "itemListElement", "mainEntity", "item", "mainEntityOfPage")
+
+
 def _iter_ldjson_nodes(payload: Any) -> list[dict]:
     out: list[dict] = []
     if isinstance(payload, list):
@@ -101,19 +157,34 @@ def _iter_ldjson_nodes(payload: Any) -> list[dict]:
             out.extend(_iter_ldjson_nodes(item))
     elif isinstance(payload, dict):
         out.append(payload)
-        for key in ("@graph", "itemListElement", "mainEntity"):
+        for key in _LDJSON_CHILD_KEYS:
             if key in payload:
                 out.extend(_iter_ldjson_nodes(payload[key]))
     return out
+
+
+def _unwrap_ldjson(body: str) -> str:
+    """Strip the comment and CDATA wrappers CMSs put around a ld+json block."""
+    body = body.strip()
+    body = body.removeprefix("<!--").removesuffix("-->").strip()
+    for opener in ("//<![CDATA[", "/*<![CDATA[*/", "<![CDATA["):
+        if body.startswith(opener):
+            body = body[len(opener):].strip()
+            break
+    for closer in ("//]]>", "/*]]>*/", "]]>"):
+        if body.endswith(closer):
+            body = body[: -len(closer)].strip()
+            break
+    return body
 
 
 def extract_jsonld(markup: str) -> list[dict]:
     """Every JSON-LD object embedded in a page, with ``@graph`` flattened."""
     blocks: list[dict] = []
     for match in _LDJSON_RE.finditer(markup or ""):
-        body = match.group(1).strip()
-        # Some CMSs wrap the block in an HTML comment or emit trailing commas.
-        body = body.removeprefix("<!--").removesuffix("-->").strip()
+        # Some CMSs wrap the block in an HTML comment or CDATA, or emit
+        # trailing commas.
+        body = _unwrap_ldjson(match.group(1))
         try:
             payload = json.loads(body)
         except ValueError:
@@ -239,11 +310,31 @@ _CONTRACT_MAP = {
     "cdi": "permanent", "duree indeterminee": "permanent", "durée indéterminée": "permanent",
     "unbefristet": "permanent", "regular": "permanent", "vaste benoeming": "permanent",
 }
+_SEPARATOR_RE = re.compile(r"[_\-/]+")
+
+
+def _flatten_codes(text: str) -> str:
+    """``"fulltime_permanent"`` -> ``"fulltime permanent"``.
+
+    Recruitee, Personio and SmartRecruiters all state the contract as an
+    underscore-joined compound code.  The word-boundary patterns below treat
+    ``_`` as a word character, so ``permanent`` inside ``fulltime_permanent``
+    never matched and 13 of 18 live Recruitee offers lost a contract type they
+    had explicitly stated.
+    """
+    return _SEPARATOR_RE.sub(" ", text)
+
+
 # Longest key first so "fixed term" beats "term" and "working student" beats "student";
 # word boundaries stop "intern" from matching "international" (a real false positive).
+# Keys are flattened the same way the haystack is, so "fixed_term" and "fixed term"
+# are one pattern rather than two that disagree.
 _CONTRACT_PATTERNS = [
     (re.compile(rf"(?<![\w-]){re.escape(key)}(?![\w-])", re.IGNORECASE), value)
-    for key, value in sorted(_CONTRACT_MAP.items(), key=lambda kv: -len(kv[0]))
+    for key, value in sorted(
+        {_flatten_codes(k): v for k, v in _CONTRACT_MAP.items()}.items(),
+        key=lambda kv: -len(kv[0]),
+    )
 ]
 
 
@@ -252,27 +343,86 @@ def normalise_contract_type(*signals: Any) -> str | None:
     haystack = " ".join(str(s).lower() for s in signals if s not in (None, ""))
     if not haystack:
         return None
+    haystack = _flatten_codes(haystack)
     for pattern, value in _CONTRACT_PATTERNS:
         if pattern.search(haystack):
             return value
     return None
 
 
-_PCT_RE = re.compile(r"(\d{2,3})\s*%")
+#: A percentage only states a working time when a working-time word is next to
+#: it.  Scanning free advert text for any "NN%" made every one of GitLab's 227
+#: postings half-time, because the boilerplate says "more than 50% of the
+#: Fortune 100".
+_FTE_WORDS = (
+    r"fte|vte|voltijds?|deeltijds?|full[ \-]?time|part[ \-]?time|werktijd|arbeidsduur|"
+    r"tewerkstelling|jobtime|temps[ \-]plein|temps[ \-]partiel|mi[ \-]temps|"
+    r"stellenumfang|arbeitszeit|teilzeit|vollzeit|position|contract|employment|"
+    r"schedule|workload|uren|heures|stunden"
+)
+_PCT_NEAR_FTE_RE = re.compile(
+    rf"(?:(?:{_FTE_WORDS})[^.\n%]{{0,30}}?(\d{{2,3}})\s*%"
+    rf"|(\d{{2,3}})\s*%[^.\n]{{0,30}}?(?:{_FTE_WORDS}))",
+    re.IGNORECASE,
+)
 
 
 def fte_percentage(*signals: Any) -> int | None:
-    haystack = " ".join(str(s).lower() for s in signals if s not in (None, ""))
-    match = _PCT_RE.search(haystack)
+    """Stated working time as a percentage, or None (FR-261: "if stated").
+
+    Never a guess: a bare percentage in advert prose is ignored, because it is
+    far more often a statistic than a working time.
+    """
+    haystack = _flatten_codes(
+        " ".join(str(s).lower() for s in signals if s not in (None, ""))
+    )
+    match = _PCT_NEAR_FTE_RE.search(haystack)
     if match:
-        value = int(match.group(1))
+        value = int(match.group(1) or match.group(2))
         if 10 <= value <= 100:
             return value
-    if "part-time" in haystack or "part_time" in haystack or "deeltijds" in haystack:
+    if re.search(r"(?<![\w-])(part ?time|deeltijds?|temps partiel|teilzeit)(?![\w-])", haystack):
         return 50
-    if "full-time" in haystack or "full_time" in haystack or "voltijds" in haystack:
+    if re.search(r"(?<![\w-])(full ?time|voltijds?|temps plein|vollzeit)(?![\w-])", haystack):
         return 100
     return None
+
+
+#: Recruitee (and a few boards) state a pay period next to the range.  FR-261
+#: records what is stated; storing a monthly figure in an annual column is not
+#: what is stated, it is a twelvefold error.
+_PERIOD_FACTORS = {"year": 1, "yearly": 1, "annual": 1, "annum": 1, "month": 12,
+                   "monthly": 12, "week": 52, "weekly": 52}
+
+
+def annualise_salary(
+    low: Any, high: Any, period: str | None
+) -> tuple[float | None, float | None]:
+    """Scale a stated range to the annual figure the ``vacancy`` columns hold.
+
+    An unknown or sub-weekly period (``hour``, ``day``) returns ``(None, None)``:
+    converting it needs an assumption about working time that the advert does
+    not state, and a wrong number is worse than no number.
+    """
+    def as_number(value: Any) -> float | None:
+        if value in (None, "", "0", 0):
+            return None
+        try:
+            return float(str(value).replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+
+    minimum, maximum = as_number(low), as_number(high)
+    if minimum is None and maximum is None:
+        return None, None
+    key = str(period or "year").strip().lower()
+    factor = _PERIOD_FACTORS.get(key)
+    if factor is None:
+        return None, None
+    return (
+        round(minimum * factor, 2) if minimum is not None else None,
+        round(maximum * factor, 2) if maximum is not None else None,
+    )
 
 
 def fte_from_hours(hours: float | int | None, week: float = 38.0) -> int | None:
@@ -711,6 +861,108 @@ class VacancySourceAdapter(SourceAdapter):
         self.campaign_id = campaign_id
         self.job_seeker_id = job_seeker_id
         self.llm_extractions = 0
+        self.fetch_outcome = FetchOutcome()
+
+    # -- plan items (FR-162) ------------------------------------------------
+    @staticmethod
+    def native_query(item: PlanItem | dict[str, Any] | None) -> dict[str, Any]:
+        """The ``native_query`` payload, from a ``PlanItem`` or a plan-item row.
+
+        ``plan()`` produces a :class:`~dreamjob.adapters.base.PlanItem`; the
+        collection worker reads the plan back from ``source_plan_item`` as a
+        plain dict whose ``native_query`` column has been JSON-decoded.  Both are
+        the same work item, and an adapter that accepts only one of them crashes
+        the job that hands it the other.
+        """
+        payload = getattr(item, "native_query", None)
+        if payload is None and isinstance(item, dict):
+            payload = item.get("native_query")
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    # -- fetch accounting (FR-182, FR-185, NFR-403) -------------------------
+    async def run(self, item: PlanItem) -> list[NormalisedRecord]:
+        """One plan item, with its fetch outcome reset and reported.
+
+        The collection worker only ever sees ``run()``'s return value and the
+        exceptions it raises, so an adapter that fetched nothing has to say so
+        by raising - see :meth:`settle`.
+        """
+        self.fetch_outcome = FetchOutcome()
+        return await super().run(item)
+
+    async def _get(self, url: str, **kwargs: Any) -> FetchResult | None:
+        """One request through the egress layer, counted (IR-102, FR-182).
+
+        Returns ``None`` for a request that produced no usable body so that one
+        dead page does not abort a walk over many - but the failure is recorded
+        on :attr:`fetch_outcome`, and :meth:`settle` raises when the walk ends
+        with nothing.  A ``log.info`` is not a failure report.
+        """
+        if self.egress is None:
+            raise RuntimeError(f"[{self.key}] fetch() needs an EgressClient (IR-102)")
+        outcome = self.fetch_outcome
+        outcome.requests += 1
+        try:
+            result = await self.egress.fetch(
+                url, access_method=self.access_method.value, **kwargs
+            )
+        except RobotsDisallowed as exc:
+            log.warning("[%s] robots.txt disallows %s (FR-182)", self.key, url)
+            outcome.blocked.append(url)
+            outcome.failures.append((url, f"robots.txt: {exc}"))
+            return None
+        except RateLimited as exc:
+            log.warning("[%s] rate-limited by %s: %s", self.key, url, exc)
+            outcome.rate_limited.append(url)
+            outcome.failures.append((url, "rate limited"))
+            return None
+        except Exception as exc:  # noqa: BLE001 - counted, then reported by settle()
+            log.warning("[%s] fetch failed for %s: %s", self.key, url, exc)
+            outcome.failures.append((url, f"{type(exc).__name__}: {exc}"))
+            return None
+        if not result.ok:
+            log.info("[%s] %s returned HTTP %s", self.key, url, result.status_code)
+            outcome.failures.append((url, f"HTTP {result.status_code}"))
+            return None
+        outcome.ok += 1
+        return result
+
+    def settle(self, records: list[RawRecord], *, nothing_to_fetch: str = "") -> list[RawRecord]:
+        """Close a ``fetch()`` by reporting what actually happened.
+
+        Four distinct states, three of which used to be indistinguishable from
+        "this source has no matching vacancies":
+
+        * some raw material - success, even if some pages failed (logged);
+        * robots.txt blocked it - :class:`RobotsDisallowed` (FR-182, IR-101);
+        * every request failed - :class:`SourceUnavailable` (FR-185);
+        * no request was issued at all - :class:`UnusableQuery` (FR-162);
+        * requests answered but yielded nothing - an extraction attempt with no
+          success, so the NFR-403 rate collapses and the breakage surfaces.
+        """
+        outcome = self.fetch_outcome
+        if records:
+            if outcome.failures:
+                log.warning(
+                    "[%s] %d of %d requests failed: %s",
+                    self.key, len(outcome.failures), outcome.requests, outcome.summary(),
+                )
+            return records
+        if outcome.blocked:
+            raise RobotsDisallowed(
+                f"[{self.key}] robots.txt disallows {outcome.blocked[0]} (FR-182)"
+            )
+        if outcome.requests and not outcome.ok:
+            raise SourceUnavailable(f"[{self.key}] {outcome.summary()}")
+        if not outcome.requests:
+            raise UnusableQuery(
+                f"[{self.key}] {nothing_to_fetch or 'the plan item names nothing to fetch'}"
+            )
+        # NFR-403: pages were fetched and parsed to nothing.  Counting that as an
+        # attempt with no success is what makes a layout change visible; without
+        # it the rate stays None and the detector can never fire.
+        self.record_extraction(outcome.ok, 0)
+        return records
 
     # -- normalise (FR-261) -------------------------------------------------
     def normalise(self, parsed: dict, raw: RawRecord) -> NormalisedRecord | None:
@@ -892,6 +1144,46 @@ def _as_str_list(value: Any) -> list[str]:
     return []
 
 
+def _term_list(query: dict, *keys: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        value = query.get(key)
+        candidates = value if isinstance(value, (list, tuple, set)) else [value]
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate = candidate.get("label") or candidate.get("name")
+            text = str(candidate or "").strip()
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                out.append(text)
+    return out
+
+
+def query_terms(native_query: dict | None) -> list[str]:
+    """Search keywords, in whichever vocabulary the plan item was written in.
+
+    The campaign planner writes ``keywords``/``query``; the adapters' own
+    ``plan()`` writes ``queries``/``keyword``.  Reading both is what stops a
+    board search from running with an empty keyword box - which is what every
+    live board plan item did, one character away from working (FR-162).
+    """
+    return _term_list(native_query or {}, "queries", "keywords", "query", "keyword", "search_text")
+
+
+def location_terms(native_query: dict | None) -> list[str]:
+    """Locations, in either vocabulary (planner: ``location``; adapter: ``locations``)."""
+    return _term_list(native_query or {}, "locations", "location", "places", "cities")
+
+
+def country_terms(native_query: dict | None) -> list[str]:
+    """ISO-2 country codes, in either vocabulary, upper-cased."""
+    codes = _term_list(
+        native_query or {}, "country_codes", "countries", "country", "locationCodes"
+    )
+    return [c.upper() for c in codes if len(c) == 2 and c.isalpha()]
+
+
 def requested_page(native_query: dict | None) -> int | None:
     """The page the collection pipeline is asking for, if any.
 
@@ -920,10 +1212,16 @@ __all__ = [
     "ATS_HOSTS",
     "MAX_DESCRIPTION_CHARS",
     "SKILL_LEXICON",
+    "FetchOutcome",
+    "SourceUnavailable",
+    "UnusableQuery",
+    "VACANCY_COLUMNS",
     "VacancySourceAdapter",
+    "annualise_salary",
     "application_route",
     "build_vacancy",
     "countries_from",
+    "country_terms",
     "country_from_location",
     "detect_language",
     "extract_jsonld",
@@ -940,6 +1238,8 @@ __all__ = [
     "normalise_work_arrangement",
     "parse_datetime",
     "parse_salary_text",
+    "query_terms",
+    "location_terms",
     "requested_page",
     "split_skills",
     "title_matches",

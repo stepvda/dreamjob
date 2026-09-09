@@ -41,27 +41,22 @@ class AshbyAdapter(ATSAdapter):
     legal_notes = "Public job-board posting API, no key required; read-only."
 
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        slug = self.slug_of(item)
-        url = API.format(slug=slug)
-        result = await self._get(url)
-        if result is None:
-            return []
-        return [
-            RawRecord(
-                url=url,
-                content=result.text,
-                content_type="application/json",
-                raw_document_id=result.raw_document_id,
-                meta={
-                    "slug": slug,
-                    "company_id": item.native_query.get("company_id"),
-                    "company_name": item.native_query.get("company_name"),
-                    "max_records": self.limit_of(item),
-                    "keywords": item.native_query.get("keywords") or [],
-                    "title_filter": item.native_query.get("title_filter"),
-                },
+        records: list[RawRecord] = []
+        for slug in self.slugs_of(item):
+            url = API.format(slug=slug)
+            result = await self._get(url)
+            if result is None:
+                continue
+            records.append(
+                RawRecord(
+                    url=url,
+                    content=result.text,
+                    content_type="application/json",
+                    raw_document_id=result.raw_document_id,
+                    meta=self.board_meta(item, slug),
+                )
             )
-        ]
+        return self.settle(records, nothing_to_fetch=self.no_board_named())
 
     def parse(self, raw: RawRecord) -> list[dict]:
         payload = json.loads(raw.content)

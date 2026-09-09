@@ -162,7 +162,10 @@ function Shell({ session, onSignOut }) {
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <h1>Dream Job</h1>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <img src="/icon-48.png" alt="" width={22} height={22} />
+            <h1>Dream Job</h1>
+          </div>
           <p>{session.display_name}</p>
         </div>
         {NAV.map((group) => (

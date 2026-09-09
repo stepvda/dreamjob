@@ -44,6 +44,7 @@ from dreamjob.adapters.base import (
     ToSStatus,
     register_adapter,
 )
+from dreamjob.adapters.query_errors import UnusableQuery
 from dreamjob.egress.client import EgressClient, RobotsDisallowed
 
 try:  # pragma: no cover - the fallback keeps unit tests importable everywhere
@@ -55,6 +56,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAGES = 30
 DEFAULT_MAX_DEPTH = 3
+#: Fewer pages than this cannot answer FR-221: the home page plus the handful
+#: of pages that carry the business description, the careers page and the team.
+MIN_CRAWL_PAGES = 8
 MAX_TEXT_CHARS = 24_000
 
 
@@ -240,28 +244,64 @@ def _path_tokens(url: str) -> list[str]:
     return [t for t in re.split(r"[^a-z0-9]+", raw) if t]
 
 
-def classify_url(url: str, anchor: str = "") -> tuple[str | None, float]:
-    """Best matching page kind for a link, with the strength of the match."""
-    tokens = set(_path_tokens(url))
-    path = urlparse(url).path.lower()
-    anchor_words = set(re.split(r"[^a-z0-9]+", (anchor or "").lower())) - {""}
+def _path_segments(url: str) -> list[str]:
+    return [s for s in urlparse(url).path.lower().split("/") if s]
 
-    best_kind: str | None = None
-    best_score = 0.0
+
+def _segment_hit(keyword: str, segments: list[str]) -> float:
+    """How strongly a keyword matches a path, anchored on whole segments.
+
+    Matching a keyword anywhere in the path made a case study
+    (``/customer/cases/energy-company/back-pressure-forecasting``) an *about*
+    page at full strength, because "company" appears inside a slug, and let
+    podcast episodes take the products and values quotas.  A whole segment is
+    a claim about the page; a word inside a long article slug is not.
+    """
+    best = 0.0
+    last = len(segments) - 1
+    for index, segment in enumerate(segments):
+        parts = [p for p in re.split(r"[^a-z0-9]+", segment) if p]
+        if segment == keyword:
+            hit = 1.0
+        elif "-" in keyword and keyword in segment:
+            hit = 0.9
+        elif keyword in parts:
+            hit = 1.0 if len(parts) == 1 else (0.8 if len(parts) == 2 else 0.5)
+        else:
+            continue
+        if index == last and (len(segments) >= 3 or len(parts) >= 4):
+            hit *= 0.55           # the tail of a deep path is an article slug
+        best = max(best, hit)
+    return best
+
+
+def classify_url_kinds(url: str, anchor: str = "", floor: float = 0.0) -> list[tuple[str, float]]:
+    """Every page kind a link matches, strongest first.
+
+    One page is often two things - ``/who-we-are/careers`` is an about page and
+    the careers page - and collapsing that to a single winner is why the crawl
+    could fetch a careers page and still report that it had found none.
+    """
+    segments = _path_segments(url)
+    anchor_words = set(re.split(r"[^a-z0-9]+", (anchor or "").lower())) - {""}
+    scored: list[tuple[str, float]] = []
     for kind, (keywords, weight, _quota) in PAGE_KINDS.items():
         hit = 0.0
         for keyword in keywords:
-            if keyword in tokens:
-                hit = max(hit, 1.0)
-            elif "-" in keyword and keyword in path:
-                hit = max(hit, 0.9)
-            elif keyword in anchor_words:
+            hit = max(hit, _segment_hit(keyword, segments))
+            if hit < 0.7 and keyword in anchor_words:
                 hit = max(hit, 0.7)
-        if hit:
-            score = hit * weight
-            if score > best_score:
-                best_kind, best_score = kind, score
-    return best_kind, best_score
+        score = hit * weight
+        if score > floor:
+            scored.append((kind, round(score, 4)))
+    scored.sort(key=lambda entry: entry[1], reverse=True)
+    return scored
+
+
+def classify_url(url: str, anchor: str = "") -> tuple[str | None, float]:
+    """Best matching page kind for a link, with the strength of the match."""
+    matches = classify_url_kinds(url, anchor)
+    return matches[0] if matches else (None, 0.0)
 
 
 def score_url(url: str, *, anchor: str = "", depth: int = 1, base_domain: str = "") -> float:
@@ -513,7 +553,7 @@ class WebsiteCrawler:
 
         while queue and len(result.pages) < self.max_pages:
             neg_score, _, url, anchor, depth = heapq.heappop(queue)
-            kind = "home" if depth == 0 else (classify_url(url, anchor)[0] or "other")
+            kind = "home" if depth == 0 else self._kind_for(url, anchor, per_kind)
             if depth > 0 and per_kind.get(kind, 0) >= self.quota(kind):
                 stats["skipped"] += 1
                 continue
@@ -574,6 +614,28 @@ class WebsiteCrawler:
         result.stats = stats
         return result
 
+    def _kind_for(self, url: str, anchor: str, per_kind: dict[str, int]) -> str:
+        """File a page under the best kind that still has budget left.
+
+        One page is often two things.  Filing ``/who-we-are/careers`` under its
+        single strongest kind meant it competed for the *about* quota - and lost
+        it to the actual about page, so the careers page of every site that
+        nests it was never fetched at all, taking the ATS detection and the
+        FR-225 postings signal with it.
+        """
+        matches = classify_url_kinds(url, anchor)
+        if not matches:
+            return "other"
+        # Only kinds this page really is - a second kind that scores far below
+        # the first is a coincidence (a "Join the beta" call to action on a
+        # product page), and filing the page under it would spend the wrong
+        # quota and name the wrong careers page.
+        floor = matches[0][1] * 0.75
+        for kind, score in matches:
+            if score >= floor and per_kind.get(kind, 0) < self.quota(kind):
+                return kind
+        return matches[0][0]
+
     def _absorb_page_metadata(
         self, result: CrawlResult, html: str, url: str, kind: str
     ) -> None:
@@ -584,7 +646,7 @@ class WebsiteCrawler:
         for block in organisation_jsonld(html):
             if block not in result.jsonld:
                 result.jsonld.append(block)
-        if kind == "careers" and not result.careers_url:
+        if not result.careers_url and is_careers_url(url, kind):
             result.careers_url = url
         if not result.ats_vendor:
             from dreamjob.adapters.ats.detect import detect_ats  # noqa: PLC0415
@@ -592,6 +654,29 @@ class WebsiteCrawler:
             vendor, slug = detect_ats(html, url)
             if vendor:
                 result.ats_vendor, result.ats_slug = vendor, slug
+
+
+#: How strongly a URL must read as a careers page before it is believed to be
+#: one.  ``/who-we-are/careers`` scores 0.85 here and 1.0 as an about page.
+CAREERS_FLOOR = 0.6
+
+
+def is_careers_url(url: str, kind: str | None = None) -> bool:
+    """Whether this page is the careers page, whatever kind it was filed under.
+
+    ``classify_url`` returns one winning kind, so a careers page that also
+    matches a stronger kind was filed elsewhere and ``careers_url`` stayed
+    empty - taking with it the ``postings`` hiring signal (FR-225) and the ATS
+    detection that the whole ATS family waits on.
+
+    The URL has to carry the claim itself: anchor text alone ("Join the beta")
+    is how a product page would otherwise be published as a company's careers
+    page, which is worse than having none.
+    """
+    score = max(
+        (value for found, value in classify_url_kinds(url) if found == "careers"), default=0.0
+    )
+    return score >= CAREERS_FLOOR or (kind == "careers" and score > 0)
 
 
 # ---------------------------------------------------------------------------
@@ -753,26 +838,109 @@ class CompanyWebsiteAdapter(SourceAdapter):
             )
         return items
 
+    def crawl_targets(self, query: dict) -> list[dict[str, Any]]:
+        """The sites one plan item stands for, whichever vocabulary named them.
+
+        This adapter reads ``url``; the campaign planner writes ``crawl_seeds``
+        (and leaves it empty); :meth:`plan` reads ``company_sites``.  Three
+        vocabularies for one contract meant every ``website.crawl`` plan item
+        fetched nothing and reported success, so all three are accepted - and
+        when none of them names a site, the knowledge base is asked for the
+        companies whose domain is known (FR-221, FR-341).
+        """
+        seen: set[str] = set()
+        targets: list[dict[str, Any]] = []
+
+        def add(url: Any, company_id: Any = None) -> None:
+            text = url if isinstance(url, str) else ""
+            if isinstance(url, dict):
+                text = str(url.get("url") or url.get("website") or "")
+                if not text and url.get("domain"):
+                    text = f"https://{str(url['domain']).strip().lstrip('/')}"
+                company_id = url.get("company_id") or url.get("id") or company_id
+            text = text.strip()
+            if text and not text.startswith(("http://", "https://")):
+                text = f"https://{text}"
+            normalised = normalise_url(text) if text else None
+            if not normalised or normalised in seen:
+                return
+            seen.add(normalised)
+            targets.append({"url": normalised, "company_id": company_id})
+
+        add(query.get("url"), query.get("company_id"))
+        for key in ("crawl_seeds", "company_sites", "sites", "companies", "urls"):
+            entries = query.get(key)
+            if isinstance(entries, list):
+                for entry in entries:
+                    add(entry)
+        if targets:
+            return targets
+
+        for row in self.known_company_sites(query):
+            add(row)
+        return targets
+
+    @staticmethod
+    def known_company_sites(query: dict, limit: int = 3) -> list[dict[str, Any]]:
+        """Companies already in the knowledge base that have a website (FR-341)."""
+        from dreamjob.db.repositories import companies as repo  # noqa: PLC0415 - avoids a cycle
+
+        countries = query.get("countries") or ([query["country"]] if query.get("country") else [])
+        country = str(countries[0]).upper()[:2] if countries else None
+        try:
+            rows = repo.companies_in_country(country, limit=200)
+        except Exception:  # noqa: BLE001 - an empty knowledge base is the normal first case
+            log.exception("Could not read companies for a website crawl")
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if not row.get("domain"):
+                continue
+            out.append({"domain": row["domain"], "company_id": row["id"]})
+            if len(out) >= limit:
+                break
+        return out
+
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
         query = item.native_query or {}
-        url = str(query.get("url") or "")
-        if not url:
-            return []
+        targets = self.crawl_targets(query)
+        if not targets:
+            raise UnusableQuery(
+                self.key,
+                "no company website to crawl: the plan item names none and no company in "
+                "the knowledge base has a domain yet - company discovery has to run before "
+                "the sites can be deepened (FR-221, FR-341)",
+                expected=("url", "crawl_seeds", "company_sites"),
+            )
+
+        # FR-186: one "page" of this adapter is a whole crawl, so the campaign's
+        # per-source page cap is what bounds it - otherwise a plan item charged
+        # as a single page quietly issues thirty requests.  The budget is per
+        # site, with a floor of MIN_CRAWL_PAGES: below that a crawl cannot reach
+        # the pages FR-221 asks for, so it would spend requests for nothing.
+        caps = getattr(item, "caps", None) or {}
+        budget = int(query.get("max_pages") or caps.get("max_pages") or DEFAULT_MAX_PAGES)
+        per_site = max(MIN_CRAWL_PAGES, min(budget, DEFAULT_MAX_PAGES))
         own_client = self.egress is None
         egress = self.egress or EgressClient()
         if own_client:
             await egress.__aenter__()
+        raws: list[RawRecord] = []
         try:
-            crawler = WebsiteCrawler(
-                egress,
-                max_pages=int(query.get("max_pages") or DEFAULT_MAX_PAGES),
-                max_depth=int(query.get("max_depth") or DEFAULT_MAX_DEPTH),
-            )
-            result = await crawler.crawl(url)
+            for target in targets:
+                crawler = WebsiteCrawler(
+                    egress,
+                    max_pages=per_site,
+                    max_depth=int(query.get("max_depth") or DEFAULT_MAX_DEPTH),
+                )
+                result = await crawler.crawl(target["url"])
+                raws.extend(self._to_raw(result, target.get("company_id")))
         finally:
             if own_client:
                 await egress.__aexit__(None, None, None)
+        return raws
 
+    def _to_raw(self, result: CrawlResult, company_id: Any) -> list[RawRecord]:
         return [
             RawRecord(
                 url=page.url,
@@ -782,7 +950,7 @@ class CompanyWebsiteAdapter(SourceAdapter):
                 meta={
                     "kind": page.kind,
                     "title": page.title,
-                    "company_id": query.get("company_id"),
+                    "company_id": company_id,
                     "home_url": result.home_url,
                     "domain": result.domain,
                     "careers_url": result.careers_url,
@@ -790,6 +958,9 @@ class CompanyWebsiteAdapter(SourceAdapter):
                     "ats_slug": result.ats_slug,
                     "feeds": result.feeds,
                     "jsonld": result.jsonld,
+                    # One "page" of this adapter is a whole crawl: FR-186 needs
+                    # the real request count to charge the campaign budget.
+                    "requests_issued": result.stats.get("fetched", 0),
                 },
             )
             for page in result.pages

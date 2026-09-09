@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     local_llm_tasks: str = Field("", alias="DREAMJOB_LOCAL_LLM_TASKS")
 
     default_token_budget: int = Field(2_000_000, alias="DREAMJOB_DEFAULT_TOKEN_BUDGET")
+    # How many opportunities of a campaign earn an LLM scoring call (NFR-104;
+    # docs/Data_Gathering_Plan.md N11).  A campaign can produce ~93,000
+    # opportunities and one call is ~10k tokens, so the whole corpus is ranked
+    # deterministically and only this many rows are also read by the model.
+    llm_scored_limit: int = Field(500, alias="DREAMJOB_LLM_SCORED_LIMIT")
     llm_cost_per_1m_input_eur: float = Field(0.25, alias="DREAMJOB_LLM_COST_PER_1M_INPUT_EUR")
     llm_cost_per_1m_output_eur: float = Field(1.00, alias="DREAMJOB_LLM_COST_PER_1M_OUTPUT_EUR")
 
@@ -82,11 +87,40 @@ class Settings(BaseSettings):
     http_max_concurrency: int = Field(20, alias="DREAMJOB_HTTP_MAX_CONCURRENCY")
     respect_robots: bool = Field(True, alias="DREAMJOB_RESPECT_ROBOTS")
 
+    # How long a failure is believed, so a gone page is not re-probed on every
+    # pass (FR-182; docs/Data_Gathering_Plan.md items N4/N7).  404 and 410 get
+    # this value; 429 and 5xx are re-probed after six hours, because "come back
+    # later" is what they mean.
+    negative_cache_ttl_seconds: int = Field(604_800, alias="DREAMJOB_NEGATIVE_CACHE_TTL_SECONDS")
+    # How long a stored page is kept before the pruner may reclaim it (DR-102):
+    # a weekly revalidation of 6,900 boards orphans ~160 MB a week otherwise.
+    raw_document_retention_days: int = Field(30, alias="DREAMJOB_RAW_DOCUMENT_RETENTION_DAYS")
+    # robots.txt says how fast as well as whether (FR-182): europa.eu asks for
+    # 10 s, api.lever.co for 1 s.  Off is for tests that must not sleep.
+    honour_crawl_delay: bool = Field(True, alias="DREAMJOB_HONOUR_CRAWL_DELAY")
+
     # --- Browser automation (FR-201..208) ----------------------------------
     cdp_url: str = Field("http://127.0.0.1:9222", alias="DREAMJOB_CDP_URL")
     browser_profile_dir: Path = Field(Path(".chrome-profile"), alias="DREAMJOB_BROWSER_PROFILE_DIR")
     browser_min_delay_ms: int = Field(2500, alias="DREAMJOB_BROWSER_MIN_DELAY_MS")
     browser_max_delay_ms: int = Field(6000, alias="DREAMJOB_BROWSER_MAX_DELAY_MS")
+
+    # --- Observability (NFR-701, NFR-702) ----------------------------------
+    # Everything the operator needs to read after the fact lands under
+    # ``log_dir``.  Rotation is sized so a week of ordinary use fits on disk
+    # without anyone having to remember to prune it.
+    log_dir: Path = Field(Path("logs"), alias="DREAMJOB_LOG_DIR")
+    log_level: str = Field("INFO", alias="DREAMJOB_LOG_LEVEL")
+    log_format: str = Field("text", alias="DREAMJOB_LOG_FORMAT")
+    log_max_mb: int = Field(10, alias="DREAMJOB_LOG_MAX_MB")
+    log_backups: int = Field(5, alias="DREAMJOB_LOG_BACKUPS")
+    log_slow_request_ms: int = Field(1500, alias="DREAMJOB_LOG_SLOW_REQUEST_MS")
+
+    # Statement tracing costs a Python callback per statement, so it is a flag:
+    # unset means on outside production.  The slow-query threshold is the one
+    # number that turns logs/database.log into a missing-index report.
+    log_sql: bool | None = Field(None, alias="DREAMJOB_LOG_SQL")
+    log_slow_query_ms: int = Field(200, alias="DREAMJOB_LOG_SLOW_QUERY_MS")
 
     # --- Misc --------------------------------------------------------------
     geocoder_url: str = Field("https://nominatim.openstreetmap.org", alias="DREAMJOB_GEOCODER_URL")
@@ -110,6 +144,11 @@ class Settings(BaseSettings):
     @property
     def abs_db_path(self) -> Path:
         p = self.db_path
+        return p if p.is_absolute() else REPO_ROOT / p
+
+    @property
+    def abs_log_dir(self) -> Path:
+        p = self.log_dir
         return p if p.is_absolute() else REPO_ROOT / p
 
     @property
@@ -142,7 +181,13 @@ class Settings(BaseSettings):
         return raw
 
     def ensure_dirs(self) -> None:
-        for d in (self.abs_data_dir, self.raw_dir, self.generated_dir, self.uploads_dir):
+        for d in (
+            self.abs_data_dir,
+            self.raw_dir,
+            self.generated_dir,
+            self.uploads_dir,
+            self.abs_log_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
         self.abs_db_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -331,7 +331,19 @@ async def build_profile(
     values, meta = _assemble(company, crawl, deterministic, synthesis, document_by_url)
     if values:
         kb_repo.update_company(company_id, values)
-    repo.record_field_provenance(company_id, meta, source_plan_item_id=source_plan_item_id)
+    if meta:
+        # ``record_field_provenance`` replaces this adapter's whole set, so
+        # writing an empty one deletes the confidences and sources of fields
+        # that are still on the row.  A degraded run (no LLM, budget spent,
+        # LLMError - see ``_synthesise``) produces exactly that empty set, and
+        # NFR-402 would go blank for a company that is perfectly well profiled.
+        repo.record_field_provenance(company_id, meta, source_plan_item_id=source_plan_item_id)
+    elif values:
+        log.info(
+            "Profile of %s was written without per-field provenance (degraded synthesis); "
+            "the provenance already on record is kept (NFR-402)",
+            company_id,
+        )
 
     anomalies = [str(a)[:300] for a in (synthesis.get("anomalies") or []) if a][:10]
     return ProfileOutcome(
@@ -859,6 +871,100 @@ async def refresh_company(
         report["competitors"] = {"error": str(exc)[:300]}
 
     return report
+
+
+async def rerun(campaign_id: str, job_seeker_id: str, **options: Any) -> dict[str, Any]:
+    """Profile the campaign's companies, with their signals and competitors.
+
+    ``dreamjob.pipeline.collection`` reserves the ``company_profile`` stage for
+    this module and resolves it by name; until this function existed the stage
+    silently did not exist, ``refresh_company`` had no caller anywhere in the
+    backend, and ``hiring_signal`` and ``competitor_link`` stayed empty however
+    well collection ran (FR-221..226, NFR-603).
+    """
+    force = bool(options.get("force", False))
+    companies = campaign_companies(
+        campaign_id, limit=int(options.get("limit") or 25), include_fresh=force
+    )
+    if not companies:
+        return {
+            "companies": 0,
+            "profiled": 0,
+            "note": "No company is in scope yet; collection has produced none",
+        }
+
+    use_llm = bool(options.get("use_llm", True))
+    max_pages = int(options.get("max_pages") or crawler.DEFAULT_MAX_PAGES)
+    report: dict[str, Any] = {
+        "companies": len(companies),
+        "profiled": 0,
+        "reused": 0,
+        "signals": 0,
+        "competitors": 0,
+        "failed": 0,
+    }
+    for company_id in companies:
+        try:
+            outcome = await refresh_company(
+                company_id,
+                force=force,
+                max_pages=max_pages,
+                use_llm=use_llm,
+                campaign_id=campaign_id,
+                job_seeker_id=job_seeker_id,
+            )
+        except Exception:  # noqa: BLE001 - one company must not stop the stage
+            log.exception("Company refresh failed for %s", company_id)
+            report["failed"] += 1
+            continue
+        profile = outcome.get("profile") or {}
+        report["reused" if profile.get("reused") else "profiled"] += 1
+        report["signals"] += int((outcome.get("signals") or {}).get("count") or 0)
+        report["competitors"] += int((outcome.get("competitors") or {}).get("count") or 0)
+    return report
+
+
+def campaign_companies(
+    campaign_id: str, limit: int = 25, *, include_fresh: bool = False
+) -> list[str]:
+    """Companies this campaign collected, then any shared profile that is stale.
+
+    Provenance (FR-166) is the campaign's own answer; it is empty whenever the
+    campaign's collection wrote nothing, and a company row created without
+    provenance would then never be profiled at all.  So the staleness policy
+    (FR-343) fills the rest, and a company that has never been profiled at all
+    is included whatever its age - staleness is about *re*-profiling.
+
+    ``include_fresh`` is what a forced re-run needs: the user has asked for the
+    crawl to happen again, so the freshness gate is not the one to consult.
+    """
+    from dreamjob.db.repositories import opportunities as opp_repo  # noqa: PLC0415 - avoids a cycle
+
+    out: list[str] = []
+    try:
+        out.extend(opp_repo.campaign_company_ids(campaign_id))
+    except Exception:  # noqa: BLE001 - provenance is an optimisation, not a gate
+        log.exception("Could not read the campaign's company provenance")
+    seen = set(out)
+    if len(out) < limit:
+        for row in due_for_refresh(limit=limit - len(out)):
+            if row["id"] not in seen:
+                seen.add(row["id"])
+                out.append(str(row["id"]))
+    if len(out) < limit:
+        # A company collected an hour ago is not stale, but it has never been
+        # profiled either - and FR-226 staleness is about *re*-profiling.
+        # ``build_profile`` still reuses anything that is genuinely fresh.
+        for row in repo.companies_in_country(None, limit=200):
+            if row["id"] in seen:
+                continue
+            if not include_fresh and row.get("business_summary"):
+                continue
+            seen.add(row["id"])
+            out.append(str(row["id"]))
+            if len(out) >= limit:
+                break
+    return out[:limit]
 
 
 def due_for_refresh(limit: int = 50, max_age_days: int | None = None) -> list[dict]:

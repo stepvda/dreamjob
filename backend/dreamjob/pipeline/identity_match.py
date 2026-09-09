@@ -100,6 +100,11 @@ SHARED_PLATFORMS = frozenset(
         "slideshare.net", "researchgate.net", "orcid.org", "stackoverflow.com",
         "behance.net", "dribbble.com", "gitbook.io", "netlify.app", "vercel.app",
         "pages.dev", "readthedocs.io",
+        # Account-in-path platforms.  The account is the last meaningful path
+        # segment, never the domain label.
+        "linkedin.com", "x.com", "twitter.com", "instagram.com", "facebook.com",
+        "tiktok.com", "pinterest.com", "reddit.com", "angel.co", "crunchbase.com",
+        "producthunt.com", "indeed.com", "glassdoor.com",
     }
 )
 
@@ -230,6 +235,10 @@ class ProfileAnchors:
     display_name: str = ""
     variants: set[str] = field(default_factory=set)
     handles: list[str] = field(default_factory=list)
+    # Handles that came from a declared URL, not guessed from the name.  These
+    # are the only ones safe to probe on a third-party platform; a guessed
+    # handle (e.g. "stephaneaa") almost always probes a non-existent account.
+    real_handles: set[str] = field(default_factory=set)
     employers: list[str] = field(default_factory=list)
     locations: list[str] = field(default_factory=list)
     titles: list[str] = field(default_factory=list)
@@ -276,6 +285,7 @@ class ProfileAnchors:
             "display_name": self.display_name,
             "variants": sorted(self.variants),
             "handles": self.handles,
+            "real_handles": sorted(self.real_handles),
             "employers": self.employers,
             "locations": self.locations,
             "titles": self.titles,
@@ -371,6 +381,13 @@ def build_anchors(
             if candidate in anchors.handles:
                 anchors.handles.remove(candidate)
             anchors.handles.insert(0, candidate)
+            # Only a handle that identifies the person *on a shared platform*
+            # is a safe probe: "github.com/stepvda" -> stepvda.  A bare-domain
+            # label ("amzn.eu/d/..." -> amzn, "archive.org" -> archive, "one.
+            # witysk.org" -> witysk) is a site or a brand, not a username, and
+            # probing github.com/archive would hit a stranger's account.
+            if _on_shared_platform(url):
+                anchors.real_handles.add(candidate)
     return anchors
 
 
@@ -380,17 +397,41 @@ _GENERIC_LABELS = frozenset(
 )
 
 
+def _on_shared_platform(url: str) -> bool:
+    """Is this URL a multi-tenant platform where the path/subdomain is an account?
+
+    Like ``_handles_from_url``, this must normalise the URL first: a scheme-less
+    ``github.com/stepvda`` made ``registrable_domain`` return the whole
+    path-bearing string and report "not a shared platform".
+    """
+    return is_shared_platform(registrable_domain(_with_scheme(url)))
+
+
+def _with_scheme(url: str) -> str:
+    return url if "//" in url else f"https://{url}"
+
+
 def _handles_from_url(url: str) -> list[str]:
-    parsed = urlparse(url if "//" in url else f"https://{url}")
+    # Normalise once: registrable_domain() must never see a scheme-less URL,
+    # because urlparse() then yields an empty netloc and the registrable domain
+    # comes back as the raw path-bearing string ("github.com/stepvda"), which is
+    # neither a shared platform nor a clean 2-label domain - so every handle
+    # derived from a declared link gets mangled.
+    url = url if "//" in url else f"https://{url}"
+    parsed = urlparse(url)
     domain = registrable_domain(url)
     labels = domain.split(".")
     out: list[str] = []
 
     if is_shared_platform(domain):
-        head = parsed.path.strip("/").split("/")[0].lstrip("@").lower()
+        # The account sits in the path for most platforms
+        # ("github.com/stepvda" -> "stepvda"), and in the subdomain for a few
+        # ("stepvda.substack.com" -> "stepvda").  The domain's own label
+        # ("github", "linkedin") is never the account.
+        path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+        head = (path_parts[-1] if path_parts else "").lstrip("@").lower()
         if head and head not in _GENERIC_LABELS:
             out.append(head)
-        # "stepvda.substack.com" - the subdomain is the account.
         if len(labels) > 2 and labels[0] not in _GENERIC_LABELS:
             out.append(labels[0])
     elif len(labels) >= 2:

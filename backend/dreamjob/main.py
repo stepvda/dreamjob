@@ -12,7 +12,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from dreamjob.config import REPO_ROOT, get_settings
 from dreamjob.db.migrator import migrate
+from dreamjob.observability import RequestLogMiddleware, setup_logging
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ ROUTERS: list[tuple[str, str, str]] = [
     ("intelligence", "/api/intelligence", "Dream-job intelligence"),# FR-381..385, FR-441..444
     ("networking",   "/api/networking",   "Networking & export"),   # FR-461..463
     ("admin",        "/api/admin",        "Administration"),        # FR-361..364
+    ("logs",         "/api/logs",         "Logging"),               # NFR-701, NFR-702
     ("overview",     "/api/overview",     "Journey"),               # workflow map
     ("learning",     "/api/learning",     "Responses & learning"),  # FR-285, FR-425
 ]
@@ -50,6 +52,9 @@ ROUTERS: list[tuple[str, str, str]] = [
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     settings.ensure_dirs()
+    # First, so that everything below is already on the record (NFR-701).
+    log_dir = setup_logging()
+    log.info("Dream Job starting", extra={"fields": {"env": settings.env, "logs": str(log_dir)}})
     applied = migrate()
     if applied:
         log.info("Applied migrations: %s", ", ".join(applied))
@@ -128,7 +133,12 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # So the SPA can read the id its request was logged under (NFR-701).
+        expose_headers=["X-Correlation-ID"],
     )
+
+    # Added last, so it is the outermost layer and times the whole request.
+    app.add_middleware(RequestLogMiddleware)
 
     # Turn FastAPI's array-of-objects validation detail into one readable line.
     # Without this, a bad field surfaces as a useless "Request failed (422)".
@@ -180,7 +190,7 @@ def main() -> None:  # pragma: no cover
     import uvicorn
 
     s = get_settings()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    setup_logging()
     uvicorn.run("dreamjob.main:app", host=s.host, port=s.port, reload=s.env == "development")
 
 

@@ -117,6 +117,26 @@ class WriteOutcome:
     matched_on: str | None = None
 
 
+@dataclass
+class WriteFailure:
+    """A record the writer refused or could not store.
+
+    Counting these is what stops a plan item whose every record was rejected
+    from being reported as "done, 0 records, 0 errors" (FR-166, NFR-403): the
+    collection worker reads :attr:`KnowledgeBaseWriter.failures` and bumps the
+    plan item's error count from it.
+    """
+
+    entity_type: str
+    reason: str  # unusable_record | rejected | write_error
+    detail: str = ""
+
+    def describe(self) -> str:
+        return f"{self.entity_type or 'unknown'}: {self.reason}" + (
+            f" ({self.detail})" if self.detail else ""
+        )
+
+
 # Natural keys for the shared tables that have no fuzzy identity of their own.
 _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "financial_year": ("company_id", "fiscal_year"),
@@ -127,6 +147,10 @@ _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 _EMPTY = (None, "", [], {})
+
+# An employer name read off a job advert identifies a company, but weakly: it
+# has no identifier, no domain and no jurisdiction beyond the vacancy's own.
+VACANCY_COMPANY_CONFIDENCE = 0.5
 
 
 class KnowledgeBaseWriter:
@@ -151,27 +175,48 @@ class KnowledgeBaseWriter:
         self.stats: dict[str, dict[str, int]] = {}
         self.company_ids: set[str] = set()
         self.people_ids: set[str] = set()
+        # Records that never reached a table.  A silent drop is a failure, and
+        # a failure has to be visible to the plan item that produced it.
+        self.failures: list[WriteFailure] = []
 
     # -- public API ---------------------------------------------------------
     def write(self, record: Any) -> WriteOutcome | None:
-        """Persist one ``NormalisedRecord`` (or an equivalent dict)."""
+        """Persist one ``NormalisedRecord`` (or an equivalent dict).
+
+        Returns ``None`` when nothing was stored - and records *why* in
+        :attr:`failures`, so a source whose every record was refused can never
+        look like a source that simply found nothing (FR-166, NFR-403).
+        """
         entity_type, data, confidence, raw_document_id = _unpack(record)
         if not entity_type or not isinstance(data, dict) or not data:
+            self._fail(
+                entity_type,
+                "unusable_record",
+                f"expected an entity_type and a non-empty data dict, got {type(record).__name__}",
+            )
             return None
         data = self._strip_private(entity_type, dict(data))
         try:
             if entity_type == "company":
                 outcome = self._write_company(data, confidence)
             elif entity_type == "vacancy":
-                outcome = self._write_vacancy(data, confidence)
+                outcome = self._write_vacancy(data, confidence, raw_document_id)
             else:
                 outcome = self._write_generic(entity_type, data, confidence)
-        except Exception:  # noqa: BLE001 - one bad record must not stop a campaign
+        except Exception as exc:  # noqa: BLE001 - one bad record must not stop a campaign
             log.exception("Knowledge-base write failed for a %s record", entity_type)
+            self._fail(entity_type, "write_error", f"{type(exc).__name__}: {exc}")
             return None
         if outcome is None:
+            self._fail(entity_type, "rejected", "the record carried no usable identity")
             return None
         self._count(outcome)
+        self._record_provenance(outcome, raw_document_id, confidence)
+        return outcome
+
+    def _record_provenance(
+        self, outcome: WriteOutcome, raw_document_id: str | None, confidence: float
+    ) -> None:
         repo.record_provenance(
             outcome.entity_type,
             outcome.entity_id,
@@ -180,7 +225,11 @@ class KnowledgeBaseWriter:
             adapter_key=self.adapter_key,
             confidence=confidence,
         )
-        return outcome
+
+    def _fail(self, entity_type: str, reason: str, detail: str = "") -> None:
+        failure = WriteFailure(entity_type or "", reason, detail)
+        self.failures.append(failure)
+        log.warning("Knowledge-base write dropped a record - %s", failure.describe())
 
     def write_many(self, records: list[Any]) -> list[WriteOutcome]:
         return [o for o in (self.write(r) for r in records) if o is not None]
@@ -189,12 +238,22 @@ class KnowledgeBaseWriter:
     def total_written(self) -> int:
         return sum(c["created"] + c["updated"] for c in self.stats.values())
 
+    @property
+    def total_failed(self) -> int:
+        return len(self.failures)
+
+    @property
+    def last_failure(self) -> str | None:
+        return self.failures[-1].describe() if self.failures else None
+
     def summary(self) -> dict[str, Any]:
         return {
             "by_entity": self.stats,
             "companies": len(self.company_ids),
             "people": len(self.people_ids),
             "total": self.total_written,
+            "failed": self.total_failed,
+            "failures": [f.describe() for f in self.failures[:20]],
         }
 
     # -- internals ----------------------------------------------------------
@@ -238,16 +297,14 @@ class KnowledgeBaseWriter:
         data.setdefault("confidence", confidence)
         return WriteOutcome("company", repo.insert_company(data), created=True)
 
-    def _write_vacancy(self, data: dict, confidence: float) -> WriteOutcome | None:
+    def _write_vacancy(
+        self, data: dict, confidence: float, raw_document_id: str | None = None
+    ) -> WriteOutcome | None:
         if not data.get("title"):
             return None
         data = dict(data)
         if not data.get("company_id") and data.get("company_name_raw"):
-            company, _ = resolve_company(
-                {"name": data["company_name_raw"], "country": data.get("country")}
-            )
-            if company:
-                data["company_id"] = company["id"]
+            data["company_id"] = self._company_for_vacancy(data, raw_document_id)
         dedup.assign_dedup_key(data)
         if self.adapter_key:
             data.setdefault("source_adapter", self.adapter_key)
@@ -268,6 +325,11 @@ class KnowledgeBaseWriter:
         now = utcnow()
         if existing:
             merged = _merge(existing, data)
+            # FR-184: a merge enriches the posting we already hold, it does
+            # not re-label it.  A different title is a different opening, so the
+            # surviving row keeps the title it was created with - overwriting it
+            # is what turns a bad match into an invisible one.
+            merged.pop("title", None)
             merged["collected_at"] = now
             merged["confidence"] = max(
                 float(existing.get("confidence") or 0), float(confidence or 0)
@@ -277,6 +339,35 @@ class KnowledgeBaseWriter:
         data["collected_at"] = now
         data.setdefault("confidence", confidence)
         return WriteOutcome("vacancy", repo.insert_vacancy(data), created=True)
+
+    def _company_for_vacancy(self, data: dict, raw_document_id: str | None) -> str | None:
+        """The knowledge-base company this posting belongs to, creating it if new.
+
+        A vacancy names its employer, and until this ran nothing turned that
+        name into a ``company`` row: the ATS and board adapters - the ones that
+        actually retrieve - wrote vacancies with ``company_id`` NULL, so
+        ``financial_year``, ``hiring_signal`` and ``competitor_link`` (all
+        ``company_id NOT NULL``) could never be populated and no company ever
+        acquired an ``ats_vendor``/``ats_slug`` for the next campaign to read.
+        """
+        # The identity claim is the employer's name and nothing else.  A
+        # vacancy's country is where the *job* is, not where the company is
+        # registered: stamping it on the company row makes one employer with
+        # openings in five countries five companies.
+        seed: dict[str, Any] = {"name": data.get("company_name_raw")}
+        if data.get("access_method"):
+            seed["access_method"] = data["access_method"]  # FR-207: how it was obtained
+        company, _ = resolve_company(seed)
+        if company:
+            return str(company["id"])
+        # A name off an advert is a weaker claim than a registry or a website
+        # crawl, so it enters with a low confidence and is merged, not trusted.
+        outcome = self._write_company(dict(seed), VACANCY_COMPANY_CONFIDENCE)
+        if outcome is None:
+            return None
+        self._count(outcome)
+        self._record_provenance(outcome, raw_document_id, VACANCY_COMPANY_CONFIDENCE)
+        return outcome.entity_id
 
     def _write_generic(
         self, entity_type: str, data: dict, confidence: float

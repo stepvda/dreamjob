@@ -107,7 +107,12 @@ class IndeedAdapter(HtmlBoardAdapter):
                         meta={"kind": "api", "cfg": cfg},
                     )
                 )
-        return records
+        # FR-185: a licence that the API refuses is a failed plan item, not an
+        # empty result set.
+        return self.settle(
+            records,
+            nothing_to_fetch="the licensed API needs api_base, api_key and a query",
+        )
 
     def parse(self, raw: RawRecord) -> list[dict]:
         if raw.meta.get("kind") != "api":

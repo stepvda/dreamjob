@@ -32,3 +32,10 @@ data/
 
 # OS
 .DS_Store
+
+# Runtime logs (NFR-701).  ``logs/*`` rather than ``logs/``: git cannot
+# re-include a file whose parent directory is itself excluded, and the
+# directory has to survive a fresh clone so setup_logging() has somewhere to
+# write before it has written anything.
+logs/*
+!logs/.gitkeep

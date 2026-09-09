@@ -306,12 +306,14 @@ def test_replan_keeps_the_plan_item_a_collected_record_points_at(db):
             "confidence": 0.8,
         }
     )
-    assert campaign_repo.collected_counts(campaign_id) == {"vacancy": 1}
+    # The posting names its employer, and the writer turns that name into a
+    # company row so the company-scoped tables have something to hang off.
+    assert campaign_repo.collected_counts(campaign_id) == {"vacancy": 1, "company": 1}
 
     again = planning.generate_plan(campaign_id, seeker, use_llm=False)
     reused = next(i for i in again["items"] if i["adapter_key"] == "vdab")
     assert reused["id"] == item["id"], "the row a record points at is reused, not replaced"
-    assert campaign_repo.collected_counts(campaign_id) == {"vacancy": 1}
+    assert campaign_repo.collected_counts(campaign_id) == {"vacancy": 1, "company": 1}
     live = {i["id"] for i in campaign_repo.list_plan_items(campaign_id)}
     dangling = [
         r
@@ -569,12 +571,18 @@ def test_collection_runs_the_plan_and_records_provenance(db):
     assert done["records_collected"] == 6
     assert done["error_count"] == 0
 
-    # FR-166: every record is linked to the plan item that produced it.
+    # FR-166: every record is linked to the plan item that produced it - the six
+    # postings plus the employer they all name, which the writer creates so that
+    # company_id is not NULL on a single one of them.
     provenance = query_all(
         "SELECT * FROM provenance WHERE source_plan_item_id = ?", (item["id"],)
     )
-    assert len(provenance) == 6
+    assert len(provenance) == 7
+    assert {p["entity_type"] for p in provenance} == {"vacancy", "company"}
     assert {p["adapter_key"] for p in provenance} == {"stub_board"}
+    companies = query_all("SELECT * FROM company")
+    assert [c["name"] for c in companies] == ["Acme NV"]
+    assert all(v["company_id"] == companies[0]["id"] for v in vacancies)
 
     # NFR-401: the checkpoint records the last completed page.
     job = query_one("SELECT * FROM job_run WHERE id = ?", (job_id,))

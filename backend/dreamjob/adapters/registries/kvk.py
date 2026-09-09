@@ -84,14 +84,15 @@ class KvKAdapter(RegistryAdapter):
             result.note(self.unavailable_reason())
             return result
 
-        number = self.kvk_number(company)
-        if not number and company.get("name"):
-            number = await self.search(str(company["name"]), egress=egress)
-        if not number:
-            result.note("No KvK number could be resolved")
-            return result
+        async with self.session(egress) as client:
+            number = self.kvk_number(company)
+            if not number and company.get("name"):
+                number = await self.search(str(company["name"]), egress=client)
+            if not number:
+                result.note("No KvK number could be resolved")
+                return result
 
-        profile = await self._json(PROFILE_URL.format(kvk=number), egress=egress)
+            profile = await self._json(PROFILE_URL.format(kvk=number), egress=client)
         if not isinstance(profile, dict):
             result.note(f"KvK basisprofiel unavailable for {number}")
             return result

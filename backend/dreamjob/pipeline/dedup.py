@@ -17,6 +17,16 @@ The similarity measure is a token-set ratio built on ``difflib``: word order
 and duplicated qualifiers stop mattering, which is what distinguishes
 "Data Engineer (m/v) - Gent" from "Gent | Data engineer" as the same posting.
 No third-party fuzzy-matching dependency is used.
+
+A plausible similarity measure destroys a corpus quietly, because a wrong merge
+looks exactly like a successful de-duplication: on real boards the previous
+settings merged 18% of genuinely distinct openings and reduced a 227-posting
+board to six rows (docs/Data_Gathering_Plan.md section 3 step 9 and section 5,
+C4/N6).  Three rules keep the fuzzy comparison honest, and each of them is a
+regression test in ``tests/unit/test_dedup_guards.py``: two stated, different
+locations veto a merge outright; a differing number is a level or a reference,
+never noise; and an unknown location no longer scores high enough to carry a
+pair over the threshold by itself.
 """
 
 from __future__ import annotations
@@ -58,7 +68,21 @@ TITLE_STOPWORDS = frozenset(
 _DOTTED_ABBREV = re.compile(r"\b(?:[a-z]\.){2,}")
 _NON_WORD = re.compile(r"[^0-9a-z]+")
 _BRACKETED = re.compile(r"[(\[{][^)\]}]*[)\]}]")
-_POSTCODE = re.compile(r"\b\d{4,6}\b")
+_BRACKETED_TEXT = re.compile(r"[(\[{]([^)\]}]*)[)\]}]")
+
+# A number that introduces a place is a postcode - "9000 Gent", "1012 AB
+# Amsterdam" - and says where, not which opening.  A number that stands on its
+# own is a level or a reference ("Magazijnier 100234", "Support Engineer 6") and
+# is identity, so only the postcode shape is stripped (FR-184).  Benelux
+# postcodes are four digits, optionally followed by the Dutch two-letter suffix.
+_POSTCODE_BEFORE_PLACE = re.compile(r"\b\d{4}(?:\s?[A-Za-z]{2})?\b(?=\s+[^\W\d_])")
+
+# Contract terms, not identity: "(80%)", "0,8 FTE", "38u/week", "(4/5)".
+_WORKLOAD = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:%|(?:fte|vte|etp|uur|uren|hours?|heures|std|u|h)\b)",
+    re.IGNORECASE,
+)
+_WORKLOAD_FRACTION = re.compile(r"\b\d\s*/\s*\d\b")
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +157,45 @@ def normalise_location(value: str | None) -> str:
     return " ".join(sorted(set(parts)))
 
 
+def _bears_digit(token: str) -> bool:
+    return any(ch.isdigit() for ch in token)
+
+
+def _strip_workload(value: str) -> str:
+    """Remove the part-time notations that say *how much*, not *which opening*."""
+    return _WORKLOAD_FRACTION.sub(" ", _WORKLOAD.sub(" ", value))
+
+
+def title_numbers(value: str | None) -> set[str]:
+    """The numeric tokens a title uses as a level or a reference (FR-184).
+
+    Brackets are read too, because "Support Engineer (Level 6)" and
+    "(Level 7)" are two openings and ``normalise_title`` used to throw both the
+    bracket and the number away, which merged them at 0.96
+    (docs/Data_Gathering_Plan.md section 5, N6).  A postcode and a workload are
+    not references, so they are removed before the numbers are read.
+    """
+    text = _POSTCODE_BEFORE_PLACE.sub(" ", _strip_workload(value or ""))
+    return {t for t in tokens(text) if _bears_digit(t)}
+
+
 def normalise_title(value: str | None) -> str:
-    """Job title reduced to its identifying words, order-independent."""
-    text = _BRACKETED.sub(" ", value or "")
-    text = _POSTCODE.sub(" ", text)  # a postcode in the title is location, not identity
-    # Small numbers are kept: "Support Engineer 2" is not "Support Engineer 3".
+    """Job title reduced to its identifying words, order-independent.
+
+    Numbers are identity (FR-184): "Magazijnier 100234" and "Magazijnier
+    100567" are two openings with two references, and stripping every 4-6 digit
+    group as a postcode collapsed a whole board onto one row per role name.
+    Only a postcode that introduces a place ("9000 Gent") and a workload
+    ("(80%)", "4/5", "0,8 FTE") are dropped; every other number survives,
+    including one inside a bracket that the prose part of this function throws
+    away.
+    """
+    text = _strip_workload(value or "")
+    numbers = title_numbers(value)
+    text = _BRACKETED.sub(" ", text)
+    text = _POSTCODE_BEFORE_PLACE.sub(" ", text)
     parts = [t for t in tokens(text) if t not in TITLE_STOPWORDS]
-    return " ".join(sorted(set(parts)))
+    return " ".join(sorted(set(parts) | numbers))
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +211,31 @@ def _ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _vocabulary_overlap(ta: set[str], tb: set[str]) -> float:
+    """How much of the *identity-bearing* vocabulary the two sides share.
+
+    Noise words - gender markers, articles, "fulltime" - are excluded, so
+    "Data Engineer (m/v) - Gent" and "Gent | Data engineer" still overlap
+    completely, while "Product Manager" and "Product Marketing Manager" do not.
+    """
+    sa, sb = ta - TITLE_STOPWORDS, tb - TITLE_STOPWORDS
+    if sa == sb:
+        return 1.0
+    union = sa | sb
+    if not union:
+        return 1.0
+    return len(sa & sb) / len(union)
+
+
 def token_set_ratio(a: str, b: str) -> float:
     """Order-independent similarity in ``0..1`` (no third-party dependency).
 
-    The shared tokens are compared against each side's full token set, so a
-    string that merely adds qualifiers to the other still scores highly.
+    The shared tokens are compared against each side's full token set, so word
+    order and duplicated qualifiers stop mattering.  That string comparison
+    alone scores a *subset* as a perfect match - "product manager" against
+    "product marketing manager" is 1.000 - which merged distinct openings onto
+    one row (FR-184), so it is scaled by how much identity-bearing vocabulary
+    the two sides actually share.
     """
     ta, tb = set(tokens(a)), set(tokens(b))
     if not ta or not tb:
@@ -169,7 +245,8 @@ def token_set_ratio(a: str, b: str) -> float:
     common = " ".join(sorted(ta & tb))
     left = " ".join(sorted(ta & tb) + sorted(ta - tb)).strip()
     right = " ".join(sorted(ta & tb) + sorted(tb - ta)).strip()
-    return max(_ratio(common, left), _ratio(common, right), _ratio(left, right))
+    ratio = max(_ratio(common, left), _ratio(common, right), _ratio(left, right))
+    return ratio * _vocabulary_overlap(ta, tb)
 
 
 def company_similarity(a: str | None, b: str | None) -> float:
@@ -260,48 +337,166 @@ def assign_dedup_key(vacancy: dict) -> str:
     return key
 
 
-VACANCY_MATCH_THRESHOLD = 0.86
+# Measured on real boards (docs/Data_Gathering_Plan.md section 3 step 9 and
+# section 5 C4): 0.86 merged 18% of genuinely distinct openings, 0.92 retains
+# 95.5%.  Nothing that matters is lost by raising it - an exact repost still
+# collapses on ``dedup_key`` without ever reaching the fuzzy comparison.
+VACANCY_MATCH_THRESHOLD = 0.92
 
-# A token-set ratio treats a subset as a perfect match, which is right for
-# "Data Engineer" vs "Gent | Data engineer" but wrong for "Data Engineer" vs
-# "Senior Data Engineer": those are two openings, not one record seen twice.
+# A subset is not an identity: "Data Engineer" vs "Gent | Data engineer" is one
+# posting, but "Data Engineer" vs "Senior Data Engineer" - or vs "Data Engineer,
+# Unstructured AI" - is two openings, not one record seen twice.
+#
+# Numerals beyond v are covered by the numeric guard in ``title_similarity``;
+# "x" is deliberately absent because Benelux boards use it as a gender marker
+# ("m/v/x"), not as a level.
 LEVEL_MARKERS = frozenset(
     """
     senior sr junior jr medior lead leading principal staff head chief
     intern internship graduate trainee associate assistant deputy
     director manager officer
-    i ii iii iv v 1 2 3 4 5
+    i ii iii iv v vi vii viii ix
+    1 2 3 4 5
     """.split()
 )
 
+# Ceiling for a title that names something the other title does not.  On a
+# single employer's board, company, location and recency can all score 1.0 by
+# construction, which hands any pair 0.55 for free; 0.45 * 0.5 + 0.55 = 0.775
+# keeps such a pair below VACANCY_MATCH_THRESHOLD however perfectly the rest of
+# the record agrees.
+DISTINCT_TITLE_CEILING = 0.5
 
-def title_similarity(a: str | None, b: str | None) -> float:
-    """Title match that refuses to merge two different seniority levels (FR-184)."""
+
+def title_qualifiers(value: str | None) -> set[str]:
+    """Identity-bearing words inside brackets.
+
+    ``normalise_title`` throws bracketed text away, which is right for
+    "(m/v)" and wrong for "Implementation Specialist - Americas (EST)" against
+    "... (PST)", or "Account Executive - Americas (West)" against "(East)":
+    those are two openings on one real board, and dropping the bracket made
+    them identical.
+    """
+    out: set[str] = set()
+    for inner in _BRACKETED_TEXT.findall(value or ""):
+        out |= {t for t in tokens(inner) if t not in TITLE_STOPWORDS and not t.isdigit()}
+    return out
+
+
+def title_similarity(
+    a: str | None, b: str | None, *, ignore: frozenset[str] | set[str] = frozenset()
+) -> float:
+    """Title match that refuses to merge two different openings (FR-184).
+
+    ``ignore`` carries the words a board may glue onto a title without changing
+    which opening it is - the city and the employer's own name - so
+    "Data Engineer - Gent" still matches "Data Engineer" at that employer in
+    Gent, while "Senior AI Engineer, Unstructured AI" does not match
+    "Senior AI Engineer": "unstructured" names a different role.
+    """
     ta, tb = set(tokens(normalise_title(a))), set(tokens(normalise_title(b)))
     if not ta or not tb:
         return 0.0
     ratio = token_set_ratio(" ".join(sorted(ta)), " ".join(sorted(tb)))
-    if (ta ^ tb) & LEVEL_MARKERS:
-        return min(0.5, ratio)
-    return ratio
+    difference = (ta ^ tb) | (title_qualifiers(a) ^ title_qualifiers(b))
+    if difference & LEVEL_MARKERS or any(_bears_digit(t) for t in difference):
+        # Seniority is never contextual noise, whatever the employer is called,
+        # and neither is a number: a differing digit marks a level or a
+        # reference ("Support Engineer 6" / "7", "Magazijnier 100234" /
+        # "100567"), never the city or the employer that ``ignore`` covers.
+        return min(DISTINCT_TITLE_CEILING, ratio)
+    distinguishing = difference - TITLE_STOPWORDS - set(ignore)
+    if not distinguishing:
+        return 1.0
+    return min(DISTINCT_TITLE_CEILING, ratio)
+
+
+def contextual_tokens(*records: dict) -> set[str]:
+    """Words that identify the employer or the place, not the opening."""
+    out: set[str] = set()
+    for record in records:
+        out |= set(tokens(normalise_location(record.get("location"))))
+        out |= set(
+            tokens(
+                normalise_company_name(
+                    record.get("company_name_raw") or record.get("company_name")
+                )
+            )
+        )
+        out |= set(tokens(str(record.get("country") or "")))
+    return out
+
+
+# An unknown location is a missing fact, not a match.  It used to score 0.6,
+# which at the old 0.86 threshold carried a pair over the line on its own
+# (0.45 + 0.25 + 0.15 + 0.025 = 0.875): two postings that agreed on title and
+# employer merged purely because neither said where it was.  At 0.5 the best a
+# pair with an unknown location can reach is 0.875, below the threshold, so an
+# absent location can no longer decide a merge (docs/Data_Gathering_Plan.md
+# section 5, N6).
+UNKNOWN_LOCATION_SIMILARITY = 0.5
+
+
+def locations_conflict(a: str | None, b: str | None) -> bool:
+    """True when two records name places that cannot be the same place (FR-184).
+
+    Only a *stated* difference counts.  "Gent, Belgium" against "9000 Gent" is
+    one place said twice - one side merely adds the country - so it is not a
+    conflict; "Brussels" against "Ghent" is.  An unknown location on either side
+    conflicts with nothing, because it claims nothing.
+    """
+    la, lb = set(tokens(normalise_location(a))), set(tokens(normalise_location(b)))
+    if not la or not lb:
+        return False
+    return not (la <= lb or lb <= la)
+
+
+def location_similarity(a: str | None, b: str | None) -> float:
+    """Place match that tells "same place, said twice" from "two places".
+
+    One side naming the country the other omits - "Gent, Belgium" against
+    "9000 Gent" - is the same opening.  Two sides that each name a place the
+    other does not - "Remote, USA" against "Remote, Europe" - are two openings
+    at the same employer, which is why ``vacancy_dedup_key`` puts the location
+    in the key in the first place.
+    """
+    la, lb = set(tokens(normalise_location(a))), set(tokens(normalise_location(b)))
+    if not la or not lb:
+        return UNKNOWN_LOCATION_SIMILARITY  # unknown: neither confirms nor denies
+    if la == lb:
+        return 1.0
+    if la <= lb or lb <= la:
+        return 0.9
+    return token_set_ratio(" ".join(sorted(la)), " ".join(sorted(lb)))
 
 
 def vacancy_similarity(a: dict, b: dict) -> float:
-    """Fuzzy title+company+location+posting-date match in ``0..1`` (FR-184)."""
-    title = title_similarity(a.get("title"), b.get("title"))
+    """Fuzzy title+company+location+posting-date match in ``0..1`` (FR-184).
+
+    The weights carry a rule the deterministic key already states: at one
+    employer, two postings in different places are two openings.  Title,
+    employer and posting date alone reach 0.75, so the location is given enough
+    weight (0.25) that a genuine conflict keeps the pair under the threshold -
+    Collibra's "Senior Product Security Engineer" in Remote/USA, Remote/Europe
+    and Raleigh are three jobs, and used to collapse into one.
+
+    Two stated, different places are a veto rather than a low score: "Data
+    Engineer" in Brussels and "Data Engineer" in Ghent are two vacancies at one
+    employer, and no agreement on title, employer and date may outvote that
+    (docs/Data_Gathering_Plan.md section 5, N6).
+    """
+    if locations_conflict(a.get("location"), b.get("location")):
+        return 0.0
+    title = title_similarity(a.get("title"), b.get("title"), ignore=contextual_tokens(a, b))
     company = company_similarity(
         a.get("company_name_raw") or a.get("company_name"),
         b.get("company_name_raw") or b.get("company_name"),
     )
     if not company and a.get("company_id") and a.get("company_id") == b.get("company_id"):
         company = 1.0
-    location = token_set_ratio(
-        normalise_location(a.get("location")), normalise_location(b.get("location"))
-    )
-    if not a.get("location") or not b.get("location"):
-        location = 0.6
+    location = location_similarity(a.get("location"), b.get("location"))
     recency = date_proximity(a.get("posted_at"), b.get("posted_at"))
-    return 0.45 * title + 0.30 * company + 0.15 * location + 0.10 * recency
+    return 0.45 * title + 0.25 * company + 0.25 * location + 0.05 * recency
 
 
 def is_duplicate_vacancy(a: dict, b: dict, threshold: float = VACANCY_MATCH_THRESHOLD) -> bool:

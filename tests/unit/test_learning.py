@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from dreamjob.db import connection as conn_mod
 from dreamjob.db.connection import insert_row, utcnow
 from dreamjob.db.migrator import migrate

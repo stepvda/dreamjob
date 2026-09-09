@@ -322,11 +322,21 @@ def journey_state(job_seeker_id: str) -> dict[str, Any]:
             "WHERE job_seeker_id = ? ORDER BY version DESC LIMIT 1",
             (job_seeker_id,),
         ),
+        # Count unresolved conflicts for the LATEST version only. The queue is
+        # version-scoped: older versions keep their own rows, and a resolution
+        # made on one version is carried forward by replace_conflicts onto the
+        # next. Counting every historical row across all versions inflates the
+        # figure (old versions never lose their rows), so the "100 conflicts to
+        # resolve" the journey map shows would never reflect what the conflicts
+        # tab actually lists.
         "unresolved_conflicts": (
             query_one(
                 "SELECT COUNT(*) AS n FROM profile_conflict "
-                "WHERE job_seeker_id = ? AND (resolution IS NULL OR resolution = 'unresolved')",
-                (job_seeker_id,),
+                "WHERE job_seeker_id = ? AND profile_version_id = ("
+                "  SELECT id FROM profile_version WHERE job_seeker_id = ? "
+                "  ORDER BY version DESC LIMIT 1"
+                ") AND (resolution IS NULL OR resolution = 'unresolved')",
+                (job_seeker_id, job_seeker_id),
             )
             or {"n": 0}
         )["n"],

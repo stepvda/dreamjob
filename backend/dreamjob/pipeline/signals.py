@@ -247,6 +247,20 @@ def signals_from_news(company_id: str, items: list[Any]) -> list[dict]:
     return out
 
 
+def _is_careers_page(url: str, kind: str | None) -> bool:
+    """A careers page filed under another kind is still the careers page.
+
+    ``classify_url`` returns a single winning kind, so ``/who-we-are/careers``
+    is filed as *about*; gating the FR-225 ``postings`` signal on ``kind`` alone
+    therefore missed the openings on exactly those sites.
+    """
+    if kind == "careers":
+        return True
+    from dreamjob.adapters.website.crawler import is_careers_url  # noqa: PLC0415 - avoids a cycle
+
+    return bool(url) and is_careers_url(str(url))
+
+
 def signals_from_pages(company_id: str, pages: list[Any]) -> list[dict]:
     """Signals visible on the crawled site itself (careers page, press page).
 
@@ -263,7 +277,7 @@ def signals_from_pages(company_id: str, pages: list[Any]) -> list[dict]:
         url = getattr(page, "url", None) or (page.get("url") if isinstance(page, dict) else "")
         if not text:
             continue
-        if kind == "careers" and CAREERS_HINTS.search(text):
+        if CAREERS_HINTS.search(text) and _is_careers_page(url, kind):
             out.append(
                 {
                     "company_id": company_id,
@@ -502,13 +516,23 @@ async def refresh_signals(
     items = list(news_items or [])
     if fetch_news and not items and (company.get("domain") or company.get("source")):
         from dreamjob.adapters.news import rss  # noqa: PLC0415 - adapter imports the pipeline back
+        from dreamjob.pipeline.company_profile import (  # noqa: PLC0415 - avoids a cycle
+            home_url_for,
+        )
 
-        home = company.get("source") or f"https://{company['domain']}"
-        try:
-            items = await rss.collect_news(home, declared_feeds=feeds)
-        except Exception:  # noqa: BLE001 - the newsroom is optional
-            log.debug("Newsroom unavailable for %s", company.get("domain"))
-            items = []
+        # ``company.source`` is a URL for a website-crawled row and the adapter
+        # key for every other one ("board.jobat"), so reading it as a home page
+        # silently skipped the newsroom of exactly the companies collection
+        # produces.  ``home_url_for`` prefers the domain and checks the scheme.
+        home = home_url_for(company)
+        if not home:
+            log.debug("No home URL for %s; the newsroom is skipped", company.get("name"))
+        else:
+            try:
+                items = await rss.collect_news(home, declared_feeds=feeds)
+            except Exception:  # noqa: BLE001 - the newsroom is optional
+                log.debug("Newsroom unavailable for %s", company.get("domain"))
+                items = []
     detected = detect_all(company, pages=pages, news_items=items)
     persist(detected)
     return repo.list_signals(company["id"])

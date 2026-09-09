@@ -20,6 +20,7 @@ from dreamjob.adapters.ats.detect import adapter_key_for, board_url, detect_ats
 from dreamjob.adapters.ats.workday import split_slug
 from dreamjob.adapters.base import PlanItem, all_adapters, get_adapter
 from dreamjob.adapters.vacancy_source import (
+    SourceUnavailable,
     application_route,
     detect_language,
     jobposting_to_fields,
@@ -32,6 +33,7 @@ from dreamjob.adapters.vacancy_source import (
 from dreamjob.config import get_settings
 from dreamjob.db.connection import query_all, query_one
 from dreamjob.db.migrator import migrate
+from dreamjob.egress.client import RobotsDisallowed
 
 
 @pytest.fixture()
@@ -547,8 +549,14 @@ def test_paginating_adapters_fetch_only_the_page_the_pipeline_asks_for(db):
     assert urls == ["https://b.tld/jobs?q=data&p=4"]
 
 
-def test_a_dead_board_yields_no_records_instead_of_an_exception(db):
-    """The campaign must survive a source that is blocked, moved or offline."""
+def test_a_dead_board_fails_its_plan_item_instead_of_reporting_nothing(db):
+    """FR-185: "every request was refused" is not "this source had no vacancies".
+
+    The campaign still survives - ``collection_worker`` catches this per plan
+    item - but the plan item is recorded as failed with the HTTP status against
+    its name instead of ``done`` with zero records and zero errors, which is
+    what the whole live database looked like.
+    """
     load_all()
     egress = StubEgress({}, default_status=403)
     for key, native in (
@@ -557,7 +565,28 @@ def test_a_dead_board_yields_no_records_instead_of_an_exception(db):
         ("board.eures", {"keyword": "data", "country_codes": ["BE"], "pages": 1}),
     ):
         adapter = get_adapter(key, egress)
-        assert _run(adapter.run(PlanItem(key, native))) == []
+        with pytest.raises(SourceUnavailable) as raised:
+            _run(adapter.run(PlanItem(key, native)))
+        assert "403" in str(raised.value), key
+        assert key in str(raised.value)
+
+
+def test_a_source_blocked_by_robots_txt_fails_its_own_plan_item(db):
+    """FR-182/IR-101: a robots.txt block must reach the worker, not a log line.
+
+    ``collection_worker`` has an ``except RobotsDisallowed`` handler that was
+    dead code for every adapter here, because each one caught the exception and
+    returned an empty list.
+    """
+    load_all()
+
+    class BlockedEgress:
+        async def fetch(self, url: str, **kwargs: Any) -> StubResponse:
+            raise RobotsDisallowed(f"robots.txt disallows {url}")
+
+    adapter = get_adapter("ats.smartrecruiters", BlockedEgress())
+    with pytest.raises(RobotsDisallowed):
+        _run(adapter.run(PlanItem("ats.smartrecruiters", {"slug": "Ubisoft"})))
 
 
 def test_a_jsonld_listing_is_collected_without_a_request_per_advert(db):
@@ -623,22 +652,34 @@ class SequencedEgress:
 
 
 def test_eures_does_not_emit_a_vacancy_twice_when_paging(db):
-    """A vacancy detailed from page two must not also come back as a summary."""
+    """A vacancy detailed from page two must not also come back as a summary.
+
+    The shapes below are the live ones: a search answers ``{"numberRecords",
+    "jvs"}`` whose entries carry ``locationMap`` and no employer, and a detail
+    is ``GET /jv/id/{id}`` answering ``{"jvProfiles": {"<lang>": {...}}}``.
+    """
     load_all()
 
     def summary(jv_id: str, title: str) -> dict:
-        return {"id": jv_id, "title": title, "employerName": "Acme",
-                "location": [{"cityName": "Gent", "countryCode": "BE"}],
-                "creationDate": "2026-08-06", "descriptionShort": "Python en SQL."}
+        return {"id": jv_id, "title": title, "employer": None,
+                "locationMap": {"BE": ["BE211"]},
+                "creationDate": 1788494411399, "description": "Python en SQL."}
+
+    def detail(jv_id: str, title: str) -> dict:
+        return {"id": jv_id, "preferredLanguage": "nl", "creationDate": 1788494411399,
+                "jvProfiles": {"nl": {"title": title, "description": "Python en SQL.",
+                                      "employer": {"name": "Acme"},
+                                      "locations": [{"cityName": "Gent",
+                                                     "countryCode": "be"}]}}}
 
     egress = SequencedEgress(
         {
             "jv-search/search": [
-                json.dumps({"jvs": [summary("1", "Data Engineer")]}),
-                json.dumps({"jvs": [summary("2", "Data Analist")]}),
+                json.dumps({"numberRecords": 2, "jvs": [summary("1", "Data Engineer")]}),
+                json.dumps({"numberRecords": 2, "jvs": [summary("2", "Data Analist")]}),
             ],
-            "jv-details/1": [json.dumps({"jvDetails": summary("1", "Data Engineer")})],
-            "jv-details/2": [json.dumps({"jvDetails": summary("2", "Data Analist")})],
+            "jv/id/1": [json.dumps(detail("1", "Data Engineer"))],
+            "jv/id/2": [json.dumps(detail("2", "Data Analist"))],
         }
     )
     adapter = get_adapter("board.eures", egress)
@@ -652,6 +693,10 @@ def test_eures_does_not_emit_a_vacancy_twice_when_paging(db):
         )
     )
     assert sorted(r.data["title"] for r in records) == ["Data Analist", "Data Engineer"]
+    # The detail document is where the employer and the city live.
+    assert {r.data["company_name_raw"] for r in records} == {"Acme"}
+    assert {r.data["location"] for r in records} == {"Gent, BE"}
+    assert {r.data["country"] for r in records} == {"BE"}
 
 
 def test_workday_summary_keeps_the_listing_as_its_provenance(db):
@@ -684,3 +729,90 @@ def test_workday_summary_keeps_the_listing_as_its_provenance(db):
     assert records[0].data["title"] == "Data Engineer"
     assert records[0].raw_document_id == "raw-1"
     assert records[0].data["raw_document_id"] == "raw-1"
+
+
+# ---------------------------------------------------------------------------
+# ATS plan items with no resolvable board slug are skipped, not failed (FR-186)
+# ---------------------------------------------------------------------------
+
+
+def _ats_item(adapter_key: str = "ats.greenhouse", **native: object) -> PlanItem:
+    return PlanItem(adapter_key=adapter_key, native_query=native)
+
+
+class TestAtsSlugResolution:
+    def test_adapter_native_slug_is_read(self) -> None:
+        from dreamjob.adapters.ats.common import ATSAdapter
+
+        item = _ats_item(slug="acme")
+        assert ATSAdapter.slug_of(item) == "acme"
+
+    def test_llm_board_slugs_first_entry_is_read(self) -> None:
+        """A plan the LLM produced as ``board_slugs`` must resolve too."""
+        from dreamjob.adapters.ats.common import ATSAdapter
+
+        item = _ats_item(vendor="greenhouse", board_slugs=["acme"])
+        assert ATSAdapter.slug_of(item) == "acme"
+
+    def test_empty_board_slugs_has_no_slug(self) -> None:
+        """``has_slug`` is the graceful check the collection layer uses."""
+        from dreamjob.adapters.ats.common import ATSAdapter
+
+        item = _ats_item(vendor="greenhouse", board_slugs=[])
+        assert ATSAdapter.has_slug(item) is False
+
+    def test_slug_helpers_accept_a_plain_dict_plan_row(self) -> None:
+        """The collection worker reads plan items from the DB as plain dicts.
+
+        ``has_slug`` must work on that shape too - the row's ``native_query`` is
+        the payload, and passing a dict in place of a ``PlanItem`` is exactly
+        what the collection worker does.  A ``PlanItem``-only check crashed the
+        whole collection job with an AttributeError instead of skipping.
+        """
+        from dreamjob.adapters.ats.common import ATSAdapter
+
+        # The shape the worker sees: {"native_query": {...}, "status": ...}
+        row = {"adapter_key": "ats.greenhouse", "native_query": {"board_slugs": [], "vendor": "greenhouse"}}
+        assert ATSAdapter.has_slug(row) is False
+        row2 = {"adapter_key": "ats.greenhouse", "native_query": {"slug": "acme"}}
+        assert ATSAdapter.has_slug(row2) is True
+        assert ATSAdapter.slug_of(row2) == "acme"
+
+    def test_missing_slug_raises_in_slug_of_but_says_so(self) -> None:
+        from dreamjob.adapters.ats.common import ATSAdapter
+
+        item = _ats_item({})  # native_query is not a dict-like with slug
+        assert ATSAdapter.has_slug(item) is False
+        with pytest.raises(ValueError, match="missing a board slug"):
+            ATSAdapter.slug_of(item)
+
+
+class TestCollectionSkipGuard:
+    def _adapter(self, key: str) -> object:
+        from dreamjob.adapters import load_all
+        from dreamjob.adapters.base import get_adapter
+
+        load_all()
+        return get_adapter(key)
+
+    def test_ats_plan_item_without_slug_is_skipped(self) -> None:
+        from dreamjob.pipeline.collection import _has_ats_slug, _is_ats
+
+        adapter = self._adapter("ats.greenhouse")
+        item = _ats_item(vendor="greenhouse", board_slugs=[])
+        assert _is_ats(adapter) is True
+        assert _has_ats_slug(adapter, item) is False
+
+    def test_ats_plan_item_with_slug_proceeds(self) -> None:
+        from dreamjob.pipeline.collection import _has_ats_slug, _is_ats
+
+        adapter = self._adapter("ats.greenhouse")
+        item = _ats_item(slug="acme")
+        assert _is_ats(adapter) is True
+        assert _has_ats_slug(adapter, item) is True
+
+    def test_job_board_is_not_treated_as_ats(self) -> None:
+        from dreamjob.pipeline.collection import _is_ats
+
+        adapter = self._adapter("board.vdab")
+        assert _is_ats(adapter) is False

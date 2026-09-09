@@ -33,6 +33,7 @@ from typing import Any
 from dreamjob.adapters.ats.common import DEFAULT_MAX_RECORDS, ATSAdapter, company_targets
 from dreamjob.adapters.base import AdapterCapabilities, PlanItem, RawRecord, register_adapter
 from dreamjob.adapters.vacancy_source import (
+    UnusableQuery,
     application_route,
     country_from_location,
     fte_percentage,
@@ -115,88 +116,93 @@ class WorkdayAdapter(ATSAdapter):
         return items
 
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        try:
-            host, tenant, site = split_slug(self.slug_of(item))
-        except ValueError as exc:
-            raise ValueError(f"[{self.key}] {exc}") from exc
-        base = CXS.format(host=host, tenant=tenant, site=site)
-        limit = self.limit_of(item)
-        search_text = str(item.native_query.get("search_text") or "")
-        meta_base = {
-            "host": host,
-            "site": site,
-            "company_id": item.native_query.get("company_id"),
-            "company_name": item.native_query.get("company_name"),
-        }
-
-        # Each posting keeps the id of the listing page it came from, so that a
-        # posting whose detail page cannot be read still has provenance (FR-183).
-        postings: list[tuple[dict, str | None]] = []
-        one_page = requested_page(item.native_query)
-        offset = (one_page - 1) * PAGE_SIZE if one_page else 0
-        limit = min(limit, PAGE_SIZE) if one_page else limit
-        while len(postings) < limit:
-            listing = await self._get(
-                f"{base}/jobs",
-                method="POST",
-                json={
-                    "appliedFacets": {},
-                    "limit": PAGE_SIZE,
-                    "offset": offset,
-                    "searchText": search_text,
-                },
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-            )
-            if listing is None:
-                break
-            try:
-                payload = json.loads(listing.text)
-            except ValueError:
-                break
-            page = payload.get("jobPostings") or []
-            postings.extend((posting, listing.raw_document_id) for posting in page)
-            offset += PAGE_SIZE
-            if len(page) < PAGE_SIZE or offset >= int(payload.get("total") or 0):
-                break
-            if one_page:
-                break
-
-        if item.native_query.get("title_filter"):
-            keywords = item.native_query.get("keywords") or []
-            postings = [
-                (posting, doc_id)
-                for posting, doc_id in postings
-                if title_matches(str(posting.get("title") or ""), keywords)
-            ]
-
+        query = self.native_query(item)
+        search_text = str(query.get("search_text") or "")
+        one_page = requested_page(query)
         records: list[RawRecord] = []
-        for posting, listing_doc_id in postings[:limit]:
-            path = str(posting.get("externalPath") or "")
-            if not path:
-                continue
-            detail = await self._get(f"{base}{path}", headers={"Accept": "application/json"})
-            public_url = PUBLIC.format(host=host, site=site, path=path)
-            if detail is None:
+
+        for slug in self.slugs_of(item):
+            try:
+                host, tenant, site = split_slug(slug)
+            except ValueError as exc:
+                # A Workday slug is "<host>/<site>", which cannot be guessed from a
+                # company name; saying so is more useful than collecting nothing.
+                raise UnusableQuery(f"[{self.key}] {exc}") from exc
+            base = CXS.format(host=host, tenant=tenant, site=site)
+            meta_base = {
+                **self.board_meta(item, slug),
+                "host": host,
+                "site": site,
+            }
+
+            # Each posting keeps the id of the listing page it came from, so that
+            # a posting whose detail page cannot be read still has provenance
+            # (FR-183).
+            postings: list[tuple[dict, str | None]] = []
+            limit = self.limit_of(item)
+            offset = (one_page - 1) * PAGE_SIZE if one_page else 0
+            limit = min(limit, PAGE_SIZE) if one_page else limit
+            while len(postings) < limit:
+                listing = await self._get(
+                    f"{base}/jobs",
+                    method="POST",
+                    json={
+                        "appliedFacets": {},
+                        "limit": PAGE_SIZE,
+                        "offset": offset,
+                        "searchText": search_text,
+                    },
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                )
+                if listing is None:
+                    break
+                try:
+                    payload = json.loads(listing.text)
+                except ValueError:
+                    break
+                page = payload.get("jobPostings") or []
+                postings.extend((posting, listing.raw_document_id) for posting in page)
+                offset += PAGE_SIZE
+                if len(page) < PAGE_SIZE or offset >= int(payload.get("total") or 0):
+                    break
+                if one_page:
+                    break
+
+            if query.get("title_filter"):
+                keywords = query.get("keywords") or []
+                postings = [
+                    (posting, doc_id)
+                    for posting, doc_id in postings
+                    if title_matches(str(posting.get("title") or ""), keywords)
+                ]
+
+            for posting, listing_doc_id in postings[:limit]:
+                path = str(posting.get("externalPath") or "")
+                if not path:
+                    continue
+                detail = await self._get(f"{base}{path}", headers={"Accept": "application/json"})
+                public_url = PUBLIC.format(host=host, site=site, path=path)
+                if detail is None:
+                    records.append(
+                        RawRecord(
+                            url=public_url,
+                            content=json.dumps(posting),
+                            content_type="application/json",
+                            raw_document_id=listing_doc_id,
+                            meta={**meta_base, "kind": "summary"},
+                        )
+                    )
+                    continue
                 records.append(
                     RawRecord(
                         url=public_url,
-                        content=json.dumps(posting),
+                        content=detail.text,
                         content_type="application/json",
-                        raw_document_id=listing_doc_id,
-                        meta={**meta_base, "kind": "summary"},
+                        raw_document_id=detail.raw_document_id,
+                        meta={**meta_base, "kind": "detail", "summary": posting},
                     )
                 )
-                continue
-            records.append(
-                RawRecord(
-                    url=public_url,
-                    content=detail.text,
-                    content_type="application/json",
-                    raw_document_id=detail.raw_document_id,
-                    meta={**meta_base, "kind": "detail", "summary": posting},
-                )
-            )
-        return records
+        return self.settle(records, nothing_to_fetch=self.no_board_named())
 
     def parse(self, raw: RawRecord) -> list[dict]:
         payload = json.loads(raw.content)

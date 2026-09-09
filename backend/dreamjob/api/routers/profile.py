@@ -56,7 +56,8 @@ class DreamJobIn(BaseModel):
 
 
 class ConflictResolutionIn(BaseModel):
-    resolution: str = Field(pattern="^(linkedin|cv|manual|unresolved)$")
+    # `blank` removes the field entirely: the value is dropped from the profile.
+    resolution: str = Field(pattern="^(linkedin|cv|manual|blank|unresolved)$")
     resolved_value: str | None = None
 
 

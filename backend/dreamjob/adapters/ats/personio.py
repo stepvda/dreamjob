@@ -10,6 +10,15 @@ seniority, schedule, yearsOfExperience, keywords, occupation, createdAt - and a
 ``<jobDescriptions>`` block that many tenants leave empty in the feed.  When it
 is empty the adapter falls back to the public job page, which carries a
 schema.org ``JobPosting`` block (FR-183), rather than to the LLM.
+
+That fallback is not always available: ``*.jobs.personio.de`` sits behind a
+security checkpoint that answers HTTP 429 with an HTML interstitial to a
+declared bot user agent while answering 200 to a browser.  Each refusal used to
+cost three attempts and an exponential back-off (2s, 4s, ... 60s), once per
+position, for up to sixty positions - and the run still reported success.  The
+walk now stops at the first refusal, keeps the feed's structured records
+(without advert text, which is what the feed states), and counts the block as a
+failed extraction so NFR-403 sees it.
 """
 
 from __future__ import annotations
@@ -41,6 +50,9 @@ FEED = "https://{slug}.jobs.{domain}/xml"
 JOB_PAGE = "https://{slug}.jobs.{domain}/job/{job_id}"
 DEFAULT_DOMAIN = "personio.de"
 MAX_FEED_BYTES = 8_000_000
+#: Detail pages per board.  Each one is a request against a rate-limited host,
+#: so the walk is bounded even before the bot-checkpoint guard below.
+MAX_DETAIL_PAGES = 40
 
 
 @register_adapter
@@ -52,56 +64,76 @@ class PersonioAdapter(ATSAdapter):
     legal_notes = "Public XML career feed, no key required; read-only."
 
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        slug = self.slug_of(item)
-        domain = str(item.native_query.get("domain") or DEFAULT_DOMAIN)
-        feed_url = FEED.format(slug=slug, domain=domain)
-        feed = await self._get(feed_url)
-        if feed is None:
-            return []
-        body = feed.text
+        query = self.native_query(item)
+        domain = str(query.get("domain") or DEFAULT_DOMAIN)
+        limit = self.limit_of(item)
+        want_details = query.get("fetch_details", True) is not False
+        max_details = int(query.get("max_detail_pages") or MAX_DETAIL_PAGES)
+        records: list[RawRecord] = []
 
-        meta = {
-            "slug": slug,
-            "domain": domain,
-            "company_id": item.native_query.get("company_id"),
-            "company_name": item.native_query.get("company_name"),
-            "keywords": item.native_query.get("keywords") or [],
-            "title_filter": item.native_query.get("title_filter"),
-            "max_records": self.limit_of(item),
-        }
-        positions = self._positions(body)[: self.limit_of(item)]
-        records = [
-            RawRecord(url=feed_url, content=body, content_type="application/xml",
-                      raw_document_id=feed.raw_document_id, meta={**meta, "kind": "list"})
-        ]
-        if item.native_query.get("fetch_details", True) is False:
-            return records
-
-        thin = [p for p in positions if not p.get("description")]
-        fetched: list[str] = []
-        for position in thin[: int(item.native_query.get("max_detail_pages") or 60)]:
-            page_url = JOB_PAGE.format(slug=slug, domain=domain, job_id=position["id"])
-            page = await self._get(page_url)
-            if page is None:
+        for slug in self.slugs_of(item):
+            feed_url = FEED.format(slug=slug, domain=domain)
+            feed = await self._get(feed_url)
+            if feed is None:
                 continue
-            fetched.append(position["id"])
-            records.append(
-                RawRecord(
-                    url=page_url,
-                    content=page.text,
-                    content_type="text/html",
-                    raw_document_id=page.raw_document_id,
-                    meta={**meta, "kind": "detail", "position": position},
-                )
+            body = feed.text
+            meta = {**self.board_meta(item, slug), "domain": domain}
+            positions = self._positions(body)[:limit]
+            feed_record = RawRecord(
+                url=feed_url, content=body, content_type="application/xml",
+                raw_document_id=feed.raw_document_id, meta={**meta, "kind": "list"},
             )
-        # Only the positions whose page was actually retrieved are covered by a
-        # detail record; the rest still come from the feed. When every position was
-        # detailed, the feed record would parse to nothing and would depress the
-        # NFR-403 extraction rate, so it is dropped.
-        if len(fetched) >= len(positions):
-            return records[1:]
-        records[0].meta["detailed_ids"] = fetched
-        return records
+            records.append(feed_record)
+            if not want_details:
+                continue
+
+            thin = [p for p in positions if not p.get("description")]
+            fetched: list[str] = []
+            for position in thin[:max_details]:
+                page_url = JOB_PAGE.format(slug=slug, domain=domain, job_id=position["id"])
+                page = await self._get(page_url)
+                if page is None:
+                    # *.jobs.personio.de sits behind a bot checkpoint that answers
+                    # 429 (or an HTML interstitial) to a non-browser agent.  Paying
+                    # the egress back-off - 2s, 4s, ... 60s - once per position for
+                    # up to sixty positions buys nothing, so the walk stops at the
+                    # first block and says why (FR-186, NFR-403).
+                    if self._is_blocked():
+                        log.warning(
+                            "[%s] %s is refusing detail pages to this user agent; "
+                            "keeping the feed records without advert text and stopping "
+                            "the detail walk",
+                            self.key, domain,
+                        )
+                        self.record_extraction(1, 0)
+                        break
+                    continue
+                fetched.append(position["id"])
+                records.append(
+                    RawRecord(
+                        url=page_url,
+                        content=page.text,
+                        content_type="text/html",
+                        raw_document_id=page.raw_document_id,
+                        meta={**meta, "kind": "detail", "position": position},
+                    )
+                )
+            # Only the positions whose page was actually retrieved are covered by a
+            # detail record; the rest still come from the feed. When every position
+            # was detailed, the feed record would parse to nothing and would depress
+            # the NFR-403 extraction rate, so it is dropped.
+            if positions and len(fetched) >= len(positions):
+                records.remove(feed_record)
+            else:
+                feed_record.meta["detailed_ids"] = fetched
+        return self.settle(records, nothing_to_fetch=self.no_board_named())
+
+    def _is_blocked(self) -> bool:
+        """Did the last request run into a rate limit or a bot checkpoint?"""
+        outcome = self.fetch_outcome
+        if outcome.rate_limited:
+            return True
+        return bool(outcome.failures) and outcome.failures[-1][1] in ("HTTP 429", "HTTP 403")
 
     # -- parsing ------------------------------------------------------------
     @staticmethod

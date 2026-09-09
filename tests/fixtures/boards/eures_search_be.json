@@ -1,0 +1,64 @@
+{
+ "numberRecords": 31426,
+ "jvs": [
+  {
+   "title": "Automation Engineer",
+   "description": "<b>¿</b><br><p>Chez Equans Digital, vous développez des applications utiles, pensées pour les utilisateurs et intégrées dans des projets industriels concrets. Vous contribuez à la digitalisation de l’industrie au sein d’équipes projets structurées, sur des solutions technologiques à impact durable.</p><p>&nbsp;</p><p>Chez Equans, nous croyons que la diversité des talents renforce nos&nbsp;équipes. Nous construisons activement un environnement de travail inclusif où chacun se sent le bienvenu, peut&nbsp;être soi-même, et nous encourageons chacun&nbsp;à postuler.</p><p>&nbsp;</p><p><strong>Votre mission se déroule : </strong>à Fleurus.</p><p><strong>&nbsp;</strong></p><strong>Zoom sur la fonction :</strong><ul><li>analyser les besoins des clients et formaliser des spécifications fonctionnelles claires</li><li>proposer des solutions technologiques cohérentes avec l’environnement existant</l",
+   "id": "MTIwNDMwMzQgNDQx",
+   "creationDate": 1788494411399,
+   "lastModificationDate": 1788494411399,
+   "numberOfPosts": 2,
+   "locationMap": {
+    "BE": [
+     "BE32B"
+    ]
+   },
+   "euresFlag": false,
+   "jobCategoriesCodes": [
+    "http://data.europa.eu/esco/occupation/bb609566-3ab6-44dd-8f48-cf0b15b96827"
+   ],
+   "positionScheduleCodes": [],
+   "positionOfferingCode": "directhire",
+   "employer": null,
+   "availableLanguages": [
+    "fr"
+   ],
+   "score": null,
+   "translationType": "FIRST_LANGUAGE"
+  },
+  {
+   "title": "Product Engineer R&D",
+   "description": "<p><em>Vous avez la fibre technique, une vraie sensibilité design et l'envie de relever des défis d'ingénierie concrets sur des produits utilisés par des millions de personnes à travers le monde ? Rejoignez une équipe R&amp;D européenne et donnez un nouvel élan à votre carrière !</em><br><br>Notre partenaire, acteur international, est à la recherche d'un·e&nbsp;<strong>Product Engineer&nbsp;</strong>pour renforcer son équipe R&amp;D et piloter le développement de nouveaux produits.&nbsp;<br><br></p>\n<p>Rattaché·e à la responsable du département Design Produit, vous intégrez une équipe expérimentée et collaborez étroitement avec les designers sur les nouveaux produits destinés au marché américain. Vous échangez régulièrement avec votre interlocuteur américain pour cadrer les orientations de recherche. Vous prenez ensuite la main sur la conception : de l’idéation au prototype, en intégrant",
+   "id": "MTIwMDM4OTUgNDQx",
+   "creationDate": 1785751222108,
+   "lastModificationDate": 1785751222108,
+   "numberOfPosts": 1,
+   "locationMap": {
+    "BE": [
+     null
+    ]
+   },
+   "euresFlag": false,
+   "jobCategoriesCodes": [
+    "http://data.europa.eu/esco/occupation/b5eaf231-77ad-4a86-8e54-15cc4398aad2"
+   ],
+   "positionScheduleCodes": [],
+   "positionOfferingCode": "directhire",
+   "employer": {
+    "name": "2beGood",
+    "legalID": null,
+    "organisationSizeCode": null,
+    "organisationOwnershipTypeCode": null,
+    "website": null,
+    "sectorCodes": [],
+    "description": null
+   },
+   "availableLanguages": [
+    "fr"
+   ],
+   "score": null,
+   "translationType": "FIRST_LANGUAGE"
+  }
+ ],
+ "facets": []
+}

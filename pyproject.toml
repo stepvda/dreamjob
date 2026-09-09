@@ -25,6 +25,9 @@ testpaths = ["tests"]
 pythonpath = ["backend"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "llm: needs the network or a live model call; deselect with -m 'not llm'",
+]
 
 [tool.ruff]
 line-length = 100

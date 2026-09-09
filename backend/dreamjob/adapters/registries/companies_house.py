@@ -99,34 +99,35 @@ class CompaniesHouseAdapter(RegistryAdapter):
             result.note(self.unavailable_reason())
             return result
 
-        number = self.company_number(company)
-        if not number and company.get("name"):
-            number = await self.search(str(company["name"]), egress=egress)
-        if not number:
-            result.estimated = True
-            result.note("No Companies House number could be resolved")
-            return result
+        async with self.session(egress) as client:
+            number = self.company_number(company)
+            if not number and company.get("name"):
+                number = await self.search(str(company["name"]), egress=client)
+            if not number:
+                result.estimated = True
+                result.note("No Companies House number could be resolved")
+                return result
 
-        profile = await self.profile(number, egress=egress)
-        if profile:
-            result.identity = self.to_identity(profile, company)
-            result.subsidiaries.extend(self.group_links(profile))
-        filings = await self.accounts_filings(number, egress=egress, limit=years * 2)
-        if not filings:
-            result.estimated = True
-            result.note(f"No accounts filings listed for company {number}")
+            profile = await self.profile(number, egress=client)
+            if profile:
+                result.identity = self.to_identity(profile, company)
+                result.subsidiaries.extend(self.group_links(profile))
+            filings = await self.accounts_filings(number, egress=client, limit=years * 2)
+            if not filings:
+                result.estimated = True
+                result.note(f"No accounts filings listed for company {number}")
 
-        seen: set[int] = set()
-        for filing in filings:
-            if len(seen) >= years:
-                break
-            facts = await self.read_filing(
-                filing, egress=egress, llm=llm, company_name=company.get("name")
-            )
-            for record in facts:
-                if record.fiscal_year and record.fiscal_year not in seen:
-                    seen.add(record.fiscal_year)
-                    result.facts.append(record)
+            seen: set[int] = set()
+            for filing in filings:
+                if len(seen) >= years:
+                    break
+                facts = await self.read_filing(
+                    filing, egress=client, llm=llm, company_name=company.get("name")
+                )
+                for record in facts:
+                    if record.fiscal_year and record.fiscal_year not in seen:
+                        seen.add(record.fiscal_year)
+                        result.facts.append(record)
         result.facts.sort(key=lambda r: r.fiscal_year)
         if not result.facts:
             result.estimated = True

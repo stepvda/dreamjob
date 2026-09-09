@@ -978,6 +978,23 @@ a.wfmap-stage:hover { background: var(--surface-sunk); border-color: var(--line)
 .conflict-value .src { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); margin-bottom: 2px; }
 .conflict-value .val { color: var(--ink); line-height: 1.45; word-break: break-word; }
 
+/* "Leave blank" is its own affordance so it cannot be mistaken for the manual
+   override. It reads as an action, and its chosen state warns in the amber of
+   "removing", not the accent of "accepting". */
+.conflict-blank {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.conflict-blank:hover { border-color: var(--warn); color: var(--warn); }
+.conflict-blank.chosen { border-style: solid; border-color: var(--warn); background: var(--warn-soft); color: var(--warn); font-weight: 550; }
+
 /* FR-104: one repeated entry of a structured section. */
 .entry-card {
   border: 1px solid var(--line);

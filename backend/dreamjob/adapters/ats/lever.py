@@ -46,44 +46,39 @@ class LeverAdapter(ATSAdapter):
     )
 
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        slug = self.slug_of(item)
+        query = self.native_query(item)
         limit = self.limit_of(item)
+        one_page = requested_page(query)
         out: list[RawRecord] = []
-        one_page = requested_page(item.native_query)
-        start = (one_page - 1) * PAGE_SIZE if one_page else 0
-        budget = min(limit, PAGE_SIZE) if one_page else limit
-        skip = start
-        while skip - start < budget:
-            page_size = min(PAGE_SIZE, budget - (skip - start))
-            url = API.format(slug=slug, limit=page_size, skip=skip)
-            result = await self._get(url)
-            if result is None:
-                break
-            try:
-                postings = json.loads(result.text)
-            except ValueError:
-                break
-            if not isinstance(postings, list) or not postings:
-                break
-            out.append(
-                RawRecord(
-                    url=url,
-                    content=result.text,
-                    content_type="application/json",
-                    raw_document_id=result.raw_document_id,
-                    meta={
-                        "slug": slug,
-                        "company_id": item.native_query.get("company_id"),
-                        "company_name": item.native_query.get("company_name"),
-                        "keywords": item.native_query.get("keywords") or [],
-                        "title_filter": item.native_query.get("title_filter"),
-                    },
+        for slug in self.slugs_of(item):
+            start = (one_page - 1) * PAGE_SIZE if one_page else 0
+            budget = min(limit, PAGE_SIZE) if one_page else limit
+            skip = start
+            while skip - start < budget:
+                page_size = min(PAGE_SIZE, budget - (skip - start))
+                url = API.format(slug=slug, limit=page_size, skip=skip)
+                result = await self._get(url)
+                if result is None:
+                    break
+                try:
+                    postings = json.loads(result.text)
+                except ValueError:
+                    break
+                if not isinstance(postings, list) or not postings:
+                    break
+                out.append(
+                    RawRecord(
+                        url=url,
+                        content=result.text,
+                        content_type="application/json",
+                        raw_document_id=result.raw_document_id,
+                        meta=self.board_meta(item, slug),
+                    )
                 )
-            )
-            if len(postings) < page_size:
-                break
-            skip += page_size
-        return out
+                if len(postings) < page_size:
+                    break
+                skip += page_size
+        return self.settle(out, nothing_to_fetch=self.no_board_named())
 
     def parse(self, raw: RawRecord) -> list[dict]:
         postings = json.loads(raw.content)

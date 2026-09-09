@@ -34,6 +34,8 @@ import logging
 import math
 import re
 import statistics
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -45,6 +47,9 @@ from dreamjob.pipeline import filing_extract as fx
 from dreamjob.pipeline.dedup import normalise_company_name, normalise_legal_id
 
 log = logging.getLogger(__name__)
+
+#: ``job_run.kind`` of the background collection-and-analysis job (FR-185).
+JOB_KIND = "financial"
 
 DEFAULT_YEARS = 5
 
@@ -177,6 +182,10 @@ def to_year_figures(rows: list[dict]) -> list[YearFigures]:
     out: list[YearFigures] = []
     for row in sorted(rows, key=lambda r: int(r["fiscal_year"])):
         eur = fx.eur_values(row)
+        # DR-103: a year that could not be priced in EUR is not a year of zeroes
+        # and it is certainly not a year at parity - it is an estimated year
+        # that says so, and the scores below read it that way (FR-245, NFR-404).
+        unconverted = fx.unconverted_flag(row)
         figures = YearFigures(
             fiscal_year=int(row["fiscal_year"]),
             revenue=eur.get("revenue"),
@@ -198,8 +207,9 @@ def to_year_figures(rows: list[dict]) -> list[YearFigures]:
                 None if row.get("gross_margin") in (None, "") else float(row["gross_margin"])
             ),
             currency=str(row.get("currency") or "EUR"),
-            is_estimated=bool(row.get("is_estimated")),
-            flags=from_json(row.get("reconciliation_flags"), []) or [],
+            is_estimated=bool(row.get("is_estimated")) or unconverted is not None,
+            flags=(from_json(row.get("reconciliation_flags"), []) or [])
+            + ([unconverted] if unconverted else []),
         )
         out.append(figures)
     return out
@@ -1014,6 +1024,23 @@ async def collect_company_financials(
     from dreamjob.adapters.base import get_adapter  # noqa: PLC0415 - avoids a cycle
     from dreamjob.pipeline.knowledge_base import KnowledgeBaseWriter  # noqa: PLC0415
 
+    if egress is None:
+        # Without a client every registry call raised AttributeError inside its
+        # own outage handler, and a company that is in the register came back as
+        # "not found in the register" - a false negative, reported as a fact
+        # (IR-102).  The client is opened here rather than assumed.
+        from dreamjob.egress.client import EgressClient  # noqa: PLC0415 - avoids a cycle
+
+        async with EgressClient() as client:
+            return await collect_company_financials(
+                company,
+                egress=client,
+                llm=llm,
+                years=years,
+                campaign_id=campaign_id,
+                plan_item_id=plan_item_id,
+            )
+
     company_id = company.get("id")
     report: dict[str, Any] = {
         "company_id": company_id,
@@ -1126,39 +1153,98 @@ async def analyse_companies(
 # ---------------------------------------------------------------------------
 
 
-def rerun(campaign_id: str, job_seeker_id: str, **options: Any) -> dict[str, Any]:
-    """Re-analyse the campaign's companies from the filings already stored.
+def campaign_companies(campaign_id: str, limit: int = 100) -> list[str]:
+    """The companies a financial stage should work on, in preference order.
 
-    ``dreamjob.pipeline.collection`` reserves the ``financials`` stage for this
-    module, and a re-run means re-reading what was collected, not re-fetching
-    it: an extractor or a scoring band that improved should be visible without
-    asking five registries for filings the database already holds (NFR-603,
-    FR-342).  ``collect=True`` opts back into the network.
+    The campaign's own provenance comes first (FR-166).  It is empty on any
+    campaign whose collection wrote nothing, so the knowledge base is asked as
+    well for the companies whose filings are still missing - otherwise a
+    company that was collected without provenance is never analysed at all,
+    which is how ``financial_year`` stayed empty (FR-241, FR-342).
     """
     from dreamjob.db.repositories import opportunities as opp_repo  # noqa: PLC0415 - avoids a cycle
 
-    company_ids = opp_repo.campaign_company_ids(campaign_id)
+    out: list[str] = []
+    try:
+        out.extend(opp_repo.campaign_company_ids(campaign_id))
+    except Exception:  # noqa: BLE001 - provenance is an optimisation, not a gate
+        log.exception("Could not read the campaign's company provenance")
+    if len(out) >= limit:
+        return out[:limit]
+    seen = set(out)
+    for row in repo.companies_missing_filings(min_years=DEFAULT_YEARS, limit=limit - len(out)):
+        if row["id"] not in seen:
+            seen.add(row["id"])
+            out.append(str(row["id"]))
+    return out[:limit]
+
+
+async def rerun(campaign_id: str, job_seeker_id: str, **options: Any) -> dict[str, Any]:
+    """Collect and analyse the campaign's companies (FR-241..245, NFR-603).
+
+    ``dreamjob.pipeline.collection`` reserves the ``financials`` stage for this
+    module.  Re-reading what is already stored is free, so it always happens;
+    fetching is what costs, so ``collect`` (default ``True``) is what decides
+    whether the registries are asked for the years that are still missing.  A
+    campaign whose collection produced no provenance still gets its companies
+    analysed - see :func:`campaign_companies`.
+    """
+    # A stage re-run is interactive: bound it, and let the background worker
+    # (JOB_KIND) be the one that walks a hundred companies (FR-185).
+    company_ids = campaign_companies(campaign_id, int(options.get("limit") or 25))
     if not company_ids:
-        return {"companies": 0, "analysed": 0, "note": "The campaign touched no companies yet"}
+        return {
+            "companies": 0,
+            "analysed": 0,
+            "note": "No company is in scope yet; run company discovery before the registries",
+        }
 
     llm = LLMClient(campaign_id=campaign_id, job_seeker_id=job_seeker_id)
     years = int(options.get("years") or DEFAULT_YEARS)
+    collect = bool(options.get("collect", True))
     analysed = 0
     estimated = 0
-    for company_id in company_ids:
-        try:
-            result = analyse_company(company_id, llm=llm, years=years)
-        except Exception:  # noqa: BLE001 - one company must not stop the stage
-            log.exception("Financial re-analysis failed for %s", company_id)
-            continue
-        analysed += 1
-        estimated += 1 if result["entity"].get("is_estimated") else 0
+    collected = 0
+    egress_cm = _egress_if(collect)
+    async with egress_cm as egress:
+        for company_id in company_ids:
+            try:
+                if collect:
+                    company = repo.company(company_id)
+                    if company:
+                        report = await collect_company_financials(
+                            company,
+                            egress=egress,
+                            llm=llm,
+                            years=years,
+                            campaign_id=campaign_id,
+                        )
+                        collected += int(report.get("years_written") or 0)
+                result = analyse_company(company_id, llm=llm, years=years)
+            except Exception:  # noqa: BLE001 - one company must not stop the stage
+                log.exception("Financial re-analysis failed for %s", company_id)
+                continue
+            analysed += 1
+            estimated += 1 if result["entity"].get("is_estimated") else 0
     return {
         "companies": len(company_ids),
         "analysed": analysed,
         "estimated": estimated,
+        "years_collected": collected,
         "years": years,
     }
+
+
+@asynccontextmanager
+async def _egress_if(wanted: bool) -> AsyncIterator[Any]:
+    """An egress client only when the stage is going to fetch something."""
+    if not wanted:
+        yield None
+        return
+    from dreamjob.egress.client import EgressClient  # noqa: PLC0415 - avoids a cycle
+
+    async with EgressClient() as client:
+        yield client
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1288,25 @@ async def financial_worker(ctx: Any) -> None:
 
 
 def register_financial_worker() -> None:
-    """Wire the worker into the job runner.  Called by the campaign pipeline."""
+    """Wire the worker into the job runner (FR-185).
+
+    Called at import time, the way ``dreamjob.pipeline.collection`` registers
+    its own worker: a worker nothing registers is a job kind that can never be
+    started, which is what left ``financial_year`` empty.
+    """
     from dreamjob.jobs.runner import runner  # noqa: PLC0415 - avoids a cycle
 
-    runner.register_worker("financial", financial_worker)
+    runner.register_worker(JOB_KIND, financial_worker)
+
+
+async def launch(job_seeker_id: str, campaign_id: str | None = None) -> str:
+    """Start a financial collection job in the background.  Returns the job id."""
+    from dreamjob.jobs.runner import runner  # noqa: PLC0415 - avoids a cycle
+
+    register_financial_worker()
+    job_id = runner.create(JOB_KIND, job_seeker_id=job_seeker_id, campaign_id=campaign_id)
+    await runner.start(job_id)
+    return job_id
+
+
+register_financial_worker()

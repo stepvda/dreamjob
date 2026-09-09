@@ -1,0 +1,105 @@
+{
+ "total": 156,
+ "results": [
+  {
+   "id": 935944,
+   "shortcode": "736464CD1B",
+   "title": "Junior Java Programmer",
+   "remote": true,
+   "location": {
+    "country": "Greece",
+    "countryCode": "GR",
+    "city": "Athens",
+    "region": "Attica"
+   },
+   "locations": [
+    {
+     "country": "Greece",
+     "countryCode": "GR",
+     "city": "Athens",
+     "region": "Attica",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "JJP/09/26",
+   "published": "2026-09-04T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [
+    "PRA"
+   ],
+   "accountUid": "76bb50c5-04fa-42dc-a813-7b1e377d324d",
+   "approvalStatus": "approved",
+   "workplace": "remote"
+  },
+  {
+   "id": 6079592,
+   "shortcode": "FE440E3CB2",
+   "title": "Business Analyst",
+   "remote": false,
+   "location": {
+    "country": "Belgium",
+    "countryCode": "BE",
+    "city": "Brussels",
+    "region": "Brussels"
+   },
+   "locations": [
+    {
+     "country": "Belgium",
+     "countryCode": "BE",
+     "city": "Brussels",
+     "region": "Brussels",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "20261/09/2026",
+   "published": "2026-09-04T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [
+    "PRD"
+   ],
+   "accountUid": "76bb50c5-04fa-42dc-a813-7b1e377d324d",
+   "approvalStatus": "approved",
+   "workplace": "on_site"
+  },
+  {
+   "id": 6079807,
+   "shortcode": "1F9E69703D",
+   "title": "Business Analyst",
+   "remote": true,
+   "location": {
+    "country": "Belgium",
+    "countryCode": "BE",
+    "city": "Brussels",
+    "region": "Brussels"
+   },
+   "locations": [
+    {
+     "country": "Belgium",
+     "countryCode": "BE",
+     "city": "Brussels",
+     "region": "Brussels",
+     "hidden": false
+    }
+   ],
+   "state": "published",
+   "isInternal": false,
+   "code": "20264/09/26",
+   "published": "2026-09-04T00:00:00.000Z",
+   "type": "full",
+   "language": "en",
+   "department": [
+    "PRD"
+   ],
+   "accountUid": "76bb50c5-04fa-42dc-a813-7b1e377d324d",
+   "approvalStatus": "approved",
+   "workplace": "remote"
+  }
+ ],
+ "nextPage": "WzE3ODgyMjA4MDAwMDAsMTE3MDUwMV0="
+}

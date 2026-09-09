@@ -6,13 +6,15 @@ CBSO Consult API.  For the primary jurisdiction this is *the* source: five
 financial years, in one place, filed under the KBO/BCE enterprise number that
 :mod:`dreamjob.adapters.registries.kbo` resolved.
 
-The API is used the way it is meant to be:
+The API is used the way it is meant to be, against the key-gated gateway at
+``ws.cbso.nbb.be/authentic`` - not the web console's own ``consult.cbso.nbb.be``
+back end, which answers 403 to everything and ignores the subscription key:
 
-* ``/enterprise/{number}/references`` lists the deposits, newest first, with
+* ``/legalEntity/{number}/references`` lists the deposits, newest first, with
   the exercise dates that decide which five years are wanted;
 * ``/deposit/{reference}/accountingData`` served as ``application/x.jsonxbrl``
   gives the structured form - statutory codes and values, no parsing risk;
-* the same deposit served as ``application/pdf`` is the fall-back for the
+* the same route served as ``application/pdf`` is the fall-back for the
   deposits that predate structured filing, and goes through the PDF path in
   :mod:`dreamjob.pipeline.filing_extract` (pdfplumber, statutory codes, then
   LLM assistance for the awkward ones).
@@ -42,8 +44,23 @@ from dreamjob.pipeline import filing_extract as fx
 
 log = logging.getLogger(__name__)
 
-CONSULT_BASE = "https://consult.cbso.nbb.be/api/rs-consult"
+#: The CBSO gateway that honours ``NBB-CBSO-Subscription-Key``.  Probed live:
+#: ``/legalEntity/{n}/references`` and ``/deposit/{r}/accountingData`` answer 401
+#: without a key (the route exists), ``/enterprise/...`` and ``/deposit/{r}``
+#: answer 404 (they do not).
+CONSULT_BASE = "https://ws.cbso.nbb.be/authentic"
 JSONXBRL = "application/x.jsonxbrl"
+
+
+def references_url(number: str) -> str:
+    """The deposit list of one legal entity (FR-241)."""
+    return f"{CONSULT_BASE}/legalEntity/{number}/references"
+
+
+def accounting_data_url(reference: str) -> str:
+    """One deposit's accounting data; the content type decides JSON-XBRL or PDF."""
+    return f"{CONSULT_BASE}/deposit/{reference}/accountingData"
+
 
 #: Deposit models that carry a full income statement; the abbreviated and
 #: micro models omit turnover, which FR-245 handles rather than guesses.
@@ -98,23 +115,24 @@ class NBBAdapter(RegistryAdapter):
             result.note("No KBO/BCE enterprise number: the NBB cannot be queried without one")
             return result
 
-        deposits = await self.references(number, egress=egress)
-        if not deposits:
-            result.estimated = True
-            result.note(
-                f"No deposits found for enterprise {format_enterprise_number(number)}; "
-                "the company may be too young to have filed"
-            )
-            return result
+        async with self.session(egress) as client:
+            deposits = await self.references(number, egress=client)
+            if not deposits:
+                result.estimated = True
+                result.note(
+                    f"No deposits found for enterprise {format_enterprise_number(number)}; "
+                    "the company may be too young to have filed"
+                )
+                return result
 
-        wanted = self.select_years(deposits, years)
-        for deposit in wanted:
-            facts = await self.read_deposit(
-                deposit, egress=egress, llm=llm, company_name=company.get("name")
-            )
-            result.facts.extend(facts)
-            if deposit.get("url"):
-                result.documents.append(deposit)
+            wanted = self.select_years(deposits, years)
+            for deposit in wanted:
+                facts = await self.read_deposit(
+                    deposit, egress=client, llm=llm, company_name=company.get("name")
+                )
+                result.facts.extend(facts)
+                if deposit.get("url"):
+                    result.documents.append(deposit)
 
         by_year: dict[int, fx.FilingFacts] = {}
         for record in sorted(result.facts, key=lambda r: (r.fiscal_year, len(r.known_fields()))):
@@ -132,7 +150,7 @@ class NBBAdapter(RegistryAdapter):
     # -- API calls ----------------------------------------------------------
     async def references(self, number: str, *, egress: Any) -> list[dict[str, Any]]:
         """The company's deposits, newest exercise first (FR-241)."""
-        url = f"{CONSULT_BASE}/enterprise/{number}/references"
+        url = references_url(number)
         try:
             response = await egress.fetch(url, headers=self._headers("application/json"))
         except Exception as exc:  # noqa: BLE001 - a registry outage degrades, never crashes
@@ -174,7 +192,7 @@ class NBBAdapter(RegistryAdapter):
                     "model": str(entry.get("ModelType") or entry.get("modelType") or "").lower(),
                     "deposit_date": entry.get("DepositDate") or entry.get("depositDate"),
                     "language": entry.get("Language") or entry.get("language"),
-                    "url": f"{CONSULT_BASE}/deposit/{reference}",
+                    "url": accounting_data_url(str(reference)),
                 }
             )
         deposits.sort(key=lambda d: (d["fiscal_year"] or 0), reverse=True)
@@ -208,7 +226,7 @@ class NBBAdapter(RegistryAdapter):
     ) -> list[fx.FilingFacts]:
         """Structured form first, PDF second (FR-242)."""
         reference = deposit["reference"]
-        structured = f"{CONSULT_BASE}/deposit/{reference}/accountingData"
+        structured = accounting_data_url(reference)
         try:
             response = await egress.fetch(structured, headers=self._headers(JSONXBRL))
             if response.ok and response.text.strip().startswith(("{", "[")):
@@ -233,8 +251,10 @@ class NBBAdapter(RegistryAdapter):
             log.info("[%s] structured deposit %s unavailable (%s)", self.key, reference, exc)
 
         try:
+            # The same route, asked for as a PDF: the gateway has no separate
+            # document path (``/deposit/{reference}`` answers 404).
             response = await egress.fetch(
-                f"{CONSULT_BASE}/deposit/{reference}", headers=self._headers("application/pdf")
+                accounting_data_url(reference), headers=self._headers("application/pdf")
             )
         except Exception as exc:  # noqa: BLE001
             log.info("[%s] PDF deposit %s unavailable (%s)", self.key, reference, exc)

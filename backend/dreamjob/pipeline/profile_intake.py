@@ -450,6 +450,11 @@ def apply_resolutions(sections: dict[str, Any], conflicts: list[dict]) -> dict[s
         resolution = conflict.get("resolution")
         if resolution in (None, "", "unresolved"):
             continue
+        if resolution == "blank":
+            # The job seeker chose to leave the field out entirely - drop it
+            # rather than substituting either of the conflicting values.
+            clear_path(sections, conflict["field_path"])
+            continue
         if resolution == "linkedin":
             value = conflict.get("value_linkedin")
         elif resolution == "cv":
@@ -458,6 +463,47 @@ def apply_resolutions(sections: dict[str, Any], conflicts: list[dict]) -> dict[s
             value = conflict.get("resolved_value")
         set_path(sections, conflict["field_path"], value)
     return sections
+
+
+def clear_path(sections: dict[str, Any], path: str) -> bool:
+    """Remove the value at ``path``.
+
+    ``set_path`` writes a value; ``clear_path`` removes it.  A scalar leaf in a
+    dict is deleted; a list element is set to ``None`` (not popped, because
+    popping would shift the indices that the profile's other conflicts and
+    paths reference).  "Leave blank" then means the fact is absent, never that
+    a slot in the middle of the array disappeared.
+    """
+    node: Any = sections
+    parts = path.split(".")
+    for part in parts[:-1]:
+        if isinstance(node, list):
+            if not part.isdigit() or int(part) >= len(node):
+                return False
+            node = node[int(part)]
+        elif isinstance(node, dict):
+            if part not in node:
+                return False
+            node = node[part]
+        else:
+            return False
+    leaf = parts[-1]
+
+    if isinstance(node, list) and leaf.isdigit():
+        idx = int(leaf)
+        if idx >= len(node):
+            return False
+        node[idx] = None
+        return True
+    if isinstance(node, dict):
+        if leaf not in node:
+            return False
+        if node.get(leaf) in (None, "", [], {}):
+            del node[leaf]
+        else:
+            node[leaf] = None
+        return True
+    return False
 
 
 def set_path(sections: dict[str, Any], path: str, value: Any) -> bool:

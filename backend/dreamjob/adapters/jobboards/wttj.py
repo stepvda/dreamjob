@@ -8,13 +8,22 @@ about it and the adapter reflects all three:
   non-browser clients) and emits no JSON-LD, so scraping the search page is not
   a viable route;
 * ``https://api.welcometothejungle.com/api/v1/organizations/{slug}`` *is*
-  reachable and keyless, and gives the company profile that the company slice
-  wants (sectors, offices, headcount band);
+  reachable and keyless and gives the company profile the company slice wants
+  (sectors, offices, headcount band) - but it has no vacancy sub-resource
+  (``/organizations/{slug}/jobs`` answers 404), so it cannot feed this adapter.
+  :meth:`WelcomeToTheJungleAdapter.organization_url` builds that URL for the
+  company-profiling slice; nothing in *this* adapter calls it;
 * job search runs on a hosted Algolia index whose application id and
   search-only key are issued to the site.  This adapter implements the Algolia
   query protocol in full; the credentials and the index name come from
   ``native_query`` because they are the operator's to supply, not values to be
   harvested from someone else's page.
+
+So without operator-supplied credentials or advert URLs there is no route to a
+vacancy at all, and the adapter is catalogued as **disabled** rather than
+sitting in every plan as an enabled API source that issues no request (FR-161,
+FR-164).  Asking for a route it does not have now fails the plan item with
+that reason instead of reporting nothing found (FR-185).
 
 Modes (``native_query["mode"]``)
     ``pages``     (default) parse advert URLs given in ``start_urls``
@@ -101,9 +110,11 @@ class WelcomeToTheJungleAdapter(HtmlBoardAdapter):
     requires_ack = False
     rate_limit_rps = 0.5
     legal_notes = (
-        "Public site blocks automated clients and its terms restrict re-use. The adapter "
-        "uses the keyless organisation API and, where the operator supplies their own "
-        "hosted-search credentials, the job index; it never harvests keys from the site."
+        "Public site blocks automated clients and its terms restrict re-use, and the "
+        "keyless organisation API carries company profiles but no vacancies. This source "
+        "therefore collects nothing until the operator supplies their own hosted-search "
+        "credentials or advert URLs, and is catalogued as disabled until they do; it "
+        "never harvests keys from the site."
     )
     capabilities = AdapterCapabilities(
         keyword_search=True, location_filter=True, company_lookup=True,
@@ -125,10 +136,23 @@ class WelcomeToTheJungleAdapter(HtmlBoardAdapter):
     }
 
     # -- fetch --------------------------------------------------------------
+    def has_route(self, cfg: dict[str, Any] | None = None) -> bool:
+        """A route exists only with advert URLs or hosted-search credentials."""
+        cfg = self.defaults if cfg is None else cfg
+        if str(cfg.get("mode") or "pages") == "algolia":
+            return bool(cfg.get("algolia_app_id") and cfg.get("algolia_api_key"))
+        return bool(cfg.get("start_urls") or cfg.get("url_template"))
+
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
         cfg = self.config(item)
         if str(cfg.get("mode") or "pages") == "algolia":
-            return await self._fetch_algolia(cfg)
+            return self.settle(
+                await self._fetch_algolia(cfg),
+                nothing_to_fetch=(
+                    "hosted search needs algolia_app_id and algolia_api_key in the plan "
+                    "item; they are the operator's to supply (IR-101)"
+                ),
+            )
         return await super().fetch(item)
 
     async def _fetch_algolia(self, cfg: dict[str, Any]) -> list[RawRecord]:
@@ -221,5 +245,9 @@ class WelcomeToTheJungleAdapter(HtmlBoardAdapter):
 
     @staticmethod
     def organization_url(slug: str) -> str:
-        """Keyless company-profile endpoint, for the company-profiling slice."""
+        """Keyless company-profile endpoint, for the company-profiling slice.
+
+        Not used by this adapter: the endpoint returns the organisation only,
+        and there is no vacancy sub-resource behind it.
+        """
         return ORGANIZATION_API.format(slug=slug)

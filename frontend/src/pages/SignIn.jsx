@@ -60,9 +60,13 @@ export default function SignIn({ onSignedIn }) {
       }}
     >
       <div className="card" style={{ width: 380 }}>
-        <div style={{ marginBottom: 20 }}>
-          <h1 style={{ margin: 0, fontSize: 20, letterSpacing: '-0.02em' }}>Dream Job</h1>
-          <p className="muted small" style={{ margin: '4px 0 0' }}>
+        <div style={{ marginBottom: 22 }}>
+          <img
+            src="/logo-lockup.png"
+            alt="Dream Job"
+            style={{ height: 34, width: 'auto', display: 'block' }}
+          />
+          <p className="muted small" style={{ margin: '10px 0 0' }}>
             AI-assisted job discovery and application platform
           </p>
         </div>

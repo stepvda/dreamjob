@@ -23,6 +23,13 @@ row, which is exactly the extensibility NFR-601 asks for.
 ``language``          force a language instead of detecting one
 ``country``           ISO-2 fallback for the ``vacancy.country`` column
 
+The campaign planner writes the same three things under different names -
+``keywords``, ``location``, ``countries`` - so :meth:`HtmlBoardAdapter.config`
+reads both vocabularies.  It is one character of difference (``keywords`` vs
+``queries``, ``location`` vs ``locations``) and it silently emptied the search
+box of every board query the planner produced, which is why the live boards
+were all fetching ``?trefwoord=&plaats=``.
+
 A selector is ``"css"`` for the element's text, ``"css@attr"`` for an
 attribute (``href``/``src`` are resolved against the page URL), and
 alternatives may be separated by ``||``.
@@ -35,6 +42,7 @@ pages that yield neither.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 from urllib.parse import quote_plus, urljoin
 
@@ -51,20 +59,23 @@ from dreamjob.adapters.vacancy_source import (
     VacancySourceAdapter,
     application_route,
     country_from_location,
+    country_terms,
     html_to_text,
     jobposting_to_fields,
     jsonld_jobpostings,
     keywords_from,
+    location_terms,
     locations_from,
     normalise_contract_type,
     normalise_language,
     normalise_work_arrangement,
     parse_datetime,
     parse_salary_text,
+    query_terms,
     requested_page,
     split_skills,
 )
-from dreamjob.egress.client import FetchResult, RobotsDisallowed
+from dreamjob.db.connection import execute
 
 try:  # pragma: no cover
     from selectolax.parser import HTMLParser
@@ -85,6 +96,27 @@ DETAIL_KEYS = ("title", "description", "company", "location", "posted_at", "appl
 # ---------------------------------------------------------------------------
 # Selector engine
 # ---------------------------------------------------------------------------
+
+#: Text a client-rendered page shows while its JavaScript loads.  A selector
+#: that matches one of these has matched the application shell, not the advert.
+PLACEHOLDER_RE = re.compile(
+    r"toepassing laden|pagina laden|application loading|loading\.\.\.|laden\.\.\.|"
+    r"chargement|wird geladen|please enable javascript|javascript is required|"
+    r"you need to enable javascript",
+    re.IGNORECASE,
+)
+#: An advert shorter than this is a fragment or a placeholder, not a description.
+MIN_DESCRIPTION_CHARS = 120
+
+
+def is_extracted(description: str | None, cfg: dict[str, Any] | None = None) -> bool:
+    """Did the detail page actually yield an advert? (NFR-403)"""
+    text = (description or "").strip()
+    minimum = int((cfg or {}).get("min_description_chars") or MIN_DESCRIPTION_CHARS)
+    if len(text) < minimum:
+        return False
+    return not PLACEHOLDER_RE.search(text[:400])
+
 
 def select(node: Any, spec: str | None, base_url: str = "") -> str | None:
     """Evaluate one ``"css@attr || fallback"`` selector against a node."""
@@ -125,15 +157,65 @@ class HtmlBoardAdapter(VacancySourceAdapter):
 
     # -- configuration ------------------------------------------------------
     def config(self, item: PlanItem) -> dict[str, Any]:
+        native = dict(getattr(item, "native_query", None) or {})
         merged = dict(self.defaults)
-        merged.update({k: v for k, v in (item.native_query or {}).items() if v is not None})
+        merged.update({k: v for k, v in native.items() if v is not None})
         selectors = dict(self.defaults.get("selectors") or {})
-        selectors.update((item.native_query or {}).get("selectors") or {})
+        selectors.update(native.get("selectors") or {})
         merged["selectors"] = selectors
         details = dict(self.defaults.get("detail_selectors") or {})
-        details.update((item.native_query or {}).get("detail_selectors") or {})
+        details.update(native.get("detail_selectors") or {})
         merged["detail_selectors"] = details
+
+        # FR-162: read the planner's vocabulary as well as this adapter's own.
+        # A plan item that says {"keywords": ["AI Engineer"], "location":
+        # "Belgium"} means exactly what {"queries": [...], "locations": [...]}
+        # means; ignoring it searched every board for nothing at all.
+        queries = query_terms(merged)
+        if queries:
+            merged["queries"] = queries
+        locations = location_terms(merged)
+        if locations:
+            merged["locations"] = locations
+        countries = country_terms(merged)
+        if countries and not merged.get("country"):
+            merged["country"] = countries[0]
+        if merged.get("max_pages") and "pages" not in native:
+            merged["pages"] = merged["max_pages"]
         return merged
+
+    def has_route(self, cfg: dict[str, Any] | None = None) -> bool:
+        """Can this board be reached with the configuration it has? (NFR-601)
+
+        A configuration with neither a URL template nor a start URL issues no
+        request at all.  Reporting that as ``done`` with zero records is what
+        let ``board.generic`` sit in every campaign plan, consuming plan slots
+        and page budget, without ever having made a single request.
+        """
+        cfg = self.defaults if cfg is None else cfg
+        return bool(cfg.get("url_template") or cfg.get("start_urls"))
+
+    def register(self) -> None:
+        """FR-161: a source that cannot reach anything is not an enabled source.
+
+        The administrator's own decision wins: once the source is acknowledged
+        (IR-101) this leaves ``enabled`` alone, so configuring a board and
+        switching it on is not undone by the next restart.
+        """
+        super().register()
+        if self.has_route():
+            return
+        changed = execute(
+            "UPDATE source_catalogue SET enabled = 0 "
+            "WHERE adapter_key = ? AND acknowledged_at IS NULL AND enabled = 1",
+            (self.key,),
+        )
+        if changed:
+            log.info(
+                "[%s] catalogued as disabled: it has no URL template and no start URLs, "
+                "so an administrator has to store a board configuration first (NFR-601)",
+                self.key,
+            )
 
     def listing_urls(self, cfg: dict[str, Any]) -> list[str]:
         explicit = [str(u) for u in cfg.get("start_urls") or []]
@@ -199,25 +281,7 @@ class HtmlBoardAdapter(VacancySourceAdapter):
             )
         return items
 
-    # -- fetch (IR-102) -----------------------------------------------------
-    async def _get(self, url: str, **kwargs: Any) -> FetchResult | None:
-        if self.egress is None:
-            raise RuntimeError(f"[{self.key}] fetch() needs an EgressClient (IR-102)")
-        try:
-            result = await self.egress.fetch(
-                url, access_method=self.access_method.value, **kwargs
-            )
-        except RobotsDisallowed:
-            log.warning("[%s] robots.txt disallows %s (FR-182)", self.key, url)
-            return None
-        except Exception as exc:  # noqa: BLE001 - a blocked board must not stop the job
-            log.warning("[%s] fetch failed for %s: %s", self.key, url, exc)
-            return None
-        if not result.ok:
-            log.info("[%s] %s returned HTTP %s", self.key, url, result.status_code)
-            return None
-        return result
-
+    # -- fetch (IR-102, FR-182) ---------------------------------------------
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
         cfg = self.config(item)
         max_records = int(cfg.get("max_records") or DEFAULT_MAX_RECORDS)
@@ -269,7 +333,16 @@ class HtmlBoardAdapter(VacancySourceAdapter):
                         meta={"kind": "detail", "cfg": cfg, "card": card},
                     )
                 )
-        return records
+        # FR-185: "blocked by a bot filter", "the search URL 404s" and "this
+        # board has no matching vacancies" are three different answers and the
+        # plan item has to be able to tell them apart.
+        return self.settle(
+            records,
+            nothing_to_fetch=(
+                "no listing URL: the plan item has neither start_urls nor a url_template "
+                "this adapter could fill in (NFR-601)"
+            ),
+        )
 
     # -- parse (FR-183) -----------------------------------------------------
     def list_cards(self, markup: str, url: str, cfg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -333,12 +406,21 @@ class HtmlBoardAdapter(VacancySourceAdapter):
             tree = HTMLParser(raw.content)
             picked = {key: select(tree, selectors.get(key), raw.url) for key in DETAIL_KEYS}
             picked = {k: v for k, v in picked.items() if v}
-            if picked.get("description"):
+            if is_extracted(picked.get("description"), cfg):
                 merged = {**card, **picked}
                 merged["source_url"] = raw.url
                 merged["application_target"] = picked.get("apply_url") or card.get("source_url")
                 merged.pop("apply_url", None)
                 return [self._finish(merged, cfg)]
+            if picked.get("description"):
+                # A single-page application answers 200 with its loading shell.
+                # Writing "Toepassing laden..." into vacancy.description as
+                # though it were the advert is worse than extracting nothing.
+                log.info(
+                    "[%s] %s served a placeholder rather than an advert (%r); treating it "
+                    "as no extraction (NFR-403)",
+                    self.key, raw.url, picked["description"][:60],
+                )
 
         # FR-183: nothing deterministic worked, so ask the model.
         text = html_to_text(raw.content)
@@ -392,12 +474,19 @@ class HtmlBoardAdapter(VacancySourceAdapter):
 
 @register_adapter
 class GenericHtmlBoardAdapter(HtmlBoardAdapter):
-    """A board an administrator added by storing selectors, not by writing code."""
+    """A board an administrator added by storing selectors, not by writing code.
+
+    It has no defaults of its own, so until a configuration exists it can reach
+    nothing: :meth:`HtmlBoardAdapter.register` therefore catalogues it as
+    disabled, and it is not selected into a plan (FR-161, FR-164).  Enabling it
+    is the same act as configuring it.
+    """
 
     key = "board.generic"
     display_name = "Generic HTML job board"
     legal_notes = (
-        "Behaviour comes entirely from the stored configuration. The administrator "
+        "Behaviour comes entirely from the stored configuration, so this source is "
+        "catalogued as disabled until an administrator stores one. The administrator "
         "who adds a board is responsible for checking that board's terms of use; "
         "robots.txt and rate limits are enforced by the egress layer (FR-182)."
     )

@@ -1,0 +1,67 @@
+[
+ {
+  "additionalPlain": "Lever builds modern recruiting software for teams to source, interview, and hire top talent. Our team strives to set a new bar for enterprise software with modern, well-designed, real-time apps. We participated in Y Combinator in summer 2012, and since then have raised $73 million. As the applicant tracking system of choice for Netflix, Eventbrite, ClearSlide, change.org, and thousands more leading companies, Lever means you hire the best by hiring together.\n\nLever is an equal opportunity employer. We are committed to providing reasonable accommodations and will work with you to meet your needs. If you are a person with a disability and require assistance during the application process, please don’t hesitate to reach out! We celebrate our inclusive work environment and welcome members of all backgrounds and perspectives. Learn more about our team culture and commitment to diversity and inclusion. \n",
+  "additional": "<div>Lever builds modern recruiting software for teams to source, interview, and hire top talent. Our team strives to set a new bar for enterprise software with modern, well-designed, real-time apps. We participated in Y Combinator in summer 2012, and since then have raised $73 million. As the applicant tracking system of choice for Netflix, Eventbrite, ClearSlide, change.org, and thousands more leading companies, Lever means you hire the best by hiring together.</div><div><br></div><div>Lever is an equal opportunity employer. We are committed to providing reasonable accommodations and will work with you to meet your needs. If you are a person with a disability and require assistance during the application process, please don’t hesitate to reach out! We celebrate our inclusive work environment and welcome members of all backgrounds and perspectives.&nbsp;<a class=\"postings-link\" href=\"https://inside.lever.co/\">Learn more about our team culture and commitment to diversity and inclusion.</a>&nbsp;</div>",
+  "categories": {
+   "location": "Baltimore, MD",
+   "team": "Operations",
+   "allLocations": [
+    "Baltimore, MD"
+   ]
+  },
+  "createdAt": 1565990241800,
+  "descriptionPlain": "Welcome to the Demo Job Listing for Lever! This is a fictional job created solely for demonstration purposes and is not an actual open position. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.\n\nWhile you can explore the application process and features here, please note that applications submitted to this job will not be reviewed or responded to as it’s for demonstration only. \n\n\nThis posting\n",
+  "description": "<div>Welcome to the <b>Demo Job Listing</b> for Lever! This is a fictional job created solely for demonstration purposes and is <b>not an actual open position</b>. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.</div><div><br></div><div>While you can explore the application process and features here, please note that <b>applications submitted to this job will not be reviewed or responded to</b> as it’s for demonstration only. </div><div><br></div><div>This posting</div>",
+  "id": "681fbc53-1e34-4a46-8677-3a78118674eb",
+  "lists": [],
+  "text": "Approved Professional 3",
+  "country": "US",
+  "workplaceType": "remote",
+  "opening": "<div>Welcome to the <b>Demo Job Listing</b> for Lever! This is a fictional job created solely for demonstration purposes and is <b>not an actual open position</b>. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.</div><div><br></div><div>While you can explore the application process and features here, please note that <b>applications submitted to this job will not be reviewed or responded to</b> as it’s for demonstration only. </div>",
+  "openingPlain": "Welcome to the Demo Job Listing for Lever! This is a fictional job created solely for demonstration purposes and is not an actual open position. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.\n\nWhile you can explore the application process and features here, please note that applications submitted to this job will not be reviewed or responded to as it’s for demonstration only. \n",
+  "descriptionBody": "<div>This posting</div>",
+  "descriptionBodyPlain": "This posting\n",
+  "hostedUrl": "https://jobs.lever.co/leverdemo/681fbc53-1e34-4a46-8677-3a78118674eb",
+  "applyUrl": "https://jobs.lever.co/leverdemo/681fbc53-1e34-4a46-8677-3a78118674eb/apply"
+ },
+ {
+  "additionalPlain": "",
+  "additional": "<div>\n<p data-v-a04cd505=\"\">Mobileye changes the way we drive, from preventing accidents to semi and fully autonomous vehicles. If you are an excellent, bright, hands-on person with a passion to make a difference come to lead the revolution!</p>\n</div>",
+  "categories": {
+   "commitment": "Regular Full Time (Salary)",
+   "department": "Engineering",
+   "location": "Jerusalem",
+   "team": "Software developer",
+   "allLocations": [
+    "Jerusalem"
+   ]
+  },
+  "createdAt": 1788318624638,
+  "descriptionPlain": "",
+  "description": "<div>We are looking for a talented and motivated Senior C++ Developer to join our Integration &amp; Software Releases team. In this role, you will be responsible for designing, developing, and maintaining scalable end-to-end systems. You will collaborate closely with product managers, architects and other engineers to deliver high-quality solutions in a fast-paced, innovative environment.</div>",
+  "id": "18c23ab2-ac77-473b-b2aa-ba13e0d52164",
+  "lists": [
+   {
+    "text": "What will your job look like",
+    "content": "<ul data-v-a04cd505=\"\" style=\"list-style-type: square;\">\n<li>\n<p>Design, Develop and maintain scalable and high-performance end-to-end systems.</p>\n</li>\n<li>\n<p>Collaborate with cross-functional teams to define and deliver new features.</p>\n</li>\n<li>\n<p>Write clean, maintainable, and well-documented code.</p>\n</li>\n<li>\n<p>Participate in code reviews and contribute to best practices.</p>\n</li>\n<li>\n<p>Troubleshoot, debug, and optimize existing systems.</p>\n</li>\n</ul>"
+   },
+   {
+    "text": "All you need is",
+    "content": "<div>\n<ul data-v-a04cd505=\"\" style=\"list-style-type: square;\">\n<li>\n<p>B.Sc/BA in Computer Engineering or Computer Science - must.</p>\n</li>\n<li>\n<p>5+ years of experience as a Software Developer - must.</p>\n</li>\n<li>\n<p>Experience in C++ programming language - must.</p>\n</li>\n<li>\n<p>Low-level SW development and debugging experience.</p>\n</li>\n<li>\n<p>Experience in Linux OS.</p>\n</li>\n<li>\n<p>Familiarity with CI/CD pipelines.</p>\n</li>\n<li>\n<p>Experience with version control systems (e.g., Git).</p>\n</li>\n<li>\n<p>Strong verbal skills in English.</p>\n</li>\n\n</ul></div>"
+   },
+   {
+    "text": "Nice to have",
+    "content": "<div>\n<ul data-v-a04cd505=\"\" style=\"list-style-type: square;\">\n<li>Experience with Python programming language.</li>\n<li>Experience with containerization tools (Docker, Kubernetes).</li>\n\n</ul></div>"
+   }
+  ],
+  "text": "C++ Software Developer",
+  "country": "IL",
+  "workplaceType": "hybrid",
+  "opening": "",
+  "openingPlain": "",
+  "descriptionBody": "<div>We are looking for a talented and motivated Senior C++ Developer to join our Integration &amp; Software Releases team. In this role, you will be responsible for designing, developing, and maintaining scalable end-to-end systems. You will collaborate closely with product managers, architects and other engineers to deliver high-quality solutions in a fast-paced, innovative environment.</div>",
+  "descriptionBodyPlain": "",
+  "hostedUrl": "https://jobs.lever.co/leverdemo/18c23ab2-ac77-473b-b2aa-ba13e0d52164",
+  "applyUrl": "https://jobs.lever.co/leverdemo/18c23ab2-ac77-473b-b2aa-ba13e0d52164/apply"
+ }
+]

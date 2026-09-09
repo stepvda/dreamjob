@@ -40,7 +40,8 @@ from dreamjob.adapters.base import (
     ToSStatus,
     register_adapter,
 )
-from dreamjob.adapters.website.crawler import extract_text, normalise_url
+from dreamjob.adapters.query_errors import UnusableQuery
+from dreamjob.adapters.website.crawler import extract_text, normalise_url, registrable_domain
 from dreamjob.egress.client import EgressClient, RobotsDisallowed
 
 log = logging.getLogger(__name__)
@@ -238,6 +239,32 @@ async def fetch_feed(egress: EgressClient, url: str) -> list[NewsItem]:
     return parse_feed(result.text, url)
 
 
+async def declared_feeds_of(egress: EgressClient, home_url: str) -> list[str]:
+    """The ``rel=alternate`` feeds the home page itself declares.
+
+    The module contract is that the feed is found rather than configured, and
+    the website crawl does read those declarations - but the collection path
+    calls this module without a crawl, and then only the conventional paths were
+    ever tried.  One request for the home page is what makes the promise true
+    for a newsroom that lives somewhere unconventional (FR-225).
+    """
+    try:
+        result = await egress.fetch(home_url)
+    except RobotsDisallowed:
+        log.debug("robots.txt disallows %s", home_url)
+        return []
+    except Exception as exc:  # noqa: BLE001 - discovery is best effort
+        log.debug("Could not read %s for feed declarations: %s", home_url, exc)
+        return []
+    if not result.ok:
+        return []
+    from dreamjob.adapters.website.crawler import (  # noqa: PLC0415 - avoids a cycle
+        discover_feed_links,
+    )
+
+    return discover_feed_links(result.text, home_url)
+
+
 async def collect_news(
     home_url: str,
     *,
@@ -245,6 +272,7 @@ async def collect_news(
     egress: EgressClient | None = None,
     max_feeds: int = 4,
     max_items: int = 40,
+    discover: bool = True,
 ) -> list[NewsItem]:
     """Newsroom items for one company, newest first (FR-225).
 
@@ -257,10 +285,13 @@ async def collect_news(
     if own_client:
         await client.__aenter__()
     try:
+        feeds = list(declared_feeds or [])
+        if discover and not feeds:
+            feeds = await declared_feeds_of(client, home_url)
         items: list[NewsItem] = []
         seen_urls: set[str] = set()
         tried = 0
-        for candidate in candidate_feed_urls(home_url, declared_feeds):
+        for candidate in candidate_feed_urls(home_url, feeds):
             if tried >= max_feeds or len(items) >= max_items:
                 break
             tried += 1
@@ -276,6 +307,42 @@ async def collect_news(
 
     items.sort(key=lambda i: i.published_at or "", reverse=True)
     return items[:max_items]
+
+
+def known_company_newsrooms(query: dict, limit: int = 3) -> list[dict[str, Any]]:
+    """Companies in the knowledge base whose newsroom is worth reading."""
+    from dreamjob.db.repositories import companies as repo  # noqa: PLC0415 - avoids a cycle
+
+    countries = query.get("countries") or ([query["country"]] if query.get("country") else [])
+    country = str(countries[0]).upper()[:2] if countries else None
+    try:
+        rows = repo.companies_in_country(country, limit=200)
+    except Exception:  # noqa: BLE001 - an empty knowledge base is the normal first case
+        log.exception("Could not read companies for a newsroom pass")
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("domain"):
+            continue
+        out.append({"domain": row["domain"], "company_id": row["id"]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def company_id_for_feed(url: str | None) -> str | None:
+    """The company a feed belongs to, resolved on its registrable domain (DR-101)."""
+    domain = registrable_domain(urlparse(url or "").netloc)
+    if not domain:
+        return None
+    from dreamjob.db.repositories import knowledge as repo  # noqa: PLC0415 - avoids a cycle
+
+    try:
+        row = repo.company_by_domain(domain)
+    except Exception:  # noqa: BLE001 - resolution is best effort
+        log.exception("Could not resolve a company for feed domain %s", domain)
+        return None
+    return str(row["id"]) if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -320,23 +387,84 @@ class NewsFeedAdapter(SourceAdapter):
             )
         return items
 
+    def newsroom_targets(self, query: dict) -> list[dict[str, Any]]:
+        """The newsrooms one plan item stands for (FR-225).
+
+        The adapter reads ``url``; the campaign planner writes a keyword search
+        (``query``/``companies``/``since_days``) and no url at all, so a news
+        plan item fetched nothing and was recorded as done.  Every shape is
+        accepted, and a plan item that names no company falls back to the
+        companies the knowledge base already holds - a newsroom is only worth
+        reading for a company we know.
+        """
+        seen: set[str] = set()
+        targets: list[dict[str, Any]] = []
+
+        def add(entry: Any, company_id: Any = None, feeds: Any = None) -> None:
+            url = entry if isinstance(entry, str) else ""
+            if isinstance(entry, dict):
+                url = str(entry.get("url") or entry.get("website") or "")
+                if not url and entry.get("domain"):
+                    url = f"https://{str(entry['domain']).strip().lstrip('/')}"
+                company_id = entry.get("company_id") or entry.get("id") or company_id
+                feeds = entry.get("feeds") or feeds
+            url = url.strip()
+            if url and not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
+            normalised = normalise_url(url) if url else None
+            if not normalised or normalised in seen:
+                return
+            seen.add(normalised)
+            targets.append(
+                {"url": normalised, "company_id": company_id, "feeds": list(feeds or [])}
+            )
+
+        add(query.get("url"), query.get("company_id"), query.get("feeds"))
+        for key in ("company_sites", "sites", "companies", "urls"):
+            entries = query.get(key)
+            if isinstance(entries, list):
+                for entry in entries:
+                    add(entry)
+        if targets:
+            return targets
+
+        for row in known_company_newsrooms(query):
+            add(row)
+        return targets
+
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
         query = item.native_query or {}
-        url = str(query.get("url") or "")
-        if not url:
-            return []
-        items = await collect_news(
-            url, declared_feeds=query.get("feeds") or [], egress=self.egress
-        )
-        return [
-            RawRecord(
-                url=news.url or news.feed_url,
-                content=news.text,
-                content_type="text/plain",
-                meta={"item": news.as_dict(), "company_id": query.get("company_id")},
+        targets = self.newsroom_targets(query)
+        if not targets:
+            raise UnusableQuery(
+                self.key,
+                "no newsroom to read: the plan item names no company site and the knowledge "
+                "base holds no company with a domain yet (FR-225)",
+                expected=("url", "companies", "company_sites"),
             )
-            for news in items
-        ]
+        max_items = int(query.get("max_items") or 40)
+        raws: list[RawRecord] = []
+        for target in targets:
+            items = await collect_news(
+                target["url"],
+                declared_feeds=target.get("feeds") or [],
+                egress=self.egress,
+                max_items=max_items,
+            )
+            raws.extend(
+                RawRecord(
+                    url=news.url or news.feed_url,
+                    content=news.text,
+                    content_type="text/plain",
+                    meta={
+                        "item": news.as_dict(),
+                        "company_id": target.get("company_id"),
+                        "home_url": target["url"],
+                    },
+                )
+                for news in items
+            )
+        return raws
 
     def parse(self, raw: RawRecord) -> list[dict]:
         item = (raw.meta or {}).get("item") or {}
@@ -344,8 +472,19 @@ class NewsFeedAdapter(SourceAdapter):
 
     def normalise(self, parsed: dict, raw: RawRecord) -> NormalisedRecord | None:
         """A news item becomes a hiring signal only when it says something (FR-225)."""
-        company_id = (raw.meta or {}).get("company_id")
+        meta = raw.meta or {}
+        company_id = meta.get("company_id") or company_id_for_feed(
+            meta.get("home_url") or parsed.get("feed_url") or raw.url
+        )
         if not company_id:
+            # ``hiring_signal.company_id`` is NOT NULL, so an item that cannot
+            # be attached to a company cannot be stored at all.  Say so once,
+            # rather than dropping the whole newsroom in silence (FR-225).
+            log.info(
+                "[%s] no company row matches %s; the news items are not stored as signals",
+                self.key,
+                meta.get("home_url") or raw.url,
+            )
             return None
         from dreamjob.pipeline.signals import classify_news  # noqa: PLC0415 - avoids a cycle
 

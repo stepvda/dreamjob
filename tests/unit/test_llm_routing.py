@@ -8,11 +8,9 @@ stored value.
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
-
 from dreamjob.db import connection as conn_mod
 from dreamjob.db.migrator import migrate
 

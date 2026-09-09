@@ -2,9 +2,16 @@
 
 Jobat publishes structured listing pages and emits schema.org ``JobPosting``
 on its advert pages, so extraction is deterministic where the site answers.
-It also sits behind a bot filter that returns HTTP 403 to unknown clients; the
-egress layer reports that as a failed plan item rather than retrying around it,
-and the adapter is marked RESTRICTED so an operator sees why coverage is thin.
+
+It also sits behind a Cloudflare filter that answers HTTP 403 to any client it
+does not recognise - including ``robots.txt``-advertised paths such as
+``/sitemaps/sitemap.xml`` and the search pages this adapter reads.  That 403 is
+now what it is: every request of the plan item failed, so the plan item fails
+with "HTTP 403" against its name (FR-185).  It used to be swallowed and
+recorded as ``done`` with zero records, which read on the dashboard exactly
+like a board with no matching vacancies.  Whether the block is permanent is a
+property of the network the collector runs on, so the adapter stays enabled and
+RESTRICTED and lets the operator see the failures and decide.
 """
 
 from __future__ import annotations

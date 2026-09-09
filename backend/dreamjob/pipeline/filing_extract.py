@@ -1192,14 +1192,53 @@ async def ecb_rate_to_eur(currency: str, on_date: str, egress: Any = None) -> tu
     return quote.rate, quote.on_date
 
 
-def eur_values(row: dict[str, Any]) -> dict[str, float | None]:
-    """The EUR-normalised view of a stored ``financial_year`` row (DR-103)."""
+def eur_rate(row: dict[str, Any]) -> float | None:
+    """The rate that converts this row to EUR, or ``None`` when there is none.
+
+    DR-103 stores the rate beside the figures precisely so that a conversion is
+    never assumed.  Treating a missing rate as parity is the one reading that is
+    silently wrong: an Apple filing in USD would be presented as though 391 bn
+    USD were 391 bn EUR, an 11% overstatement with nothing to show for it.
+    """
     rate = row.get("fx_rate_to_eur")
-    rate = 1.0 if rate in (None, "") else float(rate)
+    if rate not in (None, ""):
+        try:
+            value = float(rate)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value:
+            return value
+    return 1.0 if str(row.get("currency") or "EUR").upper() == "EUR" else None
+
+
+def unconverted_flag(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The NFR-404 reconciliation flag a row without a usable rate must carry."""
+    if eur_rate(row) is not None:
+        return None
+    currency = str(row.get("currency") or "EUR").upper()
+    return {
+        "code": "fx_rate_missing",
+        "detail": (
+            f"{currency} figures are stored with no conversion rate; they are not comparable "
+            "in EUR and are left out of the EUR view rather than read as parity (DR-103)"
+        ),
+        "severity": "error",
+        "currency": currency,
+    }
+
+
+def eur_values(row: dict[str, Any]) -> dict[str, float | None]:
+    """The EUR-normalised view of a stored ``financial_year`` row (DR-103).
+
+    A non-EUR row with no stored rate yields ``None`` for every figure: what is
+    unknown is the EUR value, not the figure, and :func:`unconverted_flag` says
+    why.  The row's own currency values remain available on the row itself.
+    """
+    rate = eur_rate(row)
     out: dict[str, float | None] = {}
     for name in MONEY_FIELDS:
         value = row.get(name)
-        out[name] = None if value in (None, "") else float(value) * rate
+        out[name] = None if (rate is None or value in (None, "")) else float(value) * rate
     return out
 
 

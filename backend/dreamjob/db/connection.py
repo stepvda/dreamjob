@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from dreamjob.config import get_settings
+from dreamjob.observability import db_logging
 
 _write_lock = threading.RLock()
 _local = threading.local()
@@ -77,6 +78,8 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), check_same_thread=False, timeout=15.0)
         _configure(conn)
+        # NFR-701: statement visibility.  No-op unless DREAMJOB_LOG_SQL is on.
+        db_logging.attach(conn)
         setattr(_local, key, conn)
     return conn
 
@@ -91,14 +94,21 @@ def read_tx(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 def write_tx(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
     """Serialised write transaction.  Commits on success, rolls back on error."""
     conn = get_connection(db_path)
+    # NFR-701: duration, lock waits and rollbacks.  ``tx`` is a shared no-op
+    # object when logging is off, except on failure - a write that could not
+    # commit is always worth a line.
+    tx = db_logging.begin_write()
     with _write_lock:
         try:
             conn.execute("BEGIN IMMEDIATE")
+            tx.acquired()
             yield conn
             conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
+            tx.failed(exc)
             raise
+        tx.committed()
 
 
 def query_all(sql: str, params: tuple | dict = (), db_path: Path | None = None) -> list[dict]:
@@ -119,7 +129,7 @@ def query_one(sql: str, params: tuple | dict = (), db_path: Path | None = None) 
 
 
 def execute(sql: str, params: tuple | dict = (), db_path: Path | None = None) -> int:
-    with write_tx(db_path) as conn:
+    with db_logging.writing_sql(sql), write_tx(db_path) as conn:
         cur = conn.execute(sql, params)
         return cur.rowcount
 
@@ -131,7 +141,7 @@ def insert_row(table: str, values: dict, db_path: Path | None = None) -> str:
     payload = {k: (to_json(v) if isinstance(v, (dict, list)) else v) for k, v in values.items()}
     cols = ", ".join(payload)
     marks = ", ".join(f":{k}" for k in payload)
-    with write_tx(db_path) as conn:
+    with db_logging.writing(table, "INSERT", values["id"]), write_tx(db_path) as conn:
         conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", payload)
     return values["id"]
 
@@ -146,7 +156,7 @@ def upsert_row(
     updates = ", ".join(f"{k}=excluded.{k}" for k in payload if k not in conflict_cols)
     conflict = ", ".join(conflict_cols)
     sql = f"INSERT INTO {table} ({cols}) VALUES ({marks}) ON CONFLICT({conflict}) DO UPDATE SET {updates}"
-    with write_tx(db_path) as conn:
+    with db_logging.writing(table, "UPSERT", values.get("id")), write_tx(db_path) as conn:
         conn.execute(sql, payload)
 
 
@@ -156,5 +166,5 @@ def update_row(table: str, row_id: str, values: dict, db_path: Path | None = Non
     payload = {k: (to_json(v) if isinstance(v, (dict, list)) else v) for k, v in values.items()}
     sets = ", ".join(f"{k}=:{k}" for k in payload)
     payload["__id"] = row_id
-    with write_tx(db_path) as conn:
+    with db_logging.writing(table, "UPDATE", row_id), write_tx(db_path) as conn:
         conn.execute(f"UPDATE {table} SET {sets} WHERE id=:__id", payload)

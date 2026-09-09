@@ -50,7 +50,7 @@ from selectolax.parser import HTMLParser
 import dreamjob.llm as llm_package
 from dreamjob.config import get_settings
 from dreamjob.db.repositories import enrichment as repo
-from dreamjob.egress.client import EgressClient, RobotsDisallowed
+from dreamjob.egress.client import EgressClient, RobotsDisallowed, RobotsUnavailable
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError
 from dreamjob.pipeline.identity_match import (
     CONFIRMED,
@@ -388,22 +388,45 @@ def candidate_urls(anchors: ProfileAnchors, limit: int = 12) -> list[str]:
     The profile's own declared links first - those are self-asserted and score
     a cross-link signal immediately - then the handle-shaped guesses for the
     platforms where a professional's public work actually lives.
+
+    Only handles that came from a declared URL (``anchors.real_handles``) are
+    probed on third-party platforms.  A handle guessed from the name ("stephaneaa")
+    probes a fabricated address almost every time, so an enrichment run was
+    spending its whole budget on 404s and SSL failures; it is used only when the
+    profile declared no handle at all.  This is what keeps a run on the right
+    URLs instead of a table of guesses.
     """
     out: list[str] = []
     for url in anchors.declared_urls:
         if url.startswith("http") and registrable_domain(url) not in EXCLUDED_DOMAINS:
             out.append(url)
 
-    for handle in anchors.handles[:3]:
-        out += [
-            f"https://github.com/{handle}",
-            f"https://{handle}.substack.com",
-            f"https://gitlab.com/{handle}",
-            f"https://{handle}.github.io",
-        ]
+    guess_limit = 3 if not anchors.real_handles else 0
+    probe_handles = list(anchors.real_handles)
+    # Cap the probe set: a person rarely has more than a couple of platforms.
+    probe_handles = probe_handles[: max(1, limit - len(out) // 4)]
+    if not probe_handles:
+        probe_handles = anchors.handles[:guess_limit]
+
+    for handle in probe_handles:
+        for platform in ("github.com", "substack.com", "gitlab.com", "github.io"):
+            out.append(_platform_url(platform, handle))
 
     seen: set[str] = set()
     return [u for u in out if not (u in seen or seen.add(u))][:limit]
+
+
+def _platform_url(platform: str, handle: str) -> str:
+    """Build a profile URL for a declared handle on a known platform."""
+    if platform == "substack.com":
+        return f"https://{handle}.substack.com"
+    if platform == "github.io":
+        return f"https://{handle}.github.io"
+    if platform == "github.com":
+        return f"https://github.com/{handle}"
+    if platform == "gitlab.com":
+        return f"https://gitlab.com/{handle}"
+    return f"https://{platform}/{handle}"
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +515,9 @@ async def duckduckgo_search(
     url = f"{DDG_HTML_ENDPOINT}?q={quote_plus(query)}"
     try:
         result = await egress.fetch(url, use_cache=True)
+    except RobotsUnavailable as exc:
+        # Not "the endpoint said no" - "we never managed to ask" (FR-182).
+        raise SearchUnavailable(str(exc)) from exc
     except RobotsDisallowed as exc:
         raise SearchUnavailable(f"robots.txt disallows the search endpoint: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - surfaced as a degradation, not a crash
@@ -760,6 +786,9 @@ async def run_enrichment(
         for url, why in ordered:
             try:
                 fetched = await egress.fetch(url)
+            except RobotsUnavailable as exc:
+                report.errors.append(f"{url}: {exc}")
+                continue
             except RobotsDisallowed:
                 report.errors.append(f"robots.txt disallows {url}")
                 continue
@@ -856,3 +885,8 @@ def default_llm(job_seeker_id: str, campaign_id: str | None = None) -> LLMClient
 def run_enrichment_sync(job_seeker_id: str, **kwargs: Any) -> EnrichmentReport:
     """Blocking wrapper for FastAPI's threadpool routes and CLI use."""
     return asyncio.run(run_enrichment(job_seeker_id, **kwargs))
+
+
+# ---------------------------------------------------------------------------
+# Regression guard: handle derivation from declared URLs (FR-122)
+# ---------------------------------------------------------------------------

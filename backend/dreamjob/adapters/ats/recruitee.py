@@ -9,16 +9,23 @@ advert into ``description`` and ``requirements`` and states the work
 arrangement as three booleans (``remote``, ``hybrid``, ``on_site``), which maps
 directly onto the ``work_arrangement`` column.  Weekly hours give the FTE
 percentage without guessing.
+
+Compensation carries a ``period`` (``year``/``month``/``week``/``hour``).  The
+``vacancy`` columns are annual, so a stated range is scaled to a year; a period
+that cannot be scaled without inventing a working-time assumption (``hour``,
+``day``) is not stored at all rather than stored wrongly (FR-261).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from dreamjob.adapters.ats.common import ATSAdapter
 from dreamjob.adapters.base import PlanItem, RawRecord, register_adapter
 from dreamjob.adapters.vacancy_source import (
+    annualise_salary,
     application_route,
     country_from_location,
     extract_skills,
@@ -33,6 +40,8 @@ from dreamjob.adapters.vacancy_source import (
     title_matches,
 )
 
+log = logging.getLogger(__name__)
+
 API = "https://{slug}.recruitee.com/api/offers/"
 
 
@@ -45,27 +54,22 @@ class RecruiteeAdapter(ATSAdapter):
     legal_notes = "Public careers-site offers API, no key required; read-only."
 
     async def fetch(self, item: PlanItem) -> list[RawRecord]:
-        slug = self.slug_of(item)
-        url = API.format(slug=slug)
-        result = await self._get(url)
-        if result is None:
-            return []
-        return [
-            RawRecord(
-                url=url,
-                content=result.text,
-                content_type="application/json",
-                raw_document_id=result.raw_document_id,
-                meta={
-                    "slug": slug,
-                    "company_id": item.native_query.get("company_id"),
-                    "company_name": item.native_query.get("company_name"),
-                    "max_records": self.limit_of(item),
-                    "keywords": item.native_query.get("keywords") or [],
-                    "title_filter": item.native_query.get("title_filter"),
-                },
+        records: list[RawRecord] = []
+        for slug in self.slugs_of(item):
+            url = API.format(slug=slug)
+            result = await self._get(url)
+            if result is None:
+                continue
+            records.append(
+                RawRecord(
+                    url=url,
+                    content=result.text,
+                    content_type="application/json",
+                    raw_document_id=result.raw_document_id,
+                    meta=self.board_meta(item, slug),
+                )
             )
-        ]
+        return self.settle(records, nothing_to_fetch=self.no_board_named())
 
     def parse(self, raw: RawRecord) -> list[dict]:
         payload = json.loads(raw.content)
@@ -95,11 +99,24 @@ class RecruiteeAdapter(ATSAdapter):
             required = stated or required
             desirable = [s for s in desirable if s not in required]
 
+        # FR-261 records what the advert states, and Recruitee states a period
+        # next to the range: {"min": "2850", "max": "2950", "period": "month"}.
+        # The vacancy columns hold an annual figure, so a monthly range has to be
+        # scaled - storing 2850 as though it were the yearly salary is wrong by a
+        # factor of twelve and indistinguishable from a real annual range.
         salary = offer.get("salary") or {}
-        salary_min = salary.get("min")
-        salary_max = salary.get("max")
-        currency = salary.get("currency")
+        period = salary.get("period")
+        salary_min, salary_max = annualise_salary(
+            salary.get("min"), salary.get("max"), period
+        )
+        currency = salary.get("currency") if (salary_min or salary_max) else None
         if salary_min is None and salary_max is None:
+            if salary.get("min") or salary.get("max"):
+                log.info(
+                    "[%s] %r salary is stated per %r; not stored, because converting it "
+                    "to a year needs an assumption the advert does not make (FR-261)",
+                    self.key, offer.get("title"), period,
+                )
             salary_min, salary_max, currency = parse_salary_text(description[:6000])
 
         arrangement = normalise_work_arrangement(

@@ -85,20 +85,25 @@ class SECEdgarAdapter(RegistryAdapter):
         llm: Any = None,
     ) -> RegistryResult:
         result = RegistryResult(adapter_key=self.key)
-        cik = await self.resolve_cik(company, egress=egress)
-        if not cik:
-            result.estimated = True
-            result.note("No SEC CIK could be resolved; the company is probably not a registrant")
-            return result
+        # A registry call without a client used to raise AttributeError on every
+        # request and be reported as "not found in the register" (IR-102).
+        async with self.session(egress) as client:
+            cik = await self.resolve_cik(company, egress=client)
+            if not cik:
+                result.estimated = True
+                result.note(
+                    "No SEC CIK could be resolved; the company is probably not a registrant"
+                )
+                return result
 
-        submissions = await self._json(SUBMISSIONS_URL.format(cik=cik), egress=egress)
-        if isinstance(submissions, dict):
-            result.identity = self.to_identity(submissions, cik, company)
-            result.subsidiaries.extend(self.group_links(submissions))
+            submissions = await self._json(SUBMISSIONS_URL.format(cik=cik), egress=client)
+            if isinstance(submissions, dict):
+                result.identity = self.to_identity(submissions, cik, company)
+                result.subsidiaries.extend(self.group_links(submissions))
 
-        facts_payload, document_id = await self._fetch_json(
-            COMPANYFACTS_URL.format(cik=cik), egress=egress
-        )
+            facts_payload, document_id = await self._fetch_json(
+                COMPANYFACTS_URL.format(cik=cik), egress=client
+            )
         if not isinstance(facts_payload, dict):
             result.estimated = True
             result.note(f"companyfacts unavailable for CIK {cik}")

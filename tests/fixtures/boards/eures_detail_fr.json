@@ -1,0 +1,97 @@
+{
+ "id": "MTIwNDMwMzQgNDQx",
+ "reference": "12043034",
+ "documentId": "12043034",
+ "connectionPointId": 441,
+ "source": "Forem",
+ "creationDate": 1788494411399,
+ "lastModificationDate": null,
+ "preferredLanguage": "fr",
+ "jvProfiles": {
+  "fr": {
+   "languageVersion": "fr",
+   "title": "Automation Engineer",
+   "numberOfPosts": 2,
+   "euresFlag": false,
+   "jobCategoriesCodes": [
+    "http://data.europa.eu/esco/occupation/bb609566-3ab6-44dd-8f48-cf0b15b96827"
+   ],
+   "positionOfferingCode": "directhire",
+   "positionScheduleCodes": [],
+   "requiredSkills": [],
+   "workingLanguageCodes": [],
+   "description": "<b>¿</b><br><p>Chez Equans Digital, vous développez des applications utiles, pensées pour les utilisateurs et intégrées dans des projets industriels concrets. Vous contribuez à la digitalisation de l’industrie au sein d’équipes projets structurées, sur des solutions technologiques à impact durable.</p><p>&nbsp;</p><p>Chez Equans, nous croyons que la diversité des talents renforce nos&nbsp;équipes. Nous construisons activement un environnement de travail inclusif où chacun se sent le bienvenu, peut&nbsp;être soi-même, et nous encourageons chacun&nbsp;à postuler.</p><p>&nbsp;</p><p><strong>Votre mission se déroule : </strong>à Fleurus.</p><p><strong>&nbsp;</strong></p><strong>Zoom sur la fonction :</strong><ul><li>analyser les besoins des clients et formaliser des spécifications fonctionnelles claires</li><li>proposer des solutions technologiques cohérentes avec l’environnement existant</l",
+   "locations": [
+    {
+     "countryCode": "be",
+     "region": "be32b",
+     "cityName": "Fleurus",
+     "postalCode": "6220",
+     "addressLines": [],
+     "buildingAddress": null
+    }
+   ],
+   "requiredExperiences": [],
+   "requiredDrivingLicenses": [],
+   "positionLanguages": [
+    {
+     "requiredSkillLevel": "a1",
+     "desiredSkillLevel": null,
+     "languageCode": "nl",
+     "competencies": [],
+     "skillsEscoUri": []
+    },
+    {
+     "requiredSkillLevel": "c1",
+     "desiredSkillLevel": null,
+     "languageCode": "fr",
+     "competencies": [],
+     "skillsEscoUri": []
+    },
+    {
+     "requiredSkillLevel": "b1",
+     "desiredSkillLevel": null,
+     "languageCode": "en",
+     "competencies": [],
+     "skillsEscoUri": []
+    }
+   ],
+   "employer": {
+    "name": "",
+    "legalID": "",
+    "organisationSizeCode": null,
+    "organisationOwnershipTypeCode": null,
+    "website": null,
+    "sectorCodes": [
+     "f43.2.1"
+    ],
+    "description": ""
+   },
+   "applicationInstructions": [
+    ""
+   ],
+   "personContacts": [
+    {
+     "givenName": "",
+     "familyName": "",
+     "communications": {
+      "addresses": [],
+      "telephoneNumbers": [],
+      "mobileTelephoneNumbers": [],
+      "faxNumbers": [],
+      "telephoneInstantMessages": [],
+      "webInstantMessages": [],
+      "emails": [],
+      "webProfiles": [
+       {
+        "uri": "https://easyapply.jobs/r/DFyQJcD27ahTUD2yjaxf"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ "translationType": "FIRST_LANGUAGE",
+ "translation": null
+}

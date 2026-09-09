@@ -16,13 +16,31 @@ Detection is deliberately deterministic - three signals, in order of trust:
 
 Vendors without an adapter here (Workable, Teamtailor, SuccessFactors, ...) are
 still reported: knowing which ATS a company runs is useful profiling
-information even when Dream Job cannot read the board.
+information even when Dream Job cannot read the board.  So is a vendor whose
+tenant slug never appears - a board served on the company's own domain
+(``jobs.acme.eu``) is recognised as ``("teamtailor", None)`` rather than as
+nothing at all, which is the honest answer and tells an operator where to look
+for the slug.
+
+A detected slug is a guess until a board answers to it, so
+:func:`detect_ats_verified` spends one keyless request confirming it before it
+is written to ``company.ats_slug`` (FR-222).  Two Belgian companies were filed
+under the slug ``careers-analytics`` - Recruitee's own analytics host, which
+answers 403 - and every campaign afterwards planned a board that could not
+exist.  Detection is for companies a user named and for the watchlist: at a
+6.7% hit rate and ~30 requests per board found it is four orders of magnitude
+worse than a board registry for bulk discovery, and it looks like a crawler to
+every small-business website it touches (docs/Data_Gathering_Plan.md N9, 6.6).
 """
 
 from __future__ import annotations
 
+import logging
 import re
+from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlparse
+
+log = logging.getLogger(__name__)
 
 #: Vendors this package can actually collect from.
 SUPPORTED_VENDORS = (
@@ -36,7 +54,7 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("greenhouse", re.compile(r"boards\.greenhouse\.io/embed/job_board\?for=([\w.-]+)", re.I)),
     ("greenhouse", re.compile(r"boards-api\.greenhouse\.io/v1/boards/([\w.-]+)", re.I)),
     ("greenhouse", re.compile(
-        r"(?:job-boards|boards|my)\.greenhouse\.io/(?!embed)([\w.-]+)", re.I)),
+        r"(?:job-boards|boards|my)(?:\.[a-z]{2})?\.greenhouse\.io/(?!embed)([\w.-]+)", re.I)),
     ("greenhouse", re.compile(r"greenhouse\.io/embed/job_board/js\?for=([\w.-]+)", re.I)),
     ("lever", re.compile(r"api\.lever\.co/v0/postings/([\w.-]+)", re.I)),
     ("lever", re.compile(r"jobs(?:\.eu)?\.lever\.co/([\w.-]+)", re.I)),
@@ -64,6 +82,14 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _NOT_A_SLUG = {
     "embed", "www", "api", "job", "jobs", "boards", "careers", "en", "nl", "fr", "de",
     "search", "static", "assets", "images", "js", "css", "o", "companies", "company",
+    # Asset and CDN hosts: <cdn>.teamtailor.com is the vendor's own delivery
+    # network, not a tenant called "cdn".
+    "cdn", "media", "img", "asset", "assets-aws", "content", "files", "cdn-assets",
+    # The vendor's own product hosts.  "careers-analytics" is Recruitee's
+    # analytics endpoint, embedded by every careers site it serves and answering
+    # 403 to a board read: it was stored as the ATS slug of two Belgian
+    # companies, whose boards were then planned and fetched as 403s for ever.
+    "careers-analytics", "analytics", "app", "help", "support", "status",
 }
 
 _WORKDAY_RE = re.compile(
@@ -99,13 +125,15 @@ def _scan(text: str) -> tuple[str | None, str | None]:
     if found:
         return found
     for vendor, pattern in _PATTERNS:
-        match = pattern.search(text)
-        if not match:
-            continue
-        slug = _clean(match.group(1))
-        if not slug or slug.lower() in _NOT_A_SLUG:
-            continue
-        return vendor, slug
+        # Every match of the pattern, not only the first: a Recruitee careers
+        # page loads ``careers-analytics.recruitee.com`` before it names its own
+        # board, so stopping at the first match rejected the page's real slug
+        # along with the analytics host.
+        for match in pattern.finditer(text):
+            slug = _clean(match.group(1))
+            if not slug or slug.lower() in _NOT_A_SLUG:
+                continue
+            return vendor, slug
     return None, None
 
 
@@ -141,7 +169,37 @@ def detect_ats(html: str | None, url: str | None = None) -> tuple[str | None, st
     vendor, slug = _scan(html)
     if vendor:
         return vendor, slug
-    return _widget_hints(html)
+    vendor, slug = _widget_hints(html)
+    if vendor:
+        return vendor, slug
+    return _vendor_only_hints(html), None
+
+
+#: Signals that name the vendor without naming the tenant.  A board served on a
+#: company's own domain (jobs.acme.eu, careers.acme.be) carries no
+#: ``<slug>.vendor.com`` URL at all, so slug-first detection returns nothing -
+#: not even the vendor, which the module docstring promises is still reported.
+#: The vendor alone is useful profiling and tells the operator which board to
+#: resolve a slug from.
+_VENDOR_ONLY: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("teamtailor", re.compile(r"teamtailor-cdn\.com|teamtailor\.com/", re.I)),
+    ("greenhouse", re.compile(r"Grnhse\b|greenhouse\.io/embed|greenhouse_job_board", re.I)),
+    ("lever", re.compile(r"lever\.co/", re.I)),
+    ("ashby", re.compile(r"ashbyhq\.com|ashby_embed", re.I)),
+    ("recruitee", re.compile(r"recruitee\.com|recruitee-cdn", re.I)),
+    ("personio", re.compile(r"personio\.(?:de|com)", re.I)),
+    ("workday", re.compile(r"myworkdayjobs\.com|workdaycdn\.com", re.I)),
+    ("smartrecruiters", re.compile(r"smartrecruiters\.com", re.I)),
+    ("workable", re.compile(r"workable\.com", re.I)),
+)
+
+
+def _vendor_only_hints(html: str) -> str | None:
+    """The ATS a page clearly runs on, when no tenant slug appears anywhere."""
+    for vendor, pattern in _VENDOR_ONLY:
+        if pattern.search(html):
+            return vendor
+    return None
 
 
 def _widget_hints(html: str) -> tuple[str | None, str | None]:
@@ -187,3 +245,84 @@ def board_url(vendor: str | None, slug: str | None) -> str | None:
     }
     builder = builders.get(vendor)
     return builder(slug) if builder else None
+
+
+# ---------------------------------------------------------------------------
+# Verification (FR-182, FR-222): one request before a slug is believed
+# ---------------------------------------------------------------------------
+
+#: The cheapest keyless request that proves a slug names a readable board, per
+#: vendor - the same endpoints the adapters read, asked for the smallest answer.
+#:
+#: ``smartrecruiters`` is deliberately absent and must stay absent:
+#: api.smartrecruiters.com/robots.txt is ``Disallow: /`` for every agent but
+#: LinkedInBot, so probing a SmartRecruiters slug would be the one thing FR-182
+#: forbids.  ``workday`` is absent because its listing is a POST with a body, so
+#: there is no one-GET proof; both are reported unverified rather than probed.
+_VERIFY_URL: dict[str, str] = {
+    "greenhouse": "https://boards-api.greenhouse.io/v1/boards/{slug}",
+    "lever": "https://api.lever.co/v0/postings/{slug}?mode=json&limit=1",
+    "ashby": "https://api.ashbyhq.com/posting-api/job-board/{slug}",
+    "recruitee": "https://{slug}.recruitee.com/api/offers/",
+    "personio": "https://{slug}.jobs.personio.de/xml",
+}
+
+
+class _Fetcher(Protocol):
+    """The one method of :class:`~dreamjob.egress.client.EgressClient` used here."""
+
+    async def fetch(self, url: str, **kwargs: Any) -> Any: ...
+
+
+def verification_url(vendor: str | None, slug: str | None) -> str | None:
+    """The single request that would confirm this slug, or ``None`` if there is none."""
+    template = _VERIFY_URL.get((vendor or "").lower())
+    if not template or not slug:
+        return None
+    return template.format(slug=slug)
+
+
+async def verify_slug(vendor: str | None, slug: str | None, egress: _Fetcher) -> bool | None:
+    """Does a board answer to this slug?  ``True`` / ``False`` / ``None`` (not checked).
+
+    One request through the egress layer, which is what makes it robots-checked,
+    rate-limited and cached (IR-102, FR-182).  A non-2xx answer refutes the slug:
+    that is precisely the ``careers-analytics`` case, a real host that 403s and
+    is not a board.  Anything that stops the check from happening at all - no
+    verification endpoint for the vendor, robots.txt, a transport error - is
+    ``None``: unverified is not the same claim as wrong, and this must never
+    delete a slug because the network hiccuped.
+    """
+    url = verification_url(vendor, slug)
+    if url is None:
+        return None
+    try:
+        result = await egress.fetch(url, access_method="api")
+    except Exception as exc:  # noqa: BLE001 - robots, transport, rate limit: all "unknown"
+        log.info("could not verify %s board %r (%s): %s", vendor, slug, url, exc)
+        return None
+    ok = bool(getattr(result, "ok", False))
+    if not ok:
+        log.info(
+            "%s board %r does not exist: %s answered HTTP %s",
+            vendor, slug, url, getattr(result, "status_code", "?"),
+        )
+    return ok
+
+
+async def detect_ats_verified(
+    html: str | None, url: str | None = None, egress: _Fetcher | None = None
+) -> tuple[str | None, str | None]:
+    """:func:`detect_ats`, with the slug confirmed by one request before it is stored.
+
+    A refuted slug is dropped and the vendor kept, so the caller still learns
+    which ATS the company runs (that is real profiling information) without
+    writing a board that every later campaign would plan, fetch and fail on.
+    Without an ``egress`` client this is exactly :func:`detect_ats`.
+    """
+    vendor, slug = detect_ats(html, url)
+    if egress is None or not vendor or not slug:
+        return vendor, slug
+    if await verify_slug(vendor, slug, egress) is False:
+        return vendor, None
+    return vendor, slug

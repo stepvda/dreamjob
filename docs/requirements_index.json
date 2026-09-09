@@ -1,0 +1,787 @@
+{
+ "FR-101": {
+  "id": "FR-101",
+  "text": "The system shall support multiple job seekers, each with an isolated private space (profile, directives, applications, generated documents) and clearly separated from the shared company/vacancy knowledge base.",
+  "priority": "M"
+ },
+ "FR-102": {
+  "id": "FR-102",
+  "text": "The system shall import a LinkedIn profile export PDF and parse it into a structured profile. The section structure of the LinkedIn export (Summary, Experience, Education, Licenses & Certifications, Skills, Languages, Publications, Projects, Honors, Volunteering, Recommendations) shall define the base schema of the profile.",
+  "priority": "M"
+ },
+ "FR-103": {
+  "id": "FR-103",
+  "text": "The system shall require upload of a standard CV (PDF or DOCX) and shall merge its content with the LinkedIn-derived profile, flagging conflicts (dates, titles, employers) for the user to resolve.",
+  "priority": "M"
+ },
+ "FR-104": {
+  "id": "FR-104",
+  "text": "The system shall allow the profile to be created and edited manually through a structured form matching the schema of FR-102, with rich-text support for descriptions.",
+  "priority": "M"
+ },
+ "FR-105": {
+  "id": "FR-105",
+  "text": "The system shall version the profile; every campaign records the profile version it used.",
+  "priority": "S"
+ },
+ "FR-106": {
+  "id": "FR-106",
+  "text": "The system shall let the job seeker mark profile fields as 'do not disclose' so they are never used in generated CVs or emails (e.g. date of birth, photo, current salary).",
+  "priority": "S"
+ },
+ "FR-107": {
+  "id": "FR-107",
+  "text": "The system shall extract from the profile a normalised skill taxonomy (e.g. mapped to ESCO or a configurable taxonomy) with proficiency and recency, for use in matching.",
+  "priority": "S"
+ },
+ "FR-108": {
+  "id": "FR-108",
+  "text": "The system shall allow deletion of a job seeker, which removes all private data while retaining shared, non-personal market data.",
+  "priority": "M"
+ },
+ "FR-109": {
+  "id": "FR-109",
+  "text": "The profile screens shall include a free-text 'My dream job' field in which the job seeker describes, in their own words and language, the job they really want: the work itself, the kind of organisation, the people, the impact, the conditions, and what they want to avoid. The field shall be versioned with the profile and shall have no length limit.",
+  "priority": "M"
+ },
+ "FR-121": {
+  "id": "FR-121",
+  "text": "The system shall generate a composite profile using an LLM, consisting of: a narrative summary, career trajectory, core and adjacent competencies, seniority level, domains of expertise, notable achievements, public footprint (publications, talks, repositories, articles), inferred preferences and constraints, and a list of evidence references.",
+  "priority": "M"
+ },
+ "FR-122": {
+  "id": "FR-122",
+  "text": "The system shall perform online searches for information about the job seeker (personal website, GitHub/GitLab, Substack or blogs, publications, conference talks, press mentions, other professional social profiles) using name, employers, locations and other profile anchors as query material.",
+  "priority": "M"
+ },
+ "FR-123": {
+  "id": "FR-123",
+  "text": "Every online finding shall be scored for identity match against the known profile using multiple corroborating signals (name variants, employer overlap, location, photo similarity where available, timeline consistency, cross-links between profiles). Findings shall be classified as 'confirmed', 'probable' or 'doubtful'.",
+  "priority": "M"
+ },
+ "FR-124": {
+  "id": "FR-124",
+  "text": "Only 'confirmed' findings shall be merged automatically. 'Probable' and 'doubtful' findings shall be presented to the job seeker with the evidence and a confirm/reject control before they are used. Rejected findings shall be remembered so they are not re-proposed.",
+  "priority": "M"
+ },
+ "FR-125": {
+  "id": "FR-125",
+  "text": "The composite profile shall be shown to the job seeker in full, with each statement traceable to its source (user input, LinkedIn export, CV, or a specific URL), and shall be editable.",
+  "priority": "M"
+ },
+ "FR-126": {
+  "id": "FR-126",
+  "text": "The job seeker shall be able to disable online enrichment entirely, in which case the composite profile is built from user-supplied data only.",
+  "priority": "S"
+ },
+ "FR-127": {
+  "id": "FR-127",
+  "text": "The enrichment step shall not scrape or store special categories of personal data (health, political opinions, religion, sexual orientation, trade-union membership) even if encountered.",
+  "priority": "M"
+ },
+ "FR-128": {
+  "id": "FR-128",
+  "text": "An LLM shall process the dream-job statement (FR-109) into a structured 'dream job model': target roles and role families, desired responsibilities and activities, preferred company characteristics, culture and values cues, deal-breakers, and implicit preferences not stated elsewhere. The dream job model shall be shown to the job seeker for confirmation, stored alongside the composite profile, and used as a first-class input in campaign planning (FR-162), company discovery (FR-224/225), speculative openings (FR-262) and scoring (FR-281).",
+  "priority": "M"
+ },
+ "FR-141": {
+  "id": "FR-141",
+  "text": "The system shall provide a structured directive editor with drop-downs, multi-select chips, auto-complete fields and sliders. Free-text is permitted only as an additional 'notes to the AI' field.",
+  "priority": "M"
+ },
+ "FR-142": {
+  "id": "FR-142",
+  "text": "Job content directives shall cover: target job titles (auto-complete with synonyms), function family, seniority range, must-have and nice-to-have skills, industries/domains of interest and of exclusion, management scope, and keywords to avoid.",
+  "priority": "M"
+ },
+ "FR-143": {
+  "id": "FR-143",
+  "text": "Company type directives shall cover: size bands (e.g. <10, 10–50, 50–250, 250–1000, >1000 FTE), stage (startup, scale-up, established, listed, public sector, non-profit), trajectory (growing, stable, declining, restructuring), ownership (founder-led, PE-backed, subsidiary, cooperative), and an explicit include/exclude company list.",
+  "priority": "M"
+ },
+ "FR-144": {
+  "id": "FR-144",
+  "text": "Location directives shall cover: one or more geographic areas with radius from a point, countries/regions, willingness to relocate, and maximum commute time by mode. Locations shall be entered via auto-complete backed by a geocoder.",
+  "priority": "M"
+ },
+ "FR-145": {
+  "id": "FR-145",
+  "text": "Work arrangement directives shall cover: on-site / hybrid (with minimum remote days) / fully remote; full-time / part-time (with FTE percentage); contract type (permanent, fixed-term, freelance/contractor, interim); and travel tolerance.",
+  "priority": "M"
+ },
+ "FR-146": {
+  "id": "FR-146",
+  "text": "Compensation directives shall cover: minimum acceptable package, currency, and treatment of equity/variable pay. These are used for filtering and scoring only and never disclosed in generated content unless the job seeker opts in.",
+  "priority": "S"
+ },
+ "FR-147": {
+  "id": "FR-147",
+  "text": "The system shall propose directive values pre-filled from the composite profile (e.g. inferred seniority, titles, home location) and shall show, before launch, an estimate of the number of sources and pages to be collected under the current directives.",
+  "priority": "S"
+ },
+ "FR-148": {
+  "id": "FR-148",
+  "text": "Directive sets shall be saved, named, versioned and reusable across campaigns.",
+  "priority": "S"
+ },
+ "FR-149": {
+  "id": "FR-149",
+  "text": "The system shall support a 'spontaneous application only' mode in which vacancy sources are skipped and only company discovery runs.",
+  "priority": "C"
+ },
+ "FR-161": {
+  "id": "FR-161",
+  "text": "The system shall maintain a source catalogue describing each adapter: type (job board, directory, registry, company website, LinkedIn, compensation site), coverage (geography, industries), query capabilities, access method (API, HTTP scraping, browser automation), rate limits, cost per call, and legal notes.",
+  "priority": "M"
+ },
+ "FR-162": {
+  "id": "FR-162",
+  "text": "For every source selected for a campaign, an LLM shall generate the optimal search directives in that source's native form (query strings, filter parameters, category codes, crawl seeds, LinkedIn search URLs), grounded in the composite profile and the user directives.",
+  "priority": "M"
+ },
+ "FR-163": {
+  "id": "FR-163",
+  "text": "The generated plan shall be shown to the job seeker before execution: sources, queries, expected volume, estimated duration, and estimated LLM/API cost. The job seeker shall be able to edit or exclude individual source plans.",
+  "priority": "M"
+ },
+ "FR-164": {
+  "id": "FR-164",
+  "text": "Source selection shall be constrained by the directives (e.g. no Asian job boards for a Benelux search) and by the source catalogue's coverage metadata.",
+  "priority": "M"
+ },
+ "FR-165": {
+  "id": "FR-165",
+  "text": "The plan shall include a LinkedIn network strategy: crawl first-degree contacts, people in similar roles, and alumni of the same employers/schools to identify companies, limited by an explicit maximum number of profiles and companies.",
+  "priority": "S"
+ },
+ "FR-166": {
+  "id": "FR-166",
+  "text": "The system shall persist the plan and link every collected record to the plan item that produced it (provenance).",
+  "priority": "M"
+ },
+ "FR-181": {
+  "id": "FR-181",
+  "text": "The system shall execute the plan using adapters for: job boards (e.g. VDAB, Actiris, Indeed, StepStone, Welcome to the Jungle, Jobat, EURES, company ATS portals such as Greenhouse/Lever/Workday), company directories (e.g. Crunchbase, Kompass, Trends Top, chamber-of-commerce registers, the Belgian KBO/BCE), and company websites.",
+  "priority": "M"
+ },
+ "FR-182": {
+  "id": "FR-182",
+  "text": "The collection layer shall honour robots.txt directives, apply per-domain rate limiting and back-off, identify itself with a consistent user agent, and cache responses so that repeated campaigns do not re-fetch unchanged pages within a configurable TTL.",
+  "priority": "M"
+ },
+ "FR-183": {
+  "id": "FR-183",
+  "text": "All fetched pages shall be stored raw (HTML/PDF/screenshot) with URL, timestamp and hash, then parsed into structured records by deterministic extractors where available and by LLM extraction otherwise.",
+  "priority": "M"
+ },
+ "FR-184": {
+  "id": "FR-184",
+  "text": "Collected entities shall be de-duplicated across sources (companies by legal identifiers such as KBO/VAT number, domain and normalised name; vacancies by title+company+location+posting date fuzzy match).",
+  "priority": "M"
+ },
+ "FR-185": {
+  "id": "FR-185",
+  "text": "The collection layer shall run as resumable background jobs with per-adapter progress, error counts and the ability to pause, resume and cancel.",
+  "priority": "M"
+ },
+ "FR-186": {
+  "id": "FR-186",
+  "text": "The scope of every collection job shall be bounded by explicit caps (max pages, max companies, max people, max duration) derived from the directives and adjustable by the user.",
+  "priority": "M"
+ },
+ "FR-201": {
+  "id": "FR-201",
+  "text": "The system shall provide step-by-step instructions to launch the user's browser with a remote debugging port enabled (e.g. Chromium-based browsers via --remote-debugging-port, using a dedicated profile directory), and shall detect and connect to that session over the DevTools Protocol.",
+  "priority": "M"
+ },
+ "FR-202": {
+  "id": "FR-202",
+  "text": "The user shall log in manually to the target site in that browser. The system shall never request, capture, store or replay credentials, cookies or session tokens outside the live browser session.",
+  "priority": "M"
+ },
+ "FR-203": {
+  "id": "FR-203",
+  "text": "The automation shall navigate, scroll, capture DOM content and screenshots, and extract structured data (profiles, company pages, job postings, people search results) with human-like pacing and randomised delays, and shall stop immediately on detection of a challenge, captcha or rate-limit page and notify the user.",
+  "priority": "M"
+ },
+ "FR-204": {
+  "id": "FR-204",
+  "text": "Before starting, the system shall compute and display an estimated duration for the browser automation job based on the number of target pages and the configured pacing, and shall require explicit confirmation. The estimate shall be refined and displayed during execution.",
+  "priority": "M"
+ },
+ "FR-205": {
+  "id": "FR-205",
+  "text": "Browser-automation scope shall be strictly limited to the plan's target list (specific companies, people and searches); open-ended crawling of the site is not permitted.",
+  "priority": "M"
+ },
+ "FR-206": {
+  "id": "FR-206",
+  "text": "The user shall be able to watch the browser as it works, pause at any time, and skip individual targets.",
+  "priority": "S"
+ },
+ "FR-207": {
+  "id": "FR-207",
+  "text": "Data collected via browser automation shall be tagged with its access method so that reuse, retention and sharing rules specific to that source can be applied (see NFR and CR sections).",
+  "priority": "M"
+ },
+ "FR-208": {
+  "id": "FR-208",
+  "text": "The system shall support Firefox via its remote protocol and Playwright-managed persistent contexts as alternative drivers.",
+  "priority": "C"
+ },
+ "FR-221": {
+  "id": "FR-221",
+  "text": "For every company associated with a vacancy or identified as interesting, the system shall crawl the company's own website (bounded depth and page count) to extract: business description, products/services, markets, reference cases and customers, size indicators, office locations, team and leadership pages, organisational structure and departments, news/press releases, careers page and open positions, technology stack indicators, and values/culture statements.",
+  "priority": "M"
+ },
+ "FR-222": {
+  "id": "FR-222",
+  "text": "The system shall construct a standardised company profile with a fixed schema (identity and legal identifiers, business summary, sector codes, size, locations, structure and departments, key people, references, financial summary, hiring signals, competitors, sources) and display it to the job seeker in a consistent layout.",
+  "priority": "M"
+ },
+ "FR-223": {
+  "id": "FR-223",
+  "text": "For bigger companies the profile shall include a departmental map (business units, functions, locations) with, where known, the head of each unit, to support choosing where to apply.",
+  "priority": "S"
+ },
+ "FR-224": {
+  "id": "FR-224",
+  "text": "The system shall identify competitors and peers of an interesting company (same sector codes, shared customers or references, co-mentions in press, similar product descriptions, directory classifications, LinkedIn 'people also viewed' where available) and offer to add them to the target list.",
+  "priority": "S"
+ },
+ "FR-225": {
+  "id": "FR-225",
+  "text": "The system shall detect hiring signals for a company (growth in headcount, new office openings, funding rounds, product launches, recent job postings across all functions) and record them with dates and sources.",
+  "priority": "S"
+ },
+ "FR-226": {
+  "id": "FR-226",
+  "text": "Company profiles shall be shared across job seekers and refreshed incrementally: a profile older than a configurable age is re-crawled; otherwise it is reused as is.",
+  "priority": "M"
+ },
+ "FR-241": {
+  "id": "FR-241",
+  "text": "The system shall retrieve annual financial filings for the last five financial years from the appropriate registry for the company's jurisdiction (e.g. NBB Central Balance Sheet Office for Belgium, KvK for the Netherlands, Companies House for the UK, SEC EDGAR for US-listed companies, Infogreffe for France, Bundesanzeiger for Germany) and store the source documents.",
+  "priority": "M"
+ },
+ "FR-242": {
+  "id": "FR-242",
+  "text": "The system shall extract, per year: revenue/turnover (where disclosed), gross margin, operating result (EBIT), net result, EBITDA where derivable, equity, cash and cash equivalents, total debt, headcount (FTE), personnel costs, and capital expenditure. Extraction shall handle structured formats (XBRL, CSV) and PDF filings (LLM-assisted with table extraction).",
+  "priority": "M"
+ },
+ "FR-243": {
+  "id": "FR-243",
+  "text": "The system shall compute and display: compound annual growth of revenue and headcount, margin trends, personnel cost per FTE (as a proxy for pay level), liquidity and solvency ratios, and a classification of trajectory as growing / stable / declining / volatile, with confidence.",
+  "priority": "M"
+ },
+ "FR-244": {
+  "id": "FR-244",
+  "text": "The system shall translate the analysis into two scores on a 0–100 scale: 'ability to pay' and 'investment capacity', each with a short LLM-written rationale citing the figures used.",
+  "priority": "M"
+ },
+ "FR-245": {
+  "id": "FR-245",
+  "text": "For companies whose filings are not available (very young companies, foreign entities, abbreviated accounts), the system shall fall back to secondary signals (funding rounds, headcount growth from LinkedIn, press) and clearly mark the financial profile as 'estimated'.",
+  "priority": "S"
+ },
+ "FR-246": {
+  "id": "FR-246",
+  "text": "For groups, the system shall link subsidiary filings to the parent and present both the entity-level and consolidated picture.",
+  "priority": "C"
+ },
+ "FR-261": {
+  "id": "FR-261",
+  "text": "Every collected vacancy shall be normalised into an opportunity record: title, function family, seniority, required and desirable skills, location, work arrangement, contract type, compensation (if stated), posting date, application channel, and source.",
+  "priority": "M"
+ },
+ "FR-262": {
+  "id": "FR-262",
+  "text": "For every interesting company without a matching vacancy, an LLM shall generate speculative openings: roles the company is likely to need or be able to create in the next 6–12 months, based on the company profile, hiring signals, financial capacity, department map, competitors' hiring, and the job seeker's composite profile. Each speculative opening shall carry a plausibility score and a rationale.",
+  "priority": "M"
+ },
+ "FR-263": {
+  "id": "FR-263",
+  "text": "Speculative openings shall be clearly distinguished from real vacancies in every view and in all generated application material (the introduction email must never claim that a vacancy exists when it does not).",
+  "priority": "M"
+ },
+ "FR-264": {
+  "id": "FR-264",
+  "text": "The system shall enrich each opportunity with compensation data from sources such as Glassdoor, Levels.fyi, national salary surveys (e.g. Jobat/Hudson salary compass, StepStone salary reports) and posted ranges on similar vacancies, producing an estimated range with confidence and source list.",
+  "priority": "S"
+ },
+ "FR-265": {
+  "id": "FR-265",
+  "text": "The system shall enrich each opportunity with employer-review signals (rating, review themes) where available, treating them as advisory input to scoring.",
+  "priority": "C"
+ },
+ "FR-281": {
+  "id": "FR-281",
+  "text": "The system shall compute a score for every opportunity combining, with configurable weights: profile fit (skills, seniority, domain), dream-job fit (semantic match of the opportunity and company against the dream job model, FR-128), directive fit (location, work arrangement, contract, company type), company attractiveness (financial trajectory, ability to pay, investment capacity, hiring signals), compensation fit, plausibility (for speculative openings), and reachability (availability of a validated contact or an introduction path).",
+  "priority": "M"
+ },
+ "FR-282": {
+  "id": "FR-282",
+  "text": "Each score shall be explainable: the ranked list shall show sub-scores and an LLM-generated one-paragraph rationale per opportunity.",
+  "priority": "M"
+ },
+ "FR-283": {
+  "id": "FR-283",
+  "text": "The ranked list shall support filtering, sorting, tagging and side-by-side comparison of opportunities, and shall link to the full company profile and the source vacancy.",
+  "priority": "M"
+ },
+ "FR-284": {
+  "id": "FR-284",
+  "text": "The job seeker shall be able to check/uncheck opportunities, pin them, manually re-order the ranking, and mark opportunities as 'not interested' with a reason. Manual ordering shall override the computed order and shall be preserved on recalculation.",
+  "priority": "M"
+ },
+ "FR-285": {
+  "id": "FR-285",
+  "text": "User feedback (pins, rejections, reasons) shall be used to re-tune the weights for that job seeker and to suggest directive refinements.",
+  "priority": "S"
+ },
+ "FR-301": {
+  "id": "FR-301",
+  "text": "For each selected opportunity the system shall identify the most appropriate hiring contact: the hiring manager of the relevant department when identifiable, otherwise an HR/talent acquisition contact, otherwise a generic careers mailbox. Candidates shall be ranked and presented with role, source and confidence.",
+  "priority": "M"
+ },
+ "FR-302": {
+  "id": "FR-302",
+  "text": "The system shall identify introduction paths through the job seeker's LinkedIn network (first-degree contacts at the company, or second-degree via a named mutual contact) and offer 'request an introduction' as an alternative to a cold email.",
+  "priority": "S"
+ },
+ "FR-303": {
+  "id": "FR-303",
+  "text": "The system shall find or infer email addresses (company website, press contacts, email-pattern inference from known addresses on the same domain, permitted third-party lookup services) and record the method used.",
+  "priority": "M"
+ },
+ "FR-304": {
+  "id": "FR-304",
+  "text": "Every email address shall be validated before use through: syntax check, domain MX lookup, disposable/role-address detection, SMTP mailbox verification where the receiving server permits it, and catch-all domain detection. The result (valid / risky / invalid / unknown) shall be shown and 'invalid' addresses shall not be used.",
+  "priority": "M"
+ },
+ "FR-305": {
+  "id": "FR-305",
+  "text": "Validation shall be rate-limited and cached per address for a configurable period to avoid repeated probing of the same mail servers.",
+  "priority": "M"
+ },
+ "FR-306": {
+  "id": "FR-306",
+  "text": "Contacts shall be stored with the minimal data needed (name, role, company, professional email, source, date) and shall be subject to the retention rules in NFR-3xx.",
+  "priority": "M"
+ },
+ "FR-321": {
+  "id": "FR-321",
+  "text": "For each selected opportunity the system shall generate, using an LLM and the composite profile: (a) a CV tailored to the opportunity, emphasising relevant experience and skills and using only true facts from the profile; (b) a company and job briefing document (PDF, FR-329); (c) a motivation and fit document (PDF, FR-330); (d) an introduction email addressed to the hiring contact with the tailored CV attached. Documents (b) and (c) are for the job seeker only and are never sent.",
+  "priority": "M"
+ },
+ "FR-322": {
+  "id": "FR-322",
+  "text": "Generated CVs shall be produced from a configurable set of templates (DOCX and PDF), in the language appropriate to the opportunity (at least Dutch, French, English, German), and shall pass a factual-consistency check against the profile before being offered for dispatch.",
+  "priority": "M"
+ },
+ "FR-323": {
+  "id": "FR-323",
+  "text": "Introduction emails for speculative openings shall be written as spontaneous applications and shall state the proposed role and value clearly without asserting the existence of a vacancy.",
+  "priority": "M"
+ },
+ "FR-324": {
+  "id": "FR-324",
+  "text": "The job seeker shall review generated material in a preview and may edit, regenerate with instructions, approve, or discard. Bulk approval shall be available with a mandatory summary of what will be sent to whom.",
+  "priority": "M"
+ },
+ "FR-325": {
+  "id": "FR-325",
+  "text": "Dispatch shall use the job seeker's own mailbox (SMTP with app password, or OAuth-connected Gmail/Microsoft 365), with configurable sending rate, send windows (working hours in the recipient's time zone), and daily caps to avoid spam classification.",
+  "priority": "M"
+ },
+ "FR-326": {
+  "id": "FR-326",
+  "text": "Every sent application shall be logged with recipient, timestamp, attachments, message-id and delivery status; bounces and replies shall be detected via IMAP/API polling and reflected in the opportunity status.",
+  "priority": "M"
+ },
+ "FR-327": {
+  "id": "FR-327",
+  "text": "The system shall support a follow-up reminder after a configurable number of days without reply, with an optional generated follow-up email.",
+  "priority": "S"
+ },
+ "FR-328": {
+  "id": "FR-328",
+  "text": "For opportunities whose application channel is an ATS form rather than email, the system shall pre-fill the form via browser automation and pause for the user to review and submit.",
+  "priority": "C"
+ },
+ "FR-329": {
+  "id": "FR-329",
+  "text": "The company and job briefing shall be a PDF prepared for interview preparation containing: the full standardised company profile (business, products, markets, references, size, locations, structure and departments, key people), the five-year financial analysis with charts, hiring signals and recent news, competitors and market position, the vacancy or speculative opening in full, the hiring contact and introduction path, likely interview topics and questions, and suggested questions for the job seeker to ask. It shall be regenerable on demand so that it can be refreshed just before an interview.",
+  "priority": "M"
+ },
+ "FR-330": {
+  "id": "FR-330",
+  "text": "The motivation and fit document shall be a PDF explaining, for use by the job seeker during a potential interview: why the job seeker wants this job (linking the opportunity to the dream job model, FR-128, and to the job seeker's career trajectory), why the job seeker is a good fit for the job (evidence from the profile mapped to each stated or inferred requirement), why the job seeker is a good fit for the company (values, culture, stage, sector, working style), anticipated objections with suggested answers, and a short set of talking points the job seeker can rehearse.",
+  "priority": "M"
+ },
+ "FR-331": {
+  "id": "FR-331",
+  "text": "Both PDF documents shall be generated from configurable templates, in the language of the opportunity, shall carry the generation date and the profile/company data versions used, and shall be stored with the application package and downloadable from the opportunity view.",
+  "priority": "M"
+ },
+ "FR-341": {
+  "id": "FR-341",
+  "text": "Company profiles, financial analyses, competitor links, website crawls, vacancy records and (subject to CR-4xx) contact records shall be stored in a shared knowledge base accessible to all job seekers' campaigns.",
+  "priority": "M"
+ },
+ "FR-342": {
+  "id": "FR-342",
+  "text": "Campaign planning shall first query the knowledge base and shall only schedule collection for data that is missing or stale, reporting the expected saving to the user.",
+  "priority": "M"
+ },
+ "FR-343": {
+  "id": "FR-343",
+  "text": "Each record shall carry freshness metadata (collected date, source, access method) and a configurable staleness policy per record type (e.g. vacancies 7 days, company websites 90 days, filings 1 year).",
+  "priority": "M"
+ },
+ "FR-344": {
+  "id": "FR-344",
+  "text": "Job-seeker-specific data (profile, directives, scores, generated documents, sent applications, feedback) shall never be visible to other job seekers, and shared records shall not carry any identifying link back to the job seeker whose campaign produced them.",
+  "priority": "M"
+ },
+ "FR-345": {
+  "id": "FR-345",
+  "text": "The knowledge base shall expose a browse/search interface for companies and vacancies independent of any campaign.",
+  "priority": "S"
+ },
+ "FR-361": {
+  "id": "FR-361",
+  "text": "The system shall provide a campaign dashboard showing stage progress, records collected per source, errors, LLM token consumption and cost, and elapsed/estimated remaining time.",
+  "priority": "M"
+ },
+ "FR-362": {
+  "id": "FR-362",
+  "text": "The administrator shall be able to configure LLM providers (cloud and local), per-task model selection, token budgets and prompt templates.",
+  "priority": "M"
+ },
+ "FR-363": {
+  "id": "FR-363",
+  "text": "The administrator shall be able to enable/disable source adapters and set per-source rate limits and caps.",
+  "priority": "M"
+ },
+ "FR-364": {
+  "id": "FR-364",
+  "text": "All LLM prompts and responses shall be logged with the record they relate to, for debugging and audit, with personal data redacted in logs after a retention period.",
+  "priority": "S"
+ },
+ "FR-381": {
+  "id": "FR-381",
+  "text": "The system shall produce a dream-job gap analysis comparing the composite profile with the dream job model: missing or weak skills, experience, certifications, languages, leadership scope and public visibility. Each gap shall carry a concrete closing action (course, certification, project, publication, role type), an estimated effort, and a link to the opportunities where the gap is decisive.",
+  "priority": "S"
+ },
+ "FR-382": {
+  "id": "FR-382",
+  "text": "When no current opportunity scores above a configurable dream-job fit threshold, the system shall propose two to three stepping-stone paths: sequences of intermediate roles or companies reachable now that plausibly lead to the dream job, with rationale. Opportunities shall be taggable as 'destination' or 'stepping stone' and the ranked list shall allow filtering on that tag.",
+  "priority": "S"
+ },
+ "FR-383": {
+  "id": "FR-383",
+  "text": "Every opportunity shall display a dream-job fit meter, distinct from the overall score, listing the dream-job criteria that are met, partially met and violated, with short explanations, so that the job seeker can see what the market actually offers against their ideal.",
+  "priority": "M"
+ },
+ "FR-384": {
+  "id": "FR-384",
+  "text": "The system shall derive a company's values and working style from its website, leadership statements, job-advertisement language and employer reviews, compare them with the values expressed in the dream-job statement, and surface mismatches as explicit warnings on the company profile and in the motivation and fit document (FR-330).",
+  "priority": "S"
+ },
+ "FR-385": {
+  "id": "FR-385",
+  "text": "The system shall offer a discretion mode for job seekers who are currently employed: exclusion of the current employer, its group entities and any companies flagged as sensitive; exclusion of contacts likely to expose the search (current colleagues, the employer's recruiters); and suppression of any LinkedIn action that signals job hunting (no profile edits, no 'open to work', no visits to competitor recruiters). Discretion mode shall be visibly indicated throughout the UI.",
+  "priority": "M"
+ },
+ "FR-401": {
+  "id": "FR-401",
+  "text": "The job seeker shall be able to add companies to a watchlist. For watched companies the system shall periodically (configurable, default weekly) recheck careers pages and ATS endpoints, news, hiring signals and new filings, and shall notify the job seeker of new vacancies or signals and add matching vacancies to the ranked list automatically.",
+  "priority": "S"
+ },
+ "FR-402": {
+  "id": "FR-402",
+  "text": "The system shall provide timing intelligence per company: it shall detect events that typically precede hiring (funding rounds, fiscal-year start, reorganisation or expansion announcements, new office openings, competitor layoffs, leadership changes) and recommend a preferred application window. Opportunities where the current moment is favourable shall be flagged in the ranked list.",
+  "priority": "S"
+ },
+ "FR-403": {
+  "id": "FR-403",
+  "text": "The system shall generate a weekly digest for each active job seeker containing new opportunities, replies received, follow-ups due, watchlist changes, and one recommended next action, delivered in-app and optionally by email.",
+  "priority": "S"
+ },
+ "FR-421": {
+  "id": "FR-421",
+  "text": "The system shall provide a pipeline board for sent applications with stages sent, replied, interview, offer and closed (with outcome). Stage transitions shall be driven automatically by reply detection (FR-326) where possible and manually otherwise, and each card shall carry stage dates, next action and free notes.",
+  "priority": "M"
+ },
+ "FR-422": {
+  "id": "FR-422",
+  "text": "Incoming replies shall be classified by an LLM (interest, request for information, interview invitation, rejection, referral to another contact, automatic reply) and the system shall draft the appropriate response or follow-up in the same email thread, using the briefing and motivation documents as context, for the job seeker to review and send.",
+  "priority": "S"
+ },
+ "FR-423": {
+  "id": "FR-423",
+  "text": "When a reply proposes interview times, the system shall extract the proposed slots, check availability against the job seeker's connected calendar (Google Calendar or Microsoft 365), propose the best slots, draft the confirmation and, on approval, create the calendar entry with the briefing attached.",
+  "priority": "S"
+ },
+ "FR-424": {
+  "id": "FR-424",
+  "text": "The system shall provide an interactive mock interview per opportunity: an LLM plays the interviewer using the company and job briefing, asks role-specific and behavioural questions, gives feedback on each answer against the motivation and fit document, and ends with a list of weak spots to rehearse. Sessions shall be stored and repeatable.",
+  "priority": "S"
+ },
+ "FR-425": {
+  "id": "FR-425",
+  "text": "The system shall record outcomes per application (reply, interview, offer, rejection, no response) together with the variables used (email style, CV template, contact type, send time, day of week, speculative versus real vacancy) and shall use these to adjust generation defaults and scoring weights for the job seeker, reporting the learned effects transparently.",
+  "priority": "C"
+ },
+ "FR-441": {
+  "id": "FR-441",
+  "text": "The job seeker shall be able to attach evidence items (repositories, publications, talks, case studies, articles, references, certificates) to skills and achievements in the profile. Tailored CVs and motivation documents shall cite the relevant evidence with verifiable links, and evidence shall be included in the composite profile.",
+  "priority": "S"
+ },
+ "FR-442": {
+  "id": "FR-442",
+  "text": "The system shall support multiple personas per job seeker (e.g. architect, product leader, researcher), each with its own emphasis of the profile, its own dream-job statement and directive defaults. Campaigns, rankings and generated material shall be scoped to a persona, while the shared knowledge base remains common.",
+  "priority": "S"
+ },
+ "FR-443": {
+  "id": "FR-443",
+  "text": "From the dream job model and the vacancies collected, the system shall suggest improvements to the job seeker's LinkedIn profile (headline, About section, listed skills, keywords, featured content) so that recruiters searching for the dream job find them. Suggestions are presented as editable text for the job seeker to apply manually; the system shall not modify the LinkedIn profile itself.",
+  "priority": "C"
+ },
+ "FR-444": {
+  "id": "FR-444",
+  "text": "For each opportunity that reaches the interview or offer stage, the system shall generate a salary negotiation brief combining the company's ability-to-pay score and personnel cost per FTE (FR-243/244), market compensation data (FR-264), the job seeker's compensation directives (FR-146) and a suggested ask with supporting arguments and fallback positions.",
+  "priority": "S"
+ },
+ "FR-461": {
+  "id": "FR-461",
+  "text": "For each target company the system shall rank the available introduction routes (first-degree contacts, alumni of the same employer or school, former colleagues now at the company, shared community members) by strength and relevance, and shall generate the message to the intermediary, requesting an introduction to the hiring contact, in addition to the introduction email to the hiring contact itself (FR-302).",
+  "priority": "S"
+ },
+ "FR-462": {
+  "id": "FR-462",
+  "text": "The system shall maintain an event and community radar: upcoming conferences, meetups, webinars and industry events where people from target companies speak or attend, matched to the job seeker's location and travel tolerance, with the target-company attendees identified where public. Events shall be addable to the calendar and linked to the relevant company profiles.",
+  "priority": "C"
+ },
+ "FR-463": {
+  "id": "FR-463",
+  "text": "The job seeker shall be able to export a complete campaign as a self-contained package: a PDF bundle (ranked list, company profiles, briefings, motivation documents, application history) and a machine-readable JSON export with the same content, for use outside the application or with a career coach. Exports shall respect 'do not disclose' flags and contain no data of other job seekers.",
+  "priority": "S"
+ },
+ "NFR-101": {
+  "id": "NFR-101",
+  "text": "Interactive views (profile, directives, ranked list, company profile) shall respond within 2 seconds at the 95th percentile for a knowledge base of 50 000 companies and 500 000 vacancies.",
+  "priority": "S"
+ },
+ "NFR-102": {
+  "id": "NFR-102",
+  "text": "Collection jobs shall run asynchronously with at least 20 concurrent HTTP workers within a single node; writes to SQLite shall be serialised through a single writer to avoid lock contention, while reads run concurrently under WAL mode. Browser automation runs single-session per user by design.",
+  "priority": "S"
+ },
+ "NFR-103": {
+  "id": "NFR-103",
+  "text": "A typical campaign (e.g. 200 target companies, 1 000 vacancies, 50 LinkedIn targets) shall complete its non-browser stages within 4 hours.",
+  "priority": "S"
+ },
+ "NFR-104": {
+  "id": "NFR-104",
+  "text": "LLM usage shall be bounded per campaign by a configurable token budget; the system shall degrade gracefully (skip speculative openings for low-ranked companies first) when the budget is nearly exhausted.",
+  "priority": "M"
+ },
+ "NFR-201": {
+  "id": "NFR-201",
+  "text": "All job seeker data at rest shall be encrypted; profile documents, generated CVs and mailbox credentials shall additionally be encrypted with per-job-seeker keys.",
+  "priority": "M"
+ },
+ "NFR-202": {
+  "id": "NFR-202",
+  "text": "Authentication shall use passkeys or strong passwords with MFA; sessions shall be bound to the client.",
+  "priority": "M"
+ },
+ "NFR-203": {
+  "id": "NFR-203",
+  "text": "The system shall never store third-party site credentials or session cookies captured from the automated browser.",
+  "priority": "M"
+ },
+ "NFR-204": {
+  "id": "NFR-204",
+  "text": "Mailbox access tokens shall be stored encrypted, scoped to send and read-bounce permissions only, and revocable from the UI.",
+  "priority": "M"
+ },
+ "NFR-205": {
+  "id": "NFR-205",
+  "text": "Prompt-injection defences shall be applied to all LLM calls that process scraped content (content isolation, instruction/data separation, output validation), since web pages and PDFs are untrusted input.",
+  "priority": "M"
+ },
+ "NFR-206": {
+  "id": "NFR-206",
+  "text": "Generated emails and CVs shall be scanned to ensure no content from other job seekers or from unrelated scraped sources leaks in.",
+  "priority": "M"
+ },
+ "NFR-301": {
+  "id": "NFR-301",
+  "text": "The system shall implement GDPR obligations for the job seeker as data subject: transparent information, export of all their data, rectification, and erasure (FR-108).",
+  "priority": "M"
+ },
+ "NFR-302": {
+  "id": "NFR-302",
+  "text": "The processing of hiring contacts' personal data relies on legitimate interest; the system shall limit data to professional contact details, shall include an unsubscribe/objection sentence in every introduction email, and shall honour objections by blocking the contact permanently.",
+  "priority": "M"
+ },
+ "NFR-303": {
+  "id": "NFR-303",
+  "text": "Contact and people records obtained via browser automation shall be retained only for the duration of the campaign that collected them plus a configurable grace period, unless re-collected, and shall not be shared across job seekers without explicit configuration acknowledging the applicable terms.",
+  "priority": "M"
+ },
+ "NFR-304": {
+  "id": "NFR-304",
+  "text": "A data-protection impact assessment (DPIA) shall be produced before production use, given the large-scale profiling and the use of AI in an employment context.",
+  "priority": "M"
+ },
+ "NFR-305": {
+  "id": "NFR-305",
+  "text": "All automated scoring shall be advisory; the job seeker takes every decision to apply (no fully automated decision with legal effect on the job seeker or the contact).",
+  "priority": "M"
+ },
+ "NFR-306": {
+  "id": "NFR-306",
+  "text": "The LLM client shall be provider-agnostic (OpenAI-compatible interface) so that privacy-sensitive steps (composite profile, CV and motivation documents) can be routed to a local model instead of the DeepSeek API without code changes.",
+  "priority": "S"
+ },
+ "NFR-401": {
+  "id": "NFR-401",
+  "text": "Collection jobs shall be idempotent and resumable; a crash shall lose at most the in-flight page.",
+  "priority": "M"
+ },
+ "NFR-402": {
+  "id": "NFR-402",
+  "text": "Every extracted field shall carry a confidence and a provenance link; fields below a confidence threshold shall be visually flagged.",
+  "priority": "M"
+ },
+ "NFR-403": {
+  "id": "NFR-403",
+  "text": "Adapter breakage (site layout change) shall be detected by extraction-rate monitoring and surfaced to the administrator within one campaign.",
+  "priority": "S"
+ },
+ "NFR-404": {
+  "id": "NFR-404",
+  "text": "Financial figures shall be reconciled (e.g. balance-sheet totals, sign conventions) and inconsistencies flagged rather than silently accepted.",
+  "priority": "S"
+ },
+ "NFR-501": {
+  "id": "NFR-501",
+  "text": "The UI shall be available in English, Dutch and French; generated content language is chosen per opportunity.",
+  "priority": "S"
+ },
+ "NFR-502": {
+  "id": "NFR-502",
+  "text": "Every long-running operation shall show progress, a time estimate and a cancel control; the browser automation step shall show the estimate before start (FR-204).",
+  "priority": "M"
+ },
+ "NFR-503": {
+  "id": "NFR-503",
+  "text": "The system shall be usable end-to-end on a laptop screen; the ranked list and company profile shall also render acceptably on a tablet.",
+  "priority": "C"
+ },
+ "NFR-601": {
+  "id": "NFR-601",
+  "text": "Source adapters shall implement a common interface (plan, fetch, parse, normalise) so that new job boards or registries can be added without changes to the pipeline.",
+  "priority": "M"
+ },
+ "NFR-602": {
+  "id": "NFR-602",
+  "text": "LLM prompts shall be externalised as versioned templates with evaluation fixtures so prompt changes can be regression-tested.",
+  "priority": "S"
+ },
+ "NFR-603": {
+  "id": "NFR-603",
+  "text": "The pipeline stages shall be independently re-runnable from persisted intermediate artefacts.",
+  "priority": "M"
+ },
+ "NFR-701": {
+  "id": "NFR-701",
+  "text": "Structured logs, metrics (pages fetched, extraction success rate, tokens, cost) and traces shall be emitted per campaign and per adapter.",
+  "priority": "S"
+ },
+ "NFR-702": {
+  "id": "NFR-702",
+  "text": "An immutable audit trail shall record who approved and sent each application, and which profile and document versions were used.",
+  "priority": "M"
+ },
+ "DR-101": {
+  "id": "DR-101",
+  "text": "Companies shall be keyed on a legal identifier (KBO/BCE, VAT, Companies House number, LEI) where available, with domain and normalised name as secondary keys.",
+  "priority": "M"
+ },
+ "DR-102": {
+  "id": "DR-102",
+  "text": "Vacancies and company pages shall retain their raw source document for re-extraction when extractors improve.",
+  "priority": "M"
+ },
+ "DR-103": {
+  "id": "DR-103",
+  "text": "Financial figures shall be stored in original currency with the reporting standard and period end date, plus EUR-normalised values with the conversion date.",
+  "priority": "S"
+ },
+ "IR-101": {
+  "id": "IR-101",
+  "text": "Each adapter shall declare its access method and terms-of-service status in the source catalogue; adapters marked 'terms prohibit automated access' shall be disabled by default and require an explicit administrator acknowledgement to enable.",
+  "priority": "M"
+ },
+ "IR-102": {
+  "id": "IR-102",
+  "text": "All external calls shall be routed through a single egress layer implementing rate limiting, retries, caching and logging.",
+  "priority": "M"
+ },
+ "CR-401": {
+  "id": "CR-401",
+  "text": "LinkedIn's user agreement prohibits automated access and scraping of its site, including through a logged-in session. The design in section 3.5.2 reduces technical friction but does not remove this contractual restriction; the job seeker's account may be restricted. The system shall display this warning before the first LinkedIn automation run and record acknowledgement.",
+  "priority": "M"
+ },
+ "CR-402": {
+  "id": "CR-402",
+  "text": "Scraping of publicly accessible pages shall comply with robots.txt, the site's terms where they are binding, database rights (Directive 96/9/EC) and the GDPR. Personal data of third parties shall be limited to what is necessary for a professional introduction.",
+  "priority": "M"
+ },
+ "CR-403": {
+  "id": "CR-403",
+  "text": "Unsolicited email to business contacts is permitted in Belgium under the legitimate-interest and B2B exemptions provided the message is relevant to the recipient's function and offers a way to object; the system shall enforce both.",
+  "priority": "M"
+ },
+ "CR-404": {
+  "id": "CR-404",
+  "text": "The EU AI Act classifies AI used to recruit or select candidates as high-risk for deployers on the employer side; Dream Job acts for the candidate, but the system shall still document its logic, keep humans in the loop (NFR-305) and avoid any discriminatory inference in profiling.",
+  "priority": "S"
+ },
+ "CR-405": {
+  "id": "CR-405",
+  "text": "The system shall not misrepresent the job seeker: all generated content is grounded in verified profile facts, and speculative openings are always labelled as such (FR-263, FR-323).",
+  "priority": "M"
+ },
+ "CR-406": {
+  "id": "CR-406",
+  "text": "Browser automation is inherently slow (seconds per page) and runs in a single user session; campaign design assumes tens to low hundreds of LinkedIn targets, not thousands.",
+  "priority": "M"
+ },
+ "CR-407": {
+  "id": "CR-407",
+  "text": "The frontend shall be implemented in React; the backend and all pipeline components in Python.",
+  "priority": "M"
+ },
+ "CR-408": {
+  "id": "CR-408",
+  "text": "The persistence layer shall be SQLite. The schema shall be managed with versioned migrations, and the data-access layer shall isolate SQL so that a later move to PostgreSQL remains possible if multi-user concurrency requires it.",
+  "priority": "M"
+ },
+ "CR-409": {
+  "id": "CR-409",
+  "text": "The system shall use the DeepSeek API as its LLM provider. Model choice per task (general chat model versus reasoning model) and token budgets shall be configurable.",
+  "priority": "M"
+ },
+ "CR-410": {
+  "id": "CR-410",
+  "text": "Because DeepSeek processes data outside the EU, the job seeker shall be informed before profile data is sent to the API, consent shall be recorded, and fields marked 'do not disclose' (FR-106) plus special-category data (FR-127) shall never be included in prompts. The DPIA (NFR-304) shall cover this transfer.",
+  "priority": "M"
+ }
+}
