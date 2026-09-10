@@ -746,13 +746,22 @@ class BrowserSession:
                 engine = getattr(self._playwright, name)
                 profile = profile_dir()
                 profile.mkdir(parents=True, exist_ok=True)
+                # no_viewport: FR-206 asks the user to watch this window and
+                # act in it.  Playwright's default emulates a 1280x720 viewport,
+                # and on a headed browser that is not an emulation - it resizes
+                # the real window, so the window the user is told to watch opens
+                # shrunk to a size nobody chose.  Let the browser size itself.
                 self._context = await engine.launch_persistent_context(
-                    str(profile), headless=self.headless
+                    str(profile), headless=self.headless, no_viewport=True
                 )
             else:
                 self._browser = await self._playwright.chromium.connect_over_cdp(self.cdp_url)
                 contexts = self._browser.contexts
-                self._context = contexts[0] if contexts else await self._browser.new_context()
+                # Same reasoning as above: a context Dream Job has to create
+                # must not impose a size on a window the user owns.
+                self._context = (
+                    contexts[0] if contexts else await self._browser.new_context(no_viewport=True)
+                )
         except Exception as exc:  # noqa: BLE001 - turned into launch instructions upstream
             await self._shutdown_playwright()
             raise BrowserUnavailable(

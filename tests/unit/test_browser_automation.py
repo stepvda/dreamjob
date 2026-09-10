@@ -273,6 +273,94 @@ def test_login_state_is_read_from_the_page_not_from_cookies():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# FR-206: the window is the user's, and the automation does not resize it
+# ---------------------------------------------------------------------------
+
+
+class _RecordingContext:
+    def __init__(self):
+        self.pages = []
+
+    async def new_page(self):
+        raise AssertionError("not needed for this test")
+
+    async def close(self):
+        pass
+
+
+class _RecordingBrowser:
+    def __init__(self, calls):
+        self.calls = calls
+        self.contexts = []
+
+    async def new_context(self, **kwargs):
+        self.calls.append(("new_context", kwargs))
+        return _RecordingContext()
+
+    async def close(self):
+        pass
+
+
+class _RecordingEngine:
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def launch_persistent_context(self, profile, **kwargs):
+        self.calls.append(("launch_persistent_context", kwargs))
+        return _RecordingContext()
+
+    async def connect_over_cdp(self, url):
+        return _RecordingBrowser(self.calls)
+
+
+class _RecordingPlaywright:
+    def __init__(self, calls):
+        self.chromium = _RecordingEngine(calls)
+        self.firefox = _RecordingEngine(calls)
+
+    async def stop(self):
+        pass
+
+
+class _RecordingStarter:
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def start(self):
+        return _RecordingPlaywright(self.calls)
+
+
+def _record_connect(monkeypatch, **session_kwargs) -> list:
+    calls: list = []
+    import playwright.async_api as pw
+
+    monkeypatch.setattr(pw, "async_playwright", lambda: _RecordingStarter(calls))
+    live = session_mod.BrowserSession(**session_kwargs)
+    asyncio.run(live.connect())
+    return calls
+
+
+def test_a_launched_window_is_not_shrunk_to_a_size_nobody_chose(monkeypatch, tmp_path):
+    """FR-206 asks the user to watch this window; it must not open resized.
+
+    Playwright's default emulates a 1280x720 viewport, and on a *headed* browser
+    that is not emulation - it resizes the real window. Measured before the fix:
+    a persistent context opened at 1282x846 regardless of the display.
+    """
+    monkeypatch.setattr(session_mod, "profile_dir", lambda: tmp_path)
+    calls = _record_connect(monkeypatch, driver="persistent", family="chromium")
+    kind, kwargs = next(c for c in calls if c[0] == "launch_persistent_context")
+    assert kwargs.get("no_viewport") is True, "the browser sizes its own window"
+
+
+def test_a_context_dream_job_creates_over_cdp_imposes_no_size(monkeypatch):
+    """The window belongs to the user even when Dream Job has to make the context."""
+    calls = _record_connect(monkeypatch, driver="cdp")
+    kind, kwargs = next(c for c in calls if c[0] == "new_context")
+    assert kwargs.get("no_viewport") is True
+
+
 def test_current_linkedin_feed_markup_reads_as_signed_in():
     """A slice of the frontend LinkedIn actually serves (checked 2026-09-10).
 
