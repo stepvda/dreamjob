@@ -1369,17 +1369,20 @@ def generate_plan(
                 source.caps["unverified_route"] = True
             planned.append(source)
 
-    network_entry = next(
-        (e for e in selection.selected if e.get("source_type") == "linkedin"), None
-    )
-    if linkedin_allowed and network_entry is None:
+    # FR-165: the network crawl is a *browser strategy*, not an adapter.  It is
+    # deliberately absent from the registry and from the source catalogue
+    # (``campaigns.BROWSER_STRATEGY_KEYS``), so requiring a catalogue row here
+    # was requiring a row nothing ever writes: the crawl was never planned, the
+    # browser session's allowlist was therefore always empty, and the run
+    # planner's "Start run" could never leave its disabled state.  The seeker's
+    # CR-401 consent is the gate, and it is the only one there should be.
+    if linkedin_allowed:
         network_entry = next(
-            (e for e in catalogue if e["adapter_key"] == LINKEDIN_NETWORK_ADAPTER), None
+            (e for e in selection.selected if e.get("source_type") == "linkedin"), None
         )
-    if network_entry and linkedin_allowed:
         employers, schools = employers_and_schools(composite, profile)
         network = linkedin_network_plan(
-            adapter_key=network_entry.get("adapter_key") or LINKEDIN_NETWORK_ADAPTER,
+            adapter_key=(network_entry or {}).get("adapter_key") or LINKEDIN_NETWORK_ADAPTER,
             keywords=keywords,
             employers=employers,
             schools=schools,

@@ -93,7 +93,7 @@ def terms_warning() -> str:
 # The allowlist (FR-205)
 # ---------------------------------------------------------------------------
 
-_ALLOWED_HOSTS = SITES[SITE].allowed_hosts
+_SITE_PROFILE = SITES[SITE]
 
 #: The only page shapes the automation is allowed to open.
 TARGET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -135,7 +135,7 @@ def normalise_target_url(url: str) -> str:
 def classify_target(url: str) -> str | None:
     """The kind of page, or ``None`` when the URL is not an allowed shape."""
     parsed = urlparse(normalise_target_url(url))
-    if parsed.netloc.lower() not in _ALLOWED_HOSTS:
+    if not _SITE_PROFILE.allows_host(parsed.netloc):
         return None
     path = parsed.path or "/"
     for kind, pattern in TARGET_SHAPES:

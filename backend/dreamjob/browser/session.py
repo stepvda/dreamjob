@@ -28,6 +28,7 @@ import logging
 import platform
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,11 @@ MAX_CAPTURE_CHARS = 400_000
 #: How long to let a client-rendered page draw one of its login markers before
 #: giving up and judging the shell as it stands.  Only the ambiguous case ever
 #: waits this long: the wait ends the moment a marker appears.
-LOGIN_MARKER_TIMEOUT_MS = 8_000
+#:
+#: Deliberately short.  This budget is spent in full whenever no marker matches,
+#: and the likeliest reason for that is a marker that has gone stale (RK-04) -
+#: so a generous timeout would mostly serve to make a wrong answer slower.
+LOGIN_MARKER_TIMEOUT_MS = 4_000
 
 
 class BrowserUnavailable(RuntimeError):
@@ -255,6 +260,27 @@ class SiteProfile:
     logged_out_markers: tuple[str, ...]
     terms_warning: str
     consent_kind: str | None = None
+    #: The registrable name this site serves under, before any country suffix.
+    #: Glassdoor answers on a per-country domain - glassdoor.be, glassdoor.nl,
+    #: glassdoor.co.uk, glassdoor.de - and an enumerated host set silently
+    #: refuses every one it was not told about, both as a detected tab and as a
+    #: target.  Empty means "match the enumerated hosts and nothing else".
+    domain: str = ""
+
+    def allows_host(self, host: str) -> bool:
+        """Is ``host`` this site?  Enumerated hosts first, then the domain.
+
+        ``glassdoor.be`` and ``nl.glassdoor.be`` are Glassdoor just as much as
+        ``www.glassdoor.com`` is.  The suffix test is anchored at the end of the
+        host, so ``glassdoor.com.example.net`` is not Glassdoor - the label has
+        to be followed by a public suffix and then nothing.
+        """
+        host = (host or "").strip().strip(".").lower()
+        if not host:
+            return False
+        if host in self.allowed_hosts:
+            return True
+        return bool(self.domain) and bool(_domain_re(self.domain).search(host))
 
 
 SITES: dict[str, SiteProfile] = {
@@ -265,6 +291,17 @@ SITES: dict[str, SiteProfile] = {
         login_url="https://www.linkedin.com/login",
         allowed_hosts=frozenset({"www.linkedin.com", "linkedin.com"}),
         logged_in_markers=(
+            # The current frontend, checked against a live signed-in feed on
+            # 2026-09-10: the authenticated nav, the member feed itself, and
+            # the share box that carries the member's own avatar.  None of the
+            # markers below it survive on that page, which is why a signed-in
+            # session used to read as "could not tell" (RK-04).
+            'data-testid="primary-nav"',
+            'data-testid="mainFeed"',
+            "primaryNavLinksComponentRef",
+            "shareboxProfilePictureComponentRef",
+            # The previous frontend.  Kept because an OR costs nothing and a
+            # session still served the old UI would otherwise go unrecognised.
             "global-nav__me",
             "feed-identity-module",
             'data-control-name="identity_welcome_message"',
@@ -290,6 +327,10 @@ SITES: dict[str, SiteProfile] = {
             {"www.glassdoor.com", "glassdoor.com", "www.glassdoor.be", "www.glassdoor.nl",
              "www.glassdoor.co.uk", "www.glassdoor.fr"}
         ),
+        # Glassdoor answers on a domain per country; enumerating them missed
+        # glassdoor.be without the www, every other country domain, and the
+        # language subdomains - as a detected tab and as a refused target.
+        domain="glassdoor",
         logged_in_markers=('data-test="site-header-profile"', "member-home", "userProfileMenu"),
         logged_out_markers=('data-test="sign-in"', "hardsellOverlay", "contentWall"),
         terms_warning=(
@@ -304,9 +345,22 @@ SITES: dict[str, SiteProfile] = {
 def site_for_url(url: str) -> SiteProfile | None:
     host = _host(url)
     for profile in SITES.values():
-        if host in profile.allowed_hosts:
+        if profile.allows_host(host):
             return profile
     return None
+
+
+@lru_cache(maxsize=16)
+def _domain_re(domain: str) -> re.Pattern[str]:
+    """``glassdoor`` -> a pattern matching glassdoor.be, www.glassdoor.co.uk, ...
+
+    Anchored at both ends: the label must be a whole host label, and it must be
+    followed by a public suffix and then the end of the host.  A one- or
+    two-label suffix covers ``.com`` and ``.co.uk`` alike.
+    """
+    return re.compile(
+        rf"^(?:[a-z0-9-]+\.)*{re.escape(domain)}\.[a-z]{{2,4}}(?:\.[a-z]{{2}})?$"
+    )
 
 
 def _host(url: str) -> str:
@@ -591,7 +645,7 @@ async def probe(url: str | None = None, *, timeout: float = 5.0) -> CdpStatus:
     status.open_tabs = len(pages)
     status.hosts = sorted({h for h in (_host(str(p.get("url", ""))) for p in pages) if h})
     status.sites = {
-        key: any(host in profile.allowed_hosts for host in status.hosts)
+        key: any(profile.allows_host(host) for host in status.hosts)
         for key, profile in SITES.items()
     }
     status.connected = True
@@ -795,12 +849,16 @@ class BrowserSession:
     ) -> bool:
         """Wait for the page to draw a login marker.  ``True`` if one appeared.
 
-        LinkedIn and Glassdoor both render their navigation on the client, so
-        the DOM at ``domcontentloaded`` is a shell carrying neither a signed-in
-        nor a signed-out marker.  Reading it straight away is a race that
-        reports "could not tell" for a session that is in fact signed in.
+        Both sites render their navigation on the client, so the DOM at
+        ``domcontentloaded`` can still be a shell that carries neither a
+        signed-in nor a signed-out marker.  On a warm profile the feed is
+        usually complete by then and this returns almost at once; the wait is
+        here for the slow load, and it is deliberately cheap in the common case.
 
-        Waits for either direction: the first marker to appear ends the wait,
+        It is *not* a substitute for keeping the markers current: a stale
+        marker never appears no matter how long anyone waits.
+
+        Waits for either direction - the first marker to appear ends the wait,
         and :func:`login_state` reads which one it was.  ``state="attached"``
         because the markers are matched as text by :func:`login_state`, which
         does not care whether the element is on screen.

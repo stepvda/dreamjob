@@ -54,7 +54,7 @@ ADAPTER_KEY = "glassdoor"
 #: CR-406 again: Glassdoor pages are slow and defended; keep the list short.
 MAX_TARGETS_PER_RUN = 60
 
-_ALLOWED_HOSTS = SITES[SITE].allowed_hosts
+_SITE_PROFILE = SITES[SITE]
 
 TARGET_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("employer", re.compile(r"^/Overview/", re.IGNORECASE)),
@@ -85,7 +85,7 @@ def normalise_target_url(url: str) -> str:
 
 def classify_target(url: str) -> str | None:
     parsed = urlparse(normalise_target_url(url))
-    if parsed.netloc.lower() not in _ALLOWED_HOSTS:
+    if not _SITE_PROFILE.allows_host(parsed.netloc):
         return None
     for kind, pattern in TARGET_SHAPES:
         if pattern.match(parsed.path or "/"):

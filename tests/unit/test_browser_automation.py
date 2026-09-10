@@ -273,6 +273,34 @@ def test_login_state_is_read_from_the_page_not_from_cookies():
 # ---------------------------------------------------------------------------
 
 
+def test_current_linkedin_feed_markup_reads_as_signed_in():
+    """A slice of the frontend LinkedIn actually serves (checked 2026-09-10).
+
+    The previous marker set matched none of this, so a session that was signed
+    in reported "could not tell" and the whole feature looked inert (RK-04).
+    """
+    feed = (
+        '<html><body><nav data-testid="primary-nav" id="primaryNavLinksComponentRef">'
+        "</nav>"
+        '<main data-testid="mainFeed">'
+        '<div id="shareboxProfilePictureComponentRef"></div>'
+        "</main></body></html>"
+    )
+    assert session_mod.login_state("linkedin", "https://www.linkedin.com/feed/", feed) is True
+    # Each marker has to stand on its own: LinkedIn will not retire them together.
+    for marker in ('data-testid="primary-nav"', 'data-testid="mainFeed"',
+                   "primaryNavLinksComponentRef", "shareboxProfilePictureComponentRef"):
+        one = f"<html><body><div {marker}></div></body></html>"
+        assert session_mod.login_state(
+            "linkedin", "https://www.linkedin.com/feed/", one
+        ) is True, marker
+
+
+def test_the_previous_linkedin_frontend_is_still_recognised():
+    old = '<html><body><div class="global-nav__me"></div></body></html>'
+    assert session_mod.login_state("linkedin", "https://www.linkedin.com/feed/", old) is True
+
+
 def test_markers_become_selectors_that_match_the_same_thing():
     # A bare token is matched as a substring of class or id, exactly as
     # login_state matches it as a substring of the HTML.
@@ -382,7 +410,7 @@ def test_goto_records_the_url_the_browser_landed_on():
     page.goto = goto
     load = asyncio.run(_session_on(page).goto("https://www.linkedin.com/feed/"))
     assert load.url == "https://www.linkedin.com/checkpoint/challenge/"
-    assert pacing_mod.detect_challenge(load.url).is_challenge is True
+    assert pacing_mod.detect_challenge(load.url).detected is True
 
 
 # ---------------------------------------------------------------------------
