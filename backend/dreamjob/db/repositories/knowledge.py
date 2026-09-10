@@ -102,11 +102,52 @@ def _flatten(value: Any) -> str:
 
 
 def _index_company(conn: Any, row: dict) -> None:
-    conn.execute("DELETE FROM company_fts WHERE company_id = ?", (row["id"],))
+    """Refresh one company's entry in ``company_fts`` (FR-345).
+
+    Keyed by ``company.rowid``, not by ``company_id``.  ``company_id`` is
+    declared UNINDEXED, which means FTS5 stores the value and indexes nothing,
+    so ``DELETE ... WHERE company_id = ?`` had no index to seek on and SQLite
+    scanned the whole table for every company written - the plan said ``SCAN
+    company_fts VIRTUAL TABLE INDEX 0:``, and the cost grew with the corpus
+    (6,674 virtual-machine steps per re-index at 500 companies, 52,174 at
+    4,000).  FTS5 does seek on rowid: ``INDEX 0:=``, 164 steps at either size.
+
+    That is the whole of the change.  The declaration, the tokens and the
+    ``company_id`` the two search queries join on are exactly as they were, so
+    a company search answers what it answered before - which is the point.
+    ``vacancy_fts`` had the identical defect at 35,159 rows of 3.9 KiB each and
+    is fixed differently in migration 133, as an external-content index
+    maintained by triggers.  ``company_fts`` cannot follow it there:
+    ``products_services`` is JSON that ``_flatten`` renders to prose before it
+    is indexed, and an external-content table re-reads the base column, so
+    every company would start matching a search for "description".  A change to
+    what a search answers has no business travelling inside a performance fix.
+
+    What the seek costs is an invariant somebody has to keep: every
+    ``company_fts`` entry sits at the ``company.rowid`` of the company it
+    describes.  Nothing in the product breaks it - the rebuild in migration 133
+    establishes it and every write here maintains it - but SQLite renumbers the
+    rowids of a TEXT-keyed table on a restore from ``.dump`` (measured: 15 of
+    17), and the index is not told.  A misaligned entry does not go stale, it
+    goes wrong and stays silent: the DELETE below removes whichever company now
+    occupies that rowid, so that company disappears from search while this one
+    ends up indexed twice, and every later write repeats it.  The repair is
+    :func:`reindex_all`, which re-keys both indexes; ``'rebuild'`` on this
+    table is accepted and repairs nothing, because a standalone FTS5 table
+    rebuilds from its own shadow copy and keeps the rowids it already had.
+    Prefer a binary ``.backup`` over a dump, which preserves rowids and needs
+    none of this.
+    """
+    keyed = conn.execute("SELECT rowid FROM company WHERE id = ?", (row["id"],)).fetchone()
+    if keyed is None:
+        return
+    rowid = keyed[0]
+    conn.execute("DELETE FROM company_fts WHERE rowid = ?", (rowid,))
     conn.execute(
-        "INSERT INTO company_fts (company_id, name, normalised_name, business_summary, "
-        "products_services) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO company_fts (rowid, company_id, name, normalised_name, "
+        "business_summary, products_services) VALUES (?, ?, ?, ?, ?, ?)",
         (
+            rowid,
             row["id"],
             row.get("name") or "",
             row.get("normalised_name") or "",
@@ -116,32 +157,34 @@ def _index_company(conn: Any, row: dict) -> None:
     )
 
 
-def _index_vacancy(conn: Any, row: dict) -> None:
-    conn.execute("DELETE FROM vacancy_fts WHERE vacancy_id = ?", (row["id"],))
-    conn.execute(
-        "INSERT INTO vacancy_fts (vacancy_id, title, description, company_name_raw) "
-        "VALUES (?, ?, ?, ?)",
-        (
-            row["id"],
-            row.get("title") or "",
-            (row.get("description") or "")[:20000],
-            row.get("company_name_raw") or "",
-        ),
-    )
-
-
 def reindex_all() -> dict[str, int]:
-    """Rebuild both FTS tables from the base tables (FR-345 maintenance)."""
+    """Rebuild both FTS tables from the base tables (FR-345 maintenance).
+
+    ``vacancy_fts`` is an external-content index (migration 133), so it is
+    rebuilt with FTS5's own command rather than emptied and refilled row by
+    row.  Do not put a bare ``DELETE FROM vacancy_fts`` back: it does not raise
+    against such a table, it silently empties the index and leaves every search
+    answering nothing.
+
+    This is also the repair for rowid drift.  Both indexes are addressed by
+    their base table's rowid since migration 133, and a restore from ``.dump``
+    renumbers those rowids without telling either index - after which a company
+    write deletes another company's entry and a vacancy's words answer for its
+    neighbour.  Running this refills ``company_fts`` from ``company`` keyed by
+    ``company.rowid`` and re-reads ``vacancy`` through the tokeniser, so it puts
+    both correspondences back.  Nothing calls it on a schedule; it is what an
+    operator runs after a restore.
+    """
     counts = {"company": 0, "vacancy": 0}
     with write_tx() as conn:
         conn.execute("DELETE FROM company_fts")
         for row in query_all("SELECT * FROM company"):
             _index_company(conn, row)
             counts["company"] += 1
-        conn.execute("DELETE FROM vacancy_fts")
-        for row in query_all("SELECT * FROM vacancy"):
-            _index_vacancy(conn, row)
-            counts["vacancy"] += 1
+        conn.execute("INSERT INTO vacancy_fts (vacancy_fts) VALUES ('rebuild')")
+        counts["vacancy"] = int(
+            (conn.execute("SELECT COUNT(*) AS n FROM vacancy").fetchone() or {"n": 0})["n"]
+        )
     return counts
 
 
@@ -241,8 +284,6 @@ def insert_vacancy(data: dict) -> str:
     values.setdefault("collected_at", utcnow())
     with write_tx() as conn:
         vacancy_id = _insert(conn, "vacancy", values)
-        values["id"] = vacancy_id
-        _index_vacancy(conn, values)
     return vacancy_id
 
 
@@ -251,9 +292,6 @@ def update_vacancy(vacancy_id: str, data: dict) -> None:
     values.pop("id", None)
     with write_tx() as conn:
         _update(conn, "vacancy", vacancy_id, values)
-        row = conn.execute("SELECT * FROM vacancy WHERE id = ?", (vacancy_id,)).fetchone()
-        if row is not None:
-            _index_vacancy(conn, dict(row))
 
 
 def get_vacancy(vacancy_id: str) -> dict | None:
@@ -561,7 +599,7 @@ def search_vacancies(
     if match:
         sql = (
             "SELECT v.*, bm25(vacancy_fts) AS rank FROM vacancy_fts f "
-            "JOIN vacancy v ON v.id = f.vacancy_id WHERE vacancy_fts MATCH ?"
+            "JOIN vacancy v ON v.rowid = f.rowid WHERE vacancy_fts MATCH ?"
         )
         params.append(match)
     else:
@@ -595,7 +633,7 @@ def count_vacancies(
     match = fts_query(q)
     if match:
         sql = (
-            "SELECT COUNT(*) AS n FROM vacancy_fts f JOIN vacancy v ON v.id = f.vacancy_id "
+            "SELECT COUNT(*) AS n FROM vacancy_fts f JOIN vacancy v ON v.rowid = f.rowid "
             "WHERE vacancy_fts MATCH ?"
         )
         params.append(match)
