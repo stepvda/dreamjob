@@ -20,6 +20,7 @@ one when they are done.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -42,6 +43,43 @@ def scratch_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]
     yield
     patch.undo()
     get_settings.cache_clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _the_model_is_out_of_reach() -> Iterator[None]:
+    """No unit test may spend tokens on a real model.
+
+    The same class of leak as the installed database above, through a
+    different door.  Collection now ends in the passes that rank what it
+    collected, and the last of those reaches for the model when one is
+    configured (FR-281) - so on a machine with a real ``DEEPSEEK_API_KEY`` in
+    its environment, tests that merely run a campaign to completion started
+    making live, billed API calls.  Ten seconds of one test run was three
+    HTTPS round trips to a paid endpoint.
+
+    A unit test that wants to exercise model behaviour injects a fake client,
+    as ``_CountingLLM`` and its like already do, so the credentials are simply
+    absent for the whole session and every pass that looks for a model
+    degrades to its deterministic path.
+
+    The exception is deliberate and has to stay reachable: the prompt
+    regression checks in ``test_employer_website_rung`` mean to call a real
+    model and skip themselves when none is configured.  Setting
+    ``DREAMJOB_TEST_ALLOW_MODEL=1`` lifts this guard for a run, which is how
+    those are meant to be exercised - never as the default, because the
+    default is what CI and every casual ``pytest`` invocation gets.
+    """
+    if os.environ.get("DREAMJOB_TEST_ALLOW_MODEL") == "1":
+        yield
+        return
+    patch = pytest.MonkeyPatch()
+    patch.setenv("DEEPSEEK_API_KEY", "")
+    patch.setenv("DREAMJOB_LOCAL_LLM_BASE_URL", "")
+    get_settings.cache_clear()
+    yield
+    patch.undo()
+    get_settings.cache_clear()
+
 
 
 @pytest.fixture(autouse=True)

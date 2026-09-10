@@ -1670,67 +1670,129 @@ async def collection_worker(ctx: JobContext) -> None:
     )
     prune_raw_documents(campaign_id)
     # Collection used to end here, leaving the vacancies it had just written
-    # one un-pressed button away from being of any use.  Synthesis is what
-    # turns them into the ranked list, so it follows the run that produced
-    # them (FR-261).
-    synthesis = await _synthesise_collected(ctx, campaign, outcome)
+    # one un-pressed button away from being of any use (FR-261, FR-281).
+    ranking = await _rank_collected(ctx, campaign, outcome)
     # Last: the counters and the bar are exact at rest, whatever cadence they
     # were written on while the run was in flight.
     books.flush()
     ctx.save_checkpoint(
         completed=completed,
         stats=stats.to_dict(),
-        synthesis=synthesis,
+        ranking=ranking,
         finished_at=utcnow(),
     )
 
 
-async def _synthesise_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict | None:
-    """Normalise what this run collected into opportunities (FR-261).
+async def _rank_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict | None:
+    """Turn what this run collected into a ranked list (FR-261, FR-264, FR-281).
 
-    Three things this deliberately does not do.  It does not run when the run
-    collected nothing, because there is nothing to normalise and an empty pass
-    only muddies the audit trail.  It does not fail the collection when it
-    falls over: the records are written and the run was good, so the failure is
-    recorded against the campaign and the job still ends ``done``.  And it does
-    not keep the opportunity ids, which run to tens of thousands on a large
-    campaign and would bloat both the job row and the audit event.
+    These are the same four passes the Opportunities screen runs from its own
+    buttons, in the order that screen runs them, because a collection that
+    stops short of them produces a screen reading "0 opportunities" with
+    nothing to say why.  A seeker who has just watched a campaign collect
+    42,883 vacancies has already asked for this; the buttons stay for re-runs.
+
+    Failure is per-pass and never fails the collection: the records are
+    written and the run was good, so a pass that falls over is recorded
+    against the campaign and the ones after it still get their turn.  Only
+    synthesis is load-bearing - the other three all read the opportunity rows
+    it writes - so it is the one whose failure stops the chain.
     """
     if outcome not in ("completed", "partial"):
         return None
-    synthesise = _load("dreamjob.pipeline.opportunities", "synthesise_campaign")
-    if synthesise is None:
-        return None
 
-    campaign_id = campaign["id"]
+    report: dict[str, Any] = {"synthesis": await _pass(ctx, campaign, "synthesis", _synthesise)}
+    if "error" in report["synthesis"]:
+        return report
+    # FR-149: a spontaneous-application campaign plans no job board and no ATS,
+    # so synthesis alone can only ever hand it an empty list.  The track that
+    # gives such a campaign its opportunities is the speculative one.
+    if _is_spontaneous(campaign):
+        report["speculative"] = await _pass(ctx, campaign, "speculative", _speculate)
+    # FR-264 before FR-281: the compensation sub-score reads the stored
+    # estimate rather than recomputing it, so scoring first would score every
+    # unpriced opportunity against a range nothing had filled in.
+    report["compensation"] = await _pass(ctx, campaign, "compensation", _price)
+    report["scoring"] = await _pass(ctx, campaign, "scoring", _score)
+
+    repo.record_audit(
+        "campaign.ranked",
+        job_seeker_id=ctx.job_seeker_id,
+        entity_type="campaign",
+        entity_id=campaign["id"],
+        detail=report,
+    )
+    return report
+
+
+async def _pass(ctx: JobContext, campaign: dict, name: str, fn: Any) -> dict:
+    """Run one post-collection pass off this job's loop, reporting its outcome.
+
+    The passes are synchronous and, on a campaign that collected 40k
+    vacancies, slow; they belong off the loop so the run stays cancellable
+    while they work (NFR-102).
+    """
     try:
-        # Synthesis is synchronous and, on a campaign that collected 40k
-        # vacancies, slow; it belongs off this job's loop so the run stays
-        # cancellable while it works (NFR-102).
-        report = await asyncio.to_thread(synthesise, campaign)
+        return await asyncio.to_thread(fn, campaign)
     except JobCancelled:
         raise
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
-        log.warning("Synthesis after collection failed for campaign %s: %s", campaign_id, reason)
+        log.warning("Post-collection %s failed for campaign %s: %s", name, campaign["id"], reason)
         repo.record_audit(
-            "campaign.synthesis_failed",
+            f"campaign.{name}_failed",
             job_seeker_id=ctx.job_seeker_id,
             entity_type="campaign",
-            entity_id=campaign_id,
+            entity_id=campaign["id"],
             detail={"error": reason},
         )
         return {"error": reason}
 
-    summary = {k: v for k, v in report.as_dict().items() if k != "opportunity_ids"}
-    repo.record_audit(
-        "campaign.synthesis_finished",
-        job_seeker_id=ctx.job_seeker_id,
-        entity_type="campaign",
-        entity_id=campaign_id,
-        detail=summary,
-    )
-    return summary
+
+def _synthesise(campaign: dict) -> dict:
+    """FR-261.  The opportunity ids are dropped: on a large campaign they run
+    to tens of thousands and say nothing the counts do not."""
+    fn = _load("dreamjob.pipeline.opportunities", "synthesise_campaign")
+    if fn is None:
+        return {"skipped": "no synthesis stage"}
+    return {k: v for k, v in fn(campaign).as_dict().items() if k != "opportunity_ids"}
+
+
+def _is_spontaneous(campaign: dict) -> bool:
+    fn = _load("dreamjob.pipeline.speculative", "is_spontaneous_campaign")
+    return bool(fn(campaign)) if fn is not None else False
+
+
+def _speculate(campaign: dict) -> dict:
+    """FR-262.  Consent is the seeker's to give, so its absence is an outcome
+    to report rather than an error to log."""
+    module = "dreamjob.pipeline.speculative"
+    fn = _load(module, "generate_campaign")
+    if fn is None:
+        return {"skipped": "no speculative stage"}
+    consent_required = _load(module, "ConsentRequired") or ()
+    try:
+        return fn(campaign).as_dict()
+    except consent_required as exc:  # type: ignore[misc]
+        return {"error": "consent_required", "detail": str(exc)}
+
+
+def _price(campaign: dict) -> dict:
+    """FR-264: pure corpus work, no tokens and no network."""
+    fn = _load("dreamjob.pipeline.compensation", "enrich_campaign")
+    if fn is None:
+        return {"skipped": "no compensation stage"}
+    return fn(campaign["job_seeker_id"], campaign["id"])
+
+
+def _score(campaign: dict) -> dict:
+    """FR-281.  The deterministic pass costs no tokens and scores everything;
+    the model is then spent on the top rows only, and only as far as the
+    campaign's own token budget allows (NFR-104)."""
+    fn = _load("dreamjob.pipeline.scoring", "score_campaign")
+    if fn is None:
+        return {"skipped": "no scoring stage"}
+    return fn(campaign).as_dict()
 
 
 def prune_raw_documents(campaign_id: str | None = None, limit: int = RAW_DOCUMENT_SWEEP_LIMIT) -> int:
