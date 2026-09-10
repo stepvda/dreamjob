@@ -64,6 +64,16 @@ export default function CampaignDetailPage() {
   const status = live?.status ?? campaign?.status
   const running = status === 'running'
 
+  // NFR-401: a job the backend marked "interrupted by restart" comes back as
+  // `pending` with its checkpoint intact.  It is resumable, but it is not
+  // `paused`, so without this it offered "Launch collection" — which starts a
+  // fresh run and abandons the work already done.
+  const job = live?.job ?? live?.jobs?.[0]
+  const doneSoFar = Number(job?.progress_done ?? live?.progress_done ?? 0)
+  const interrupted =
+    !running && status !== 'paused' && doneSoFar > 0 &&
+    ['pending', 'paused', 'running'].includes(String(job?.status ?? status))
+
   // FR-361: poll only while there is something moving, and stop the moment it
   // stops - a completed campaign that keeps polling is just wasted requests.
   useEffect(() => {
@@ -205,7 +215,18 @@ export default function CampaignDetailPage() {
             </>
           )}
         </button>
-        {!running && status !== 'paused' && (
+        {interrupted && (
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={() => control('resume')}
+            disabled={busy === 'resume'}
+            title={`Continue from item ${doneSoFar}; nothing already collected is repeated`}
+          >
+            {busy === 'resume' ? <span className="spinner" /> : <Icon name="play" />}
+            Resume collection
+          </button>
+        )}
+        {!running && status !== 'paused' && !interrupted && (
           <button
             className="btn btn-sm btn-primary"
             onClick={() => setConfirm('launch')}

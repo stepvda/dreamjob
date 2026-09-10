@@ -93,6 +93,21 @@ class Settings(BaseSettings):
     http_cache_ttl_seconds: int = Field(86_400, alias="DREAMJOB_HTTP_CACHE_TTL_SECONDS")
     per_domain_rps: float = Field(0.5, alias="DREAMJOB_PER_DOMAIN_RPS")
     http_max_concurrency: int = Field(20, alias="DREAMJOB_HTTP_MAX_CONCURRENCY")
+    # NFR-102: how many background jobs may hold a worker thread at once, and
+    # how many I/O threads each one may spawn for its own ``to_thread`` calls.
+    # Both are bounded on purpose: the alternative to a starved event loop is
+    # not an unbounded thread count, and CR-408 still allows only one writer.
+    job_pool_size: int = Field(4, alias="DREAMJOB_JOB_POOL_SIZE")
+    job_io_threads: int = Field(8, alias="DREAMJOB_JOB_IO_THREADS")
+    # How long a writer waits for the single writer (CR-408) before giving up.
+    # A request is impatient because a person is waiting and an error beats a
+    # page that never loads; a job is patient because its work still has to
+    # happen.  Both live here rather than in ``os.environ`` so that setting
+    # them in ``.env`` works: pydantic-settings reads that file itself and
+    # never exports it, so a module reading ``os.environ`` at import time
+    # would silently keep the default.
+    write_wait_seconds: float = Field(15.0, alias="DREAMJOB_WRITE_WAIT_SECONDS")
+    bulk_write_wait_seconds: float = Field(600.0, alias="DREAMJOB_BULK_WRITE_WAIT_SECONDS")
     respect_robots: bool = Field(True, alias="DREAMJOB_RESPECT_ROBOTS")
 
     # How long a failure is believed, so a gone page is not re-probed on every

@@ -433,7 +433,16 @@ def _bucket_of(source: dict) -> str:
         if status == "running":
             return "running"
         return "capped" if _capped_by_budget(source) else "pending"
-    state = source.get("outcome")
+    # ``outcome_state`` (the column migration 130 added and the collection
+    # worker maintains) before ``outcome`` (the older copy inside ``caps``).
+    # For an item settled since that migration the two agree.  For the 504
+    # items it *relabelled* from the evidence already in ``last_error`` - 293
+    # robots refusals and 211 dead boards in one campaign - only the column was
+    # rewritten, and the ``caps`` blob still carries the word the pre-fix code
+    # wrote there: ``failed``.  Reading ``caps`` first put every one of them
+    # back into the failure count, which is the number this whole screen exists
+    # to keep honest, so the migrated column wins.
+    state = source.get("outcome_state") or source.get("outcome")
     if state in _STATE_BUCKET:
         return _STATE_BUCKET[state]
     if status in _STATUS_BUCKET:
@@ -535,8 +544,8 @@ def collection_outcomes(sources: list[dict], catalogue: dict[str, dict]) -> dict
             "plan_item_id": source.get("plan_item_id"),
             "adapter_key": source["adapter_key"],
             "display_name": source.get("display_name") or source["adapter_key"],
-            "state": source.get("outcome"),
-            "reason": _shorten(source.get("last_error")),
+            "state": source.get("outcome_state") or source.get("outcome"),
+            "reason": _shorten(source.get("outcome_reason") or source.get("last_error")),
             "error_count": source.get("error_count") or 0,
             "extraction_success_rate": source.get("extraction_success_rate"),
         }

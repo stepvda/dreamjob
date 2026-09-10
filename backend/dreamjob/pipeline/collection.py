@@ -141,6 +141,57 @@ RAW_DOCUMENT_SWEEP_LIMIT = 2_000
 
 
 # ---------------------------------------------------------------------------
+# How collection competes for the process (NFR-102, CR-408, FR-185)
+# ---------------------------------------------------------------------------
+#
+# Collection is the longest-running job in the product and the one that broke
+# it: a real 2,686-item campaign left the backend unresponsive for eighteen
+# hours.  ``jobs/runner.py`` answers *where* a job runs - every job now has a
+# thread and an event loop of its own, so no job body can starve the loop
+# uvicorn serves HTTP from.  That fixes the mechanism.  It says nothing about
+# the two things this module is answerable for:
+#
+# * **how much of the single writer collection takes.**  SQLite has one writer
+#   and ``db/connection.py`` queues for it in process (CR-408, NFR-102); every
+#   transaction collection opens is one an interactive request may have to get
+#   past.  A campaign of 2,686 single-page items used to open 8,058
+#   transactions on ``source_plan_item`` and 5,379 on ``job_run`` - three and
+#   two per item - to record numbers that are read once, by a screen.
+# * **how long it goes without offering to stop.**  ``checkpoint_barrier()``
+#   is where pause and cancel are honoured (FR-185).  A barrier that is
+#   reached once per *page* is bounded by whatever the page happened to
+#   contain: sixty postings through the knowledge-base writer is a hundred-odd
+#   transactions and, on a knowledge base of any size, seconds of them.  The
+#   intervals below are counts of work, because a bound that depends on how
+#   big a page turned out to be is not a bound.
+#
+# What is *not* coalesced is the checkpoint.  Its cadence is a requirement and
+# not a preference - NFR-401 says a crash loses at most the page in flight,
+# and that is only true if it is written after every page - so it stays
+# exactly where it was.
+
+#: Knowledge-base records written between two checkpoint barriers.  Small
+#: pages are written in one call, exactly as before; only a page big enough to
+#: hold the loop for a noticeable time is broken up.
+WRITE_BATCH = 25
+
+#: Plan items prepared, and plan items settled, between two barriers.  Both
+#: loops run over the whole plan - 2,686 items each - with no I/O to yield on
+#: of their own, which is how a pause could go unanswered for minutes at the
+#: start and at the end of a run.
+PREPARE_BATCH = 64
+SETTLE_BATCH = 32
+
+#: How often the derived counters are written.  ``progress_done`` is a bar on
+#: a screen and ``records_collected`` is a number beside a source name: nobody
+#: needs 2,686 rows of either, they need the number to be right when they look
+#: at it, and at the end.  Both are flushed at every point where the run can
+#: end, so what is written is never stale by more than this.
+PROGRESS_INTERVAL_SECONDS = 1.0
+COUNTER_INTERVAL_SECONDS = 2.0
+
+
+# ---------------------------------------------------------------------------
 # Rate-limit buckets (FR-182, NFR-103; plan sections 2.2 and 5.2 item N5)
 # ---------------------------------------------------------------------------
 
@@ -847,6 +898,12 @@ class _Unit:
     outcome: ItemOutcome = field(default_factory=ItemOutcome)
     started: bool = False
     running: bool = False        # inside its page loop right now (NFR-401)
+    #: Its verdict has been written (:func:`_settle`).  A run can now be
+    #: cancelled *between* the last page and the settle pass - the settle pass
+    #: yields, because it is thousands of writes long - so "it ran and nothing
+    #: has been written down about it yet" is a state the cancel handler has to
+    #: be able to see.
+    settled: bool = False
     #: Companies this item collected for, whether it created them or found them.
     company_ids: set[str] = field(default_factory=set)
     #: The board's company, resolved once per item rather than once per posting.
@@ -877,6 +934,14 @@ def _record_extraction(unit: _Unit, campaign_id: str) -> float | None:
     """
     outcome = unit.outcome
     rate = outcome.extraction_rate
+    if rate is None and not outcome.written:
+        # This item fetched no page and wrote no record, so it is not evidence
+        # about the adapter's extraction rate either way - and a campaign that
+        # ends on its page budget leaves thousands of such items (one real run
+        # left 4,664).  Recording "nothing to report" for each of them was a
+        # read and a write on one ``source_catalogue`` row per plan item that
+        # changed only its ``updated_at`` (CR-408, NFR-102).
+        return None
     repo.record_extraction_rate(unit.adapter_key, rate, had_success=bool(outcome.written))
     if rate is None or rate >= BREAKAGE_RATE:
         return rate
@@ -1097,7 +1162,7 @@ def _last_detail(refusals: list[Any]) -> str:
     return last.detail if isinstance(last, Refusal) else str(last)
 
 
-async def _run_page(unit: _Unit, page: int) -> ItemOutcome:
+async def _run_page(unit: _Unit, page: int, books: _Bookkeeping) -> ItemOutcome:
     """One page of one source, measured at every step (FR-181, NFR-403)."""
     step = ItemOutcome()
     plan_item = PlanItem(
@@ -1181,7 +1246,7 @@ async def _run_page(unit: _Unit, page: int) -> ItemOutcome:
     )
     step.normalised = len(records)
     _link_board_company(unit, records)
-    written = unit.writer.write_many(records)
+    written = await _write_records(unit, records, books)
     step.created = sum(1 for outcome in written if outcome.created)
     step.updated = len(written) - step.created
     step.dropped = len(getattr(unit.writer, "failures", ()) or ()) - failures_before
@@ -1247,6 +1312,152 @@ def _absorb(unit: _Unit, step: ItemOutcome) -> None:
         total.last_error = step.last_error
 
 
+class _Bookkeeping:
+    """The run's own writes, coalesced, and the barrier it yields at.
+
+    Three of the writes collection makes are frequent, small and *derived*:
+    the progress bar on ``job_run``, and ``records_collected`` and
+    ``error_count`` on the plan item.  One page used to write each of them
+    separately and immediately, which on a 2,686-item campaign is thirteen
+    thousand transactions through the single writer (CR-408) to keep two
+    screens up to date.
+
+    Each is accumulated here instead and written on a bounded cadence, when
+    the source that produced it finishes, and at every point where the run can
+    end - a cap, a cancel, a failure, or the last page.  So the numbers are
+    never stale by more than a second or two, and they are exact by the time
+    anything reads them at rest.
+
+    The checkpoint is deliberately not in here.  It is the one write whose
+    cadence NFR-401 fixes - a crash may lose the page in flight and no more -
+    and it is written after every page exactly as it was.  ``ctx`` is
+    published for it, and for the barrier: everything downstream carries the
+    bookkeeper rather than the context, so the two cannot drift apart.
+    """
+
+    def __init__(self, ctx: JobContext) -> None:
+        self.ctx = ctx
+        self._done = 0
+        self._total: int | None = None
+        self._progress_written: tuple[int, int | None] | None = None
+        self._progress_at = 0.0
+        self._counters: dict[str, dict[str, Any]] = {}
+        self._counters_at = 0.0
+
+    # -- FR-185: where pause and cancel are honoured ------------------------
+    async def barrier(self) -> None:
+        """Yield to the loop and honour pause/cancel (FR-185, NFR-401)."""
+        await self.ctx.checkpoint_barrier()
+
+    # -- the progress bar (FR-185) -----------------------------------------
+    def progress(self, done: int, total: int | None = None) -> None:
+        self._done = done
+        if total is not None:
+            self._total = total
+        self._flush_progress()
+
+    def _flush_progress(self, *, force: bool = False) -> None:
+        pending = (self._done, self._total)
+        if pending == self._progress_written:
+            return
+        now = time.monotonic()
+        if not force and now - self._progress_at < PROGRESS_INTERVAL_SECONDS:
+            return
+        self.ctx.progress(self._done, self._total)
+        self._progress_written = pending
+        self._progress_at = now
+
+    # -- a plan item's own counters (FR-185) -------------------------------
+    def count(
+        self,
+        plan_item_id: str,
+        *,
+        records: int = 0,
+        errors: int = 0,
+        last_error: str | None = None,
+    ) -> None:
+        """Charge one page's records and failures to its plan item."""
+        if not (records or errors or last_error):
+            return
+        pending = self._counters.setdefault(
+            plan_item_id, {"records": 0, "errors": 0, "last_error": None}
+        )
+        pending["records"] += records
+        pending["errors"] += errors
+        if last_error:
+            pending["last_error"] = last_error
+        self._flush_counters()
+
+    def flush_counters(self, plan_item_id: str) -> None:
+        """Write one plan item's counters now.
+
+        Called when its source finishes, so that nothing is still queued for a
+        row that :func:`_settle` is about to write its verdict onto - a
+        pending increment landing afterwards would overwrite the settled
+        ``last_error`` with the message of a page that has already been
+        accounted for.
+        """
+        pending = self._counters.pop(plan_item_id, None)
+        if pending:
+            self._write_counter(plan_item_id, pending)
+
+    def _flush_counters(self, *, force: bool = False) -> None:
+        if not self._counters:
+            return
+        now = time.monotonic()
+        if not force and now - self._counters_at < COUNTER_INTERVAL_SECONDS:
+            return
+        for plan_item_id, pending in list(self._counters.items()):
+            del self._counters[plan_item_id]
+            self._write_counter(plan_item_id, pending)
+        self._counters_at = now
+
+    @staticmethod
+    def _write_counter(plan_item_id: str, pending: dict[str, Any]) -> None:
+        repo.bump_plan_item(
+            plan_item_id,
+            records=int(pending["records"]),
+            errors=int(pending["errors"]),
+            last_error=pending["last_error"],
+        )
+
+    # -- every way the run can end -----------------------------------------
+    def flush(self) -> None:
+        """Make everything accumulated true on disk, in the order it is read.
+
+        Counters first: they are increments on the plan item, and the settle
+        write that follows states the item's verdict on the same row.
+        """
+        self._flush_counters(force=True)
+        self._flush_progress(force=True)
+
+
+async def _write_records(unit: _Unit, records: list[Any], books: _Bookkeeping) -> list[Any]:
+    """Write one page's records in bounded groups (FR-185, CR-408).
+
+    ``write_many`` is a loop over ``write``, and each ``write`` is one or two
+    transactions through the single writer.  A page of sixty postings is
+    therefore a hundred-odd transactions in one unbroken synchronous stretch,
+    with no opportunity to notice that the user pressed Pause - and against a
+    knowledge base with a full-text index over tens of thousands of rows that
+    stretch is measured in seconds, not milliseconds.
+
+    The records written, their order and their outcomes are exactly what
+    ``write_many(records)`` produces.  What changes is that the interval
+    between two pause/cancel checks is bounded by ``WRITE_BATCH`` records
+    rather than by however big this page turned out to be.  A page small
+    enough not to matter is still written in one call, so the ordinary ATS
+    board behaves exactly as it did.
+    """
+    if len(records) <= WRITE_BATCH:
+        return unit.writer.write_many(records)
+    written: list[Any] = []
+    for start in range(0, len(records), WRITE_BATCH):
+        await books.barrier()
+        written.extend(unit.writer.write_many(records[start : start + WRITE_BATCH]))
+    return written
+
+
 async def collection_worker(ctx: JobContext) -> None:
     """Execute every active plan item of a campaign, page by page (FR-181)."""
     campaign_id = ctx.campaign_id or ""
@@ -1256,6 +1467,9 @@ async def collection_worker(ctx: JobContext) -> None:
 
     caps = Caps.from_campaign(campaign)
     stats = CollectionStats()
+    # Every write this run makes about itself goes through here, and so does
+    # every point at which it offers to stop (NFR-102, FR-185).
+    books = _Bookkeeping(ctx)
     completed: dict[str, int] = dict(ctx.checkpoint.get("completed") or {})
     started = time.monotonic()
     # Pages already fetched by an interrupted run count towards both the
@@ -1295,13 +1509,15 @@ async def collection_worker(ctx: JobContext) -> None:
     try:
         async with EgressClient() as egress:
             units.extend(
-                _build_units(items, catalogue, egress, campaign_id, caps, completed, admin_caps)
+                await _build_units(
+                    items, catalogue, egress, campaign_id, caps, completed, admin_caps, books
+                )
             )
             # FR-186: the denominator is settled once, after the sources with no
             # work have been taken out, so the bar cannot end at "1 of 8" on a
             # run in which seven of the eight sources were never runnable.
             total_pages = stats.pages + sum(u.remaining for u in units)
-            ctx.progress(stats.pages, total_pages)
+            books.progress(stats.pages, total_pages)
 
             # FR-186: every runnable source is guaranteed a floor of the budget
             # before any source is allowed to take more than its share, so an
@@ -1313,14 +1529,14 @@ async def collection_worker(ctx: JobContext) -> None:
             # left unused by a serial loop.
             concurrency = int(getattr(egress.settings, "http_max_concurrency", 20) or 20)
 
-            def harvest_now() -> int:
+            async def harvest_now() -> int:
                 """Plan the boards this run's own discovery found (FR-181)."""
                 nonlocal harvested
                 harvested = True
                 units.extend(
-                    _expand_harvest_stage(campaign_id, catalogue, egress, items, units,
-                                          caps, admin_caps,
-                                          budget=max(0, caps.max_pages - stats.pages))
+                    await _expand_harvest_stage(campaign_id, catalogue, egress, items, units,
+                                                caps, admin_caps, books,
+                                                budget=max(0, caps.max_pages - stats.pages))
                 )
                 return stats.pages + sum(u.remaining for u in units)
 
@@ -1336,8 +1552,8 @@ async def collection_worker(ctx: JobContext) -> None:
                         break
                     stage = min(u.stage for u in pending)
                     if stage >= repo.STAGE_HARVEST and not harvested:
-                        total_pages = harvest_now()
-                        ctx.progress(stats.pages, total_pages)
+                        total_pages = await harvest_now()
+                        books.progress(stats.pages, total_pages)
                         continue
                     ran_stages.add(stage)
                     # FR-186: the stage takes its reservation of what is left,
@@ -1352,33 +1568,56 @@ async def collection_worker(ctx: JobContext) -> None:
                     try:
                         await _run_wave(
                             [u for u in pending if u.stage == stage],
-                            pass_limit, ctx, stats, caps, started, completed,
+                            pass_limit, books, stats, caps, started, completed,
                             total_pages, concurrency,
                         )
                     finally:
                         stats.stage_limit = None
+                        # A wave is over: whatever it accumulated is true now,
+                        # not in two seconds' time.
+                        books.flush()
                 if stats.stopped_by:
                     break
                 if not harvested:
                     # No ATS source was planned - which is the normal shape of a
                     # first campaign, when no company had a known board yet.  The
                     # discovery stages have now run, so ask again.
-                    total_pages = harvest_now()
-                    ctx.progress(stats.pages, total_pages)
+                    total_pages = await harvest_now()
+                    books.progress(stats.pages, total_pages)
 
-            for unit in units:
+            # The verdicts.  Two writes per plan item over the whole plan is
+            # thousands of transactions in one stretch, so the pass yields:
+            # a person who pressed Cancel while a 2,686-item campaign was
+            # writing its outcomes should not wait for all of them (FR-185).
+            # An item left unsettled by that cancel is left runnable, which is
+            # what a cancel means, and the handler below says so on its row.
+            books.flush()
+            for index, unit in enumerate(units):
+                if index and not index % SETTLE_BATCH:
+                    await books.barrier()
                 _settle(unit, stats, campaign_id)
     except JobCancelled:
+        books.flush()
         for unit in units:
-            if not unit.running:
+            if not (unit.running or (unit.started and not unit.settled)):
                 continue
             # NFR-401: an interrupted item is rewound so it is runnable again.
             # Left at 'running' it reads as a source that has been fetching for
             # hours on a job that is not running at all.  Every bucket that was
-            # in flight is rewound, not just the one that noticed the cancel.
+            # in flight is rewound, not just the one that noticed the cancel -
+            # and so is every item the cancel caught between its last page and
+            # its verdict, which is a gap the settle pass now has because it
+            # yields.
             repo.update_plan_item(
                 unit.id,
-                {"status": "planned", "last_error": "cancelled while running; resumable"},
+                {
+                    "status": "planned",
+                    "last_error": (
+                        "cancelled while running; resumable"
+                        if unit.running
+                        else "cancelled before its outcome was written; resumable"
+                    ),
+                },
             )
         repo.set_stage(campaign_id, "collection", "cancelled")
         repo.record_audit(
@@ -1390,6 +1629,7 @@ async def collection_worker(ctx: JobContext) -> None:
         )
         raise
     except Exception as exc:
+        books.flush()
         for unit in units:
             if not unit.running:
                 continue
@@ -1417,6 +1657,9 @@ async def collection_worker(ctx: JobContext) -> None:
         detail={**stats.to_dict(), "outcome": outcome},
     )
     prune_raw_documents(campaign_id)
+    # Last: the counters and the bar are exact at rest, whatever cadence they
+    # were written on while the run was in flight.
+    books.flush()
     ctx.save_checkpoint(completed=completed, stats=stats.to_dict(), finished_at=utcnow())
 
 
@@ -1496,7 +1739,7 @@ def _campaign_status(outcome: str) -> str:
     return "failed" if outcome == "failed" else "completed"
 
 
-def _build_units(
+async def _build_units(
     items: list[dict],
     catalogue: dict[str, dict],
     egress: EgressClient,
@@ -1504,10 +1747,20 @@ def _build_units(
     caps: Caps,
     completed: dict[str, int],
     admin_caps: dict[str, dict],
+    books: _Bookkeeping,
 ) -> list[_Unit]:
-    """Turn the plan into runnable work, settling what cannot run (IR-101)."""
+    """Turn the plan into runnable work, settling what cannot run (IR-101).
+
+    One pass over the whole plan, constructing an adapter and settling the
+    items that cannot run - and, before this yielded, the one stretch of a
+    collection job with no I/O in it at all.  On a 2,686-item campaign it ran
+    for long enough that a pause pressed just after Launch was not answered
+    until the first page had been fetched (FR-185).
+    """
     units: list[_Unit] = []
-    for item in items:
+    for index, item in enumerate(items):
+        if index and not index % PREPARE_BATCH:
+            await books.barrier()
         try:
             unit = _build_unit(item, catalogue, egress, campaign_id, caps, completed, admin_caps)
         except Exception as exc:  # noqa: BLE001 - the item fails, the campaign does not
@@ -1625,7 +1878,7 @@ def _make_unit(
     )
 
 
-def _expand_harvest_stage(
+async def _expand_harvest_stage(
     campaign_id: str,
     catalogue: dict[str, dict],
     egress: EgressClient,
@@ -1633,6 +1886,7 @@ def _expand_harvest_stage(
     units: list[_Unit],
     caps: Caps,
     admin_caps: dict[str, dict],
+    books: _Bookkeeping,
     budget: int,
 ) -> list[_Unit]:
     """Plan the ATS boards the discovery stages just found (FR-162, FR-181).
@@ -1641,12 +1895,18 @@ def _expand_harvest_stage(
     ``company.ats_vendor``/``ats_slug``, and the harvest stage reads them back.
     Without it a board found by this run's own website crawl could only be read
     by the *next* campaign, which is why every ATS source was permanently dark.
+
+    Each board planned is an insert and a read of its own, and the budget can
+    be thousands of them, so this yields on the same interval the first pass
+    over the plan does: a run that is planning its harvest is still a run that
+    can be paused (FR-185).
     """
     covered = {
         (str(row.get("adapter_key")), str((row.get("native_query") or {}).get("slug") or "").lower())
         for row in [*items, *(u.item for u in units)]
     }
     added: list[_Unit] = []
+    considered = 0
     if budget <= 0:
         return added
     for key, entry in sorted(catalogue.items()):
@@ -1666,6 +1926,9 @@ def _expand_harvest_stage(
             slug = str(company.get("ats_slug") or "").strip()
             if not slug or (key, slug.lower()) in covered:
                 continue
+            considered += 1
+            if not considered % PREPARE_BATCH:
+                await books.barrier()
             covered.add((key, slug.lower()))
             row = {
                 "adapter_key": key,
@@ -1708,7 +1971,7 @@ def _expand_harvest_stage(
 async def _run_wave(
     wave: list[_Unit],
     pass_limit: int,
-    ctx: JobContext,
+    books: _Bookkeeping,
     stats: CollectionStats,
     caps: Caps,
     started: float,
@@ -1751,11 +2014,11 @@ async def _run_wave(
             if unit.remaining <= 0:
                 continue
             if slots is None:
-                await _run_unit(unit, min(pass_limit, unit.pages), ctx, stats, caps,
+                await _run_unit(unit, min(pass_limit, unit.pages), books, stats, caps,
                                 started, completed, total_pages)
             else:
                 async with slots:
-                    await _run_unit(unit, min(pass_limit, unit.pages), ctx, stats, caps,
+                    await _run_unit(unit, min(pass_limit, unit.pages), books, stats, caps,
                                     started, completed, total_pages)
 
     if len(buckets) <= 1:
@@ -1783,7 +2046,7 @@ async def _run_wave(
 async def _run_unit(
     unit: _Unit,
     limit: int,
-    ctx: JobContext,
+    books: _Bookkeeping,
     stats: CollectionStats,
     caps: Caps,
     started: float,
@@ -1795,16 +2058,23 @@ async def _run_unit(
     ``running`` is cleared only on the way out through the front door: an item
     interrupted by a cancel keeps it, which is how the worker knows which items
     to rewind to 'planned' when several buckets were in flight at once.
+
+    Whatever this source accumulated is written before the source is left,
+    however it is left, so no increment is still queued for a row that
+    :func:`_settle` is about to write a verdict onto.
     """
     unit.running = True
-    await _drive_unit(unit, limit, ctx, stats, caps, started, completed, total_pages)
+    try:
+        await _drive_unit(unit, limit, books, stats, caps, started, completed, total_pages)
+    finally:
+        books.flush_counters(unit.id)
     unit.running = False
 
 
 async def _drive_unit(
     unit: _Unit,
     limit: int,
-    ctx: JobContext,
+    books: _Bookkeeping,
     stats: CollectionStats,
     caps: Caps,
     started: float,
@@ -1825,10 +2095,10 @@ async def _drive_unit(
             # FR-186: this stage has spent its reservation.  The run continues -
             # the next stage is exactly what the reservation was protecting.
             return
-        await ctx.checkpoint_barrier()  # FR-185 pause / cancel
+        await books.barrier()  # FR-185 pause / cancel
         page = unit.done + 1
         try:
-            step = await _run_page(unit, page)
+            step = await _run_page(unit, page, books)
         except JobCancelled:
             raise
         except Exception as exc:  # noqa: BLE001 - the item fails, the run continues
@@ -1838,8 +2108,8 @@ async def _drive_unit(
         unit.done = page
 
         if step.errors:
-            repo.bump_plan_item(unit.id, errors=step.errors, last_error=step.last_error)
-            ctx.record_error(step.last_error or "collection error")
+            books.count(unit.id, errors=step.errors, last_error=step.last_error)
+            books.ctx.record_error(step.last_error or "collection error")
             bucket["errors"] += step.errors
             stats.errors += step.errors
             unit.pages = unit.done  # a failed source is not paged through further
@@ -1850,9 +2120,8 @@ async def _drive_unit(
             # Only the requests that actually failed are charged here - a bot
             # wall or a dead board on the same page is counted below, not as an
             # error the operator is asked to look at.
-            repo.bump_plan_item(unit.id, errors=step.failed_requests,
-                                last_error=step.last_error)
-            ctx.record_error(step.last_error or "request refused")
+            books.count(unit.id, errors=step.failed_requests, last_error=step.last_error)
+            books.ctx.record_error(step.last_error or "request refused")
             bucket["errors"] += step.failed_requests
             stats.errors += step.failed_requests
         if step.blocked:
@@ -1872,7 +2141,7 @@ async def _drive_unit(
             # happens (FR-186).
             unit.pages = unit.done
         if step.written:
-            repo.bump_plan_item(unit.id, records=step.written)
+            books.count(unit.id, records=step.written)
         stats.pages += step.charged
         stats.charge_stage(unit.stage, step.charged)
         stats.records += step.written
@@ -1887,8 +2156,10 @@ async def _drive_unit(
         # re-runs at most this page - and the writer is idempotent, so
         # re-running it costs time, not correctness.
         completed[unit.id] = unit.done
-        ctx.save_checkpoint(completed=completed, stats=stats.to_dict())
-        ctx.progress(stats.pages, total_pages)
+        # NFR-401 fixes this one's cadence: after the unit of work, every time.
+        books.ctx.save_checkpoint(completed=completed, stats=stats.to_dict())
+        # ... and this one's is a preference, so it is coalesced (NFR-102).
+        books.progress(stats.pages, total_pages)
         if step.errors:
             return
 
@@ -1981,6 +2252,7 @@ def _outcome_columns(unit: _Unit, state: str, reason: str | None) -> dict[str, A
 
 def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     """Write down what this source did, in words that distinguish the cases."""
+    unit.settled = True
     outcome = unit.outcome
     _record_extraction(unit, campaign_id)
     _record_ledger(unit)
@@ -2171,7 +2443,13 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
     job = next((j for j in jobs if j["kind"] == JOB_KIND), None)
 
     sources = []
-    breakage = []
+    #: NFR-403 is a property of the *adapter*, not of each plan item that used
+    #: it: ``extraction_success_rate`` is read from the one catalogue row.
+    #: Appending per item said "board.eures (8%)" 228 times, "registry.kbo"
+    #: 153 and "website.crawl" 149 - 561 entries naming 6 adapters - and the
+    #: banner that renders them buried the failure list this screen exists to
+    #: show.  Keyed by adapter, so each broken adapter is named once.
+    breakage: dict[str, dict] = {}
     outcomes: dict[str, int] = {}
     remaining_seconds = 0
     for item in items:
@@ -2220,7 +2498,10 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
             }
         )
         if rate is not None and rate < BREAKAGE_RATE:
-            breakage.append({"adapter_key": item["adapter_key"], "extraction_success_rate": rate})
+            breakage[item["adapter_key"]] = {
+                "adapter_key": item["adapter_key"],
+                "extraction_success_rate": rate,
+            }
 
     return {
         "campaign_id": campaign_id,
@@ -2251,7 +2532,7 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
             "cost_eur": campaign.get("cost_eur"),
         },
         "reuse_report": campaign.get("reuse_report"),
-        "adapter_breakage": breakage,
+        "adapter_breakage": sorted(breakage.values(), key=lambda r: r["extraction_success_rate"]),
     }
 
 

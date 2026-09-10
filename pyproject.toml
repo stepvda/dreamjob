@@ -29,6 +29,7 @@ tmp_path_retention_policy = "failed"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "llm: needs the network or a live model call; deselect with -m 'not llm'",
+    "load: runs a job under load and times the API; deselect with -m 'not load'",
 ]
 
 [tool.ruff]

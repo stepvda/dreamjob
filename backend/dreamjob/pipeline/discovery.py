@@ -56,6 +56,7 @@ from typing import Any
 
 from dreamjob.adapters.ats.detect import detect_ats
 from dreamjob.adapters.base import PlanItem
+from dreamjob.pipeline.board_registry import without_gone
 
 log = logging.getLogger(__name__)
 
@@ -609,7 +610,14 @@ def discover(
         limit = max(0, int(caps.get("max_companies") or DEFAULT_MAX_BOARDS))
         found.boards, counts = board_targets(
             companies=list(companies or []),
-            registry=load_board_registry(registry_path),
+            # The shipped registry file cannot know what this installation's own
+            # requests found - it ships ``last_verified: null`` on every row - so the
+            # boards this installation has watched answer 404 twice are subtracted
+            # here rather than planned, fetched and 404'd again (FR-181, FR-186,
+            # FR-343).  One query, not one per board (CR-408).  This is *not* a
+            # filter on "verified live": an unverified board has simply never been
+            # asked, and 4,515 of 4,518 rows are unverified.
+            registry=without_gone(load_board_registry(registry_path)),
             knowledge_base=_knowledge_base_boards(knowledge_base_boards),
             adapter_keys=adapter_keys,
             countries=list(countries or []),

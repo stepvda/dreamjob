@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 import time
 from typing import Any
 from urllib.parse import urlencode
@@ -53,8 +54,33 @@ MIN_REQUEST_INTERVAL_SECONDS = 1.0
 # Place coordinates are effectively static; cache them for a month (FR-182).
 GEOCODE_CACHE_TTL_SECONDS = 30 * 24 * 3600
 
-_pace_lock = asyncio.Lock()
+# One lock per event loop.  Background jobs each run on their own loop
+# (jobs/runner.py, NFR-102), and an ``asyncio.Lock`` binds itself to the first
+# loop that awaits it and refuses every other one thereafter.  A single module
+# global would therefore have worked in the API and raised "bound to a
+# different event loop" inside the first collection job that geocoded
+# anything.  The pacing below stays global, which is what Nominatim's policy
+# is about: ``_last_request_at`` is shared, so one request per second is
+# honoured across every loop in the process, not once per loop.
+_pace_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+_pace_locks_guard = threading.Lock()
 _last_request_at = 0.0
+
+
+def _pace_lock_for_this_loop() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _pace_locks.get(loop)
+    if lock is None:
+        with _pace_locks_guard:
+            lock = _pace_locks.get(loop)
+            if lock is None:
+                lock = _pace_locks[loop] = asyncio.Lock()
+        # A job's loop is closed when the job ends; do not hold those forever.
+        for dead in [k for k in list(_pace_locks) if k.is_closed()]:
+            _pace_locks.pop(dead, None)
+    return lock
+
+
 _memo: dict[str, list[dict[str, Any]]] = {}
 _MEMO_MAX = 512
 
@@ -196,7 +222,7 @@ async def _paced_fetch(client: EgressClient, url: str) -> Any:
     consume the rate budget and does not delay the next real request.
     """
     global _last_request_at
-    async with _pace_lock:
+    async with _pace_lock_for_this_loop():
         elapsed = time.monotonic() - _last_request_at
         if elapsed < MIN_REQUEST_INTERVAL_SECONDS:
             await asyncio.sleep(MIN_REQUEST_INTERVAL_SECONDS - elapsed)

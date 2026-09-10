@@ -761,3 +761,28 @@ def test_a_blocked_board_says_nothing_about_whether_it_exists(db, answers):
         "a refusal to read is not evidence the board has gone"
     )
     assert registry.boards(vendor=VENDOR)[0]["consecutive_failures"] == 0
+
+
+def test_a_broken_adapter_is_named_once_not_once_per_plan_item(db, answers):
+    """NFR-403 belongs to the adapter, not to each plan item that used it.
+
+    ``extraction_success_rate`` is read from the one ``source_catalogue`` row,
+    so appending a breakage entry per item repeats the same fact once per item.
+    Measured on the installed database: one campaign's status payload carried
+    561 entries naming 6 adapters - ``board.eures (8%)`` 228 times - and the
+    banner that renders them ran for a full screen and buried the failure list
+    this screen exists to put first.
+    """
+    answers(200)
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("outcome.board", extraction_success_rate=0.08)
+    for _ in range(5):
+        _plan_item(campaign_id, "outcome.board", {"queries": ["data"]})
+
+    status = collection.status(campaign_id, seeker)
+
+    assert len(status["sources"]) == 5, "five items, so five source rows"
+    assert status["adapter_breakage"] == [
+        {"adapter_key": "outcome.board", "extraction_success_rate": 0.08}
+    ], "one broken adapter is one entry, however many items named it"

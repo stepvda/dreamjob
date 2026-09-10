@@ -258,3 +258,53 @@ def test_the_headline_numbers_are_the_ones_the_operator_reads():
     # The old headline is kept rather than dropped: a retried page still cost
     # something, it is simply not the number to lead on.
     assert outcomes["error_count"] == 1
+
+
+def test_a_relabelled_row_is_read_from_the_column_not_the_stale_caps_blob():
+    """Migration 130's verdict beats the word the pre-fix code left in ``caps``.
+
+    Measured on the installed database: migration 130 relabelled 504 items of
+    one campaign from the evidence already in ``last_error`` - 293 robots
+    refusals to ``blocked`` and 211 dead boards to ``gone`` - by rewriting
+    ``status`` and the new ``outcome_state`` column.  It could not rewrite the
+    ``caps.outcome.state`` blob, which still holds what the code that hid this
+    bug wrote there: ``failed``.
+
+    This endpoint read ``caps`` first, so all 504 went straight back into the
+    failure count and the dashboard still said 976 failures with 0 blocked and
+    0 gone - the re-classification was invisible to the operator it was for.
+    """
+    relabelled_blocked = _source(
+        status="blocked", outcome_state="blocked", outcome="failed",
+        outcome_reason="https://x.example/jobs: robots.txt disallows this source (FR-182)",
+        last_error="robots.txt disallows this source (FR-182)", error_count=0,
+    )
+    relabelled_gone = _source(
+        status="gone", outcome_state="gone", outcome="failed",
+        outcome_reason="https://x.example/jobs: HTTP 404",
+        last_error="SourceUnavailable: 1 request(s), 0 answered; HTTP 404", error_count=0,
+    )
+    counts = _counts([relabelled_blocked, relabelled_gone])
+    assert counts["blocked"] == 1
+    assert counts["gone"] == 1
+    assert counts["failed"] == 0
+
+
+def test_a_failure_is_still_a_failure_when_both_spellings_say_so():
+    """The precedence must not be a way to make a real failure quiet."""
+    counts = _counts([
+        _source(status="failed", outcome_state="failed", outcome="failed",
+                last_error="HTTP 503", error_count=3),
+    ])
+    assert counts["failed"] == 1
+
+
+def test_an_item_settled_since_the_migration_needs_no_caps_blob_at_all():
+    """The worker writes the column; ``caps`` is the older copy, not the source."""
+    counts = _counts([
+        _source(status="gone", outcome_state="gone", outcome=None, error_count=0),
+        _source(plan_item_id="b", status="blocked", outcome_state="blocked",
+                outcome=None, error_count=0),
+    ])
+    assert counts == {**counts, "gone": 1, "blocked": 1, "failed": 0}
+

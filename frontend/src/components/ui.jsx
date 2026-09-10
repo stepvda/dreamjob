@@ -210,12 +210,13 @@ export function JobProgress({ job, onPause, onResume, onCancel }) {
             Pause
           </button>
         )}
-        {job.status === 'paused' && onResume && (
+        {(job.status === 'paused' ||
+          (job.status === 'pending' && (job.progress_done ?? 0) > 0)) && onResume && (
           <button className="btn btn-sm" onClick={onResume}>
             Resume
           </button>
         )}
-        {(running || job.status === 'paused') && onCancel && (
+        {(running || job.status === 'paused' || job.status === 'pending') && onCancel && (
           <button className="btn btn-sm btn-danger" onClick={onCancel}>
             Cancel
           </button>

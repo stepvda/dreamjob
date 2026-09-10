@@ -6,8 +6,21 @@ What lands in ``logs/database.log`` and why:
   a job seeker says "my directive did not save", this is the line that says
   whether the write happened at all.
 * **Every statement slower than** ``DREAMJOB_LOG_SLOW_QUERY_MS`` at WARNING,
-  with the statement and the elapsed time.  This is the line that finds a
-  missing index; nothing else in the system will tell you.
+  with the statement, the elapsed time, *the CPU time it actually used* and
+  *how many steps SQLite took*.  This is the line that finds a missing index;
+  nothing else in the system will tell you.
+* **The difference between a slow statement and a stalled process.**  Elapsed
+  time is wall clock, and wall clock cannot tell "this query is expensive"
+  from "this coroutine waited 68 seconds to be scheduled".  That ambiguity was
+  not theoretical: a 173-second ``SELECT`` on a two-row table with a correct
+  query plan was diagnosed as a missing index, and hours later a 68,862 ms
+  lookup on a UNIQUE index over ``session`` was diagnosed the same way.  Both
+  were a background job owning the event loop (``jobs/runner.py``).  So two
+  things that *are* the statement's own cost are measured beside the clock -
+  ``time.thread_time()`` for CPU and SQLite's progress handler for virtual
+  machine steps - and a statement that burned neither is logged as ``stalled
+  statement``, not ``slow statement``.  One is a query to fix; the other is a
+  process that was not running.
 * **Migrations**, with version and duration.
 * **Lock waits and rollbacks.**  "database is locked" is the failure mode of a
   single-writer SQLite design (NFR-102), so it is logged whether or not
@@ -61,6 +74,16 @@ MAX_SQL_CHARS = 800
 # Below this, waiting for the write lock is just SQLite serialising writers as
 # designed; above it, somebody is holding a transaction open too long.
 LOCK_WAIT_WARN_MS = 250.0
+# How often SQLite's progress handler fires, in virtual-machine instructions.
+# Large enough that the callback costs nothing on a real query, small enough
+# that a statement which did any work at all registers more than zero.
+PROGRESS_HANDLER_OPS = 5_000
+# A slow statement that spent at least this fraction of its elapsed time on
+# the CPU was working for it.  Below that, the *other* two measurements decide:
+# steps taken means the database was busy (waiting on disk, most likely), no
+# steps at all means the statement barely ran and the clock is measuring
+# something else entirely.
+WORKING_CPU_FRACTION = 0.25
 
 _log: logging.Logger | None = None
 _local = threading.local()
@@ -267,7 +290,10 @@ class _Stats:
     cost more than the number is worth.
     """
 
-    __slots__ = ("locked", "since", "slow", "statements", "total_ms", "writes")
+    __slots__ = (
+        "locked", "since", "slow", "slow_working", "stalled", "statements",
+        "total_ms", "writes",
+    )
 
     def __init__(self) -> None:
         self.reset(time.perf_counter())
@@ -277,6 +303,10 @@ class _Stats:
         self.total_ms = 0.0
         self.writes = 0
         self.slow = 0
+        #: Of the slow ones, how many were the statement's own cost ...
+        self.slow_working = 0
+        #: ... and how many were a process that was not running.
+        self.stalled = 0
         self.locked = 0
         self.since = now
 
@@ -296,10 +326,15 @@ def _summarise(now: float, *, final: bool = False) -> None:
         window = max(now - _stats.since, 0.001)
         average = _stats.total_ms / statements if statements else 0.0
         slow, locked = _stats.slow, _stats.locked
+        stalled = _stats.stalled
         _stats.reset(now)
     get_db_logger().info(
-        "summary window_s=%.0f statements=%d writes=%d avg_ms=%.2f slow=%d locked=%d",
-        window, statements, writes, average, slow, locked,
+        # ``stalled`` is a count of this process failing to run, not of the
+        # database being slow.  A summary where it is the bulk of ``slow`` is
+        # the outage of 2026-09-10 in one line.
+        "summary window_s=%.0f statements=%d writes=%d avg_ms=%.2f slow=%d "
+        "stalled=%d locked=%d",
+        window, statements, writes, average, slow, stalled, locked,
     )
 
 
@@ -335,6 +370,33 @@ def attach(conn: sqlite3.Connection) -> None:
     if not enabled():
         return
     conn.set_trace_callback(_trace)
+    # NFR-701: how much work SQLite actually did.  See _finish().
+    conn.set_progress_handler(_progress, PROGRESS_HANDLER_OPS)
+
+
+def _progress() -> int:
+    """Counts SQLite virtual-machine progress on this thread.
+
+    Fires every ``PROGRESS_HANDLER_OPS`` instructions *while a statement is
+    stepping*, which makes it the one measurement here that cannot be faked by
+    a process that is not running: a starved coroutine takes no steps.
+
+    Returns 0 unconditionally.  A non-zero return, or an exception, aborts the
+    caller's query - a log line must never do that.
+    """
+    try:
+        _local.steps = getattr(_local, "steps", 0) + 1
+    except Exception:  # noqa: BLE001 - never abort somebody's query
+        pass
+    return 0
+
+
+def _cpu() -> float:
+    """This thread's CPU time.  Falls back to the process clock if it has to."""
+    try:
+        return time.thread_time()
+    except (AttributeError, OSError):  # pragma: no cover - platform-dependent
+        return time.process_time()
 
 
 @_never_raises
@@ -345,13 +407,20 @@ def _trace(statement: str) -> None:
     start to the start of the next one on this thread - which for the workload
     here (one statement at a time per connection) is its duration.  The tail of
     a batch is closed out by :func:`flush` when the transaction commits.
+
+    Three clocks are read, not one.  Wall clock is what the caller waited;
+    ``_cpu()`` is what this thread burned; ``_local.steps`` is what SQLite
+    did.  Only the first of those grows while the process is descheduled, and
+    telling them apart is the whole point (see the module docstring).
     """
     now = time.perf_counter()
+    cpu = _cpu()
+    steps = getattr(_local, "steps", 0)
     pending = getattr(_local, "pending", None)
     if pending is not None:
         _local.pending = None
-        _finish(pending[0], pending[1], now)
-    _local.pending = (statement, now)
+        _finish(pending, now, cpu, steps)
+    _local.pending = (statement, now, cpu, steps)
 
     # Only pay for the migration sniff inside a write transaction.
     write = getattr(_local, "write", None)
@@ -362,15 +431,48 @@ def _trace(statement: str) -> None:
         _summarise(now)
 
 
-def _finish(statement: str, start: float, end: float) -> None:
+def _finish(
+    pending: tuple[str, float, float, int], end: float, cpu_end: float, steps_end: int
+) -> None:
+    """Close one statement out and, if it was slow, say *why* it was slow.
+
+    ``ms`` is wall clock and always has been.  What is new is that it no longer
+    stands alone: ``cpu_ms`` is the CPU this thread burned between the two
+    clocks and ``db_steps`` is how far SQLite's virtual machine got.  A
+    statement with neither did not run - the process was blocked or waiting to
+    be scheduled - and calling that a "slow statement" is what cost two
+    misdiagnoses in one day.
+    """
+    statement, start, cpu_start, steps_start = pending
     elapsed_ms = (end - start) * 1000.0
+    cpu_ms = max(0.0, (cpu_end - cpu_start) * 1000.0)
+    steps = max(0, steps_end - steps_start)
     _stats.statements += 1
     _stats.total_ms += elapsed_ms
-    if elapsed_ms >= _slow_ms:
-        _stats.slow += 1
-        shape, values = redact(statement)
-        get_db_logger().warning(
-            "slow statement ms=%.1f params=%d sql=%s", elapsed_ms, values, shape
+    if elapsed_ms < _slow_ms:
+        return
+    _stats.slow += 1
+    shape, values = redact(statement)
+    log = get_db_logger()
+    if cpu_ms >= elapsed_ms * WORKING_CPU_FRACTION or steps:
+        # It burned CPU, or SQLite stepped: the time is the statement's own,
+        # whether it went on the processor or on the disk.  This is the line
+        # that finds a missing index.
+        _stats.slow_working += 1
+        log.warning(
+            "slow statement ms=%.1f cpu_ms=%.1f db_steps=%d params=%d sql=%s",
+            elapsed_ms, cpu_ms, steps * PROGRESS_HANDLER_OPS, values, shape,
+        )
+    else:
+        # No CPU and no steps.  Wall clock measured something that was not this
+        # statement: the thread was waiting to be scheduled, or blocked in the
+        # kernel.  Do not go looking for an index.
+        _stats.stalled += 1
+        log.warning(
+            "stalled statement ms=%.1f cpu_ms=%.1f db_steps=0 params=%d sql=%s "
+            "| wall clock only: this statement used no CPU and took no database "
+            "steps, so the process was not running - not a query cost",
+            elapsed_ms, cpu_ms, values, shape,
         )
 
 
@@ -379,7 +481,7 @@ def flush() -> None:
     pending = getattr(_local, "pending", None)
     if pending is not None:
         _local.pending = None
-        _finish(pending[0], pending[1], time.perf_counter())
+        _finish(pending, time.perf_counter(), _cpu(), getattr(_local, "steps", 0))
 
 
 # ---------------------------------------------------------------------------
@@ -500,8 +602,17 @@ class _NullWrite:
 
     __slots__ = ()
 
-    def acquired(self) -> None:
-        return None
+    @_never_raises
+    def acquired(self, gate_wait_ms: float = 0.0, lane: str = "") -> None:
+        # A long queue in front of the single writer is a production symptom,
+        # not statement chatter, so it is reported on the same terms as a lock
+        # error: whether or not the cheap flag is on.
+        if gate_wait_ms >= LOCK_WAIT_WARN_MS:
+            get_db_logger().warning(
+                "write gate wait ms=%.0f lane=%s (queued behind this process's own "
+                "writers, not the database)",
+                gate_wait_ms, lane or "-",
+            )
 
     def committed(self) -> None:
         return None
@@ -516,11 +627,13 @@ _NULL_WRITE = _NullWrite()
 
 
 class _WriteRecord:
-    __slots__ = ("intent", "migration", "previous", "started", "waited_ms")
+    __slots__ = ("gate_ms", "intent", "lane", "migration", "previous", "started", "waited_ms")
 
     def __init__(self) -> None:
         self.started = time.perf_counter()
         self.waited_ms = 0.0
+        self.gate_ms = 0.0
+        self.lane = ""
         self.intent: _Intent | None = getattr(_local, "intent", None)
         self.migration: tuple[str, str] | None = None
         self.previous = getattr(_local, "write", None)
@@ -528,11 +641,25 @@ class _WriteRecord:
 
     # -- caller callbacks ---------------------------------------------------
     @_never_raises
-    def acquired(self) -> None:
-        """The write lock is held and BEGIN IMMEDIATE has returned."""
+    def acquired(self, gate_wait_ms: float = 0.0, lane: str = "") -> None:
+        """The write gate is held and BEGIN IMMEDIATE has returned.
+
+        Two waits, reported separately, because they have different cures.
+        ``gate_ms`` is this process queueing behind its own writers - fix that
+        with lanes, or by writing less.  ``begin_ms`` is SQLite waiting for a
+        database somebody *else* holds - fix that by finding the other process.
+        Adding them together and calling the total a lock wait is how a queue
+        gets mistaken for a slow database.
+        """
         self.waited_ms = (time.perf_counter() - self.started) * 1000.0
+        self.gate_ms = gate_wait_ms
+        self.lane = lane
         if self.waited_ms >= LOCK_WAIT_WARN_MS:
-            get_db_logger().warning("lock wait ms=%.0f %s", self.waited_ms, self._subject())
+            get_db_logger().warning(
+                "lock wait ms=%.0f gate_ms=%.0f begin_ms=%.0f lane=%s %s",
+                self.waited_ms, gate_wait_ms,
+                max(0.0, self.waited_ms - gate_wait_ms), lane or "-", self._subject(),
+            )
 
     @_never_raises
     def committed(self) -> None:
@@ -546,7 +673,8 @@ class _WriteRecord:
             record_migration(self.migration[0], self.migration[1], elapsed_ms)
             return
         get_db_logger().info(
-            "write %s ms=%.1f wait_ms=%.1f", self._subject(), elapsed_ms, self.waited_ms
+            "write %s ms=%.1f wait_ms=%.1f gate_ms=%.1f lane=%s",
+            self._subject(), elapsed_ms, self.waited_ms, self.gate_ms, self.lane or "-",
         )
 
     @_never_raises
