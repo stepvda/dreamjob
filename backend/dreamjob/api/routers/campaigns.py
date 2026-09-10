@@ -8,6 +8,7 @@ redoing (NFR-603).
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
 from dreamjob.config import get_settings
+from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as repo
 from dreamjob.pipeline import collection, knowledge_base, planning
 
@@ -586,6 +588,266 @@ def collection_outcomes(sources: list[dict], catalogue: dict[str, dict]) -> dict
 
 
 # ---------------------------------------------------------------------------
+# The activity feed (FR-361)
+#
+# The progress bar says how far a four-hour run has got.  It cannot say that
+# Ashby's board is gone, that Jobat refused a bot, or that a source collected
+# eight vacancies thirty seconds ago - and those are the things the person
+# watching a run is actually watching for.
+#
+# Everything below is a pure function over rows, for the same reason
+# ``collection_outcomes`` is: the wording of a verdict is the part that is
+# easiest to get subtly wrong and the part a database fixture is least able to
+# check.
+# ---------------------------------------------------------------------------
+
+#: What one collected record *is*, keyed on the source it came from.
+#: ``records_collected`` mixes entity types - a registry filing and a vacancy
+#: are both one record - so the noun is read off the source and never guessed
+#: from the count.
+_RECORD_NOUN: dict[str, tuple[str, str]] = {
+    "ats": ("vacancy", "vacancies"),
+    "job_board": ("vacancy", "vacancies"),
+    "registry": ("filing", "filings"),
+    "directory": ("company", "companies"),
+    "website": ("page", "pages"),
+    "news": ("article", "articles"),
+    "compensation": ("pay benchmark", "pay benchmarks"),
+    "events": ("event", "events"),
+}
+_DEFAULT_NOUN = ("record", "records")
+
+#: ``audit_event.action`` is namespaced; the feed's kinds are not, so the
+#: prefix is stripped.  ``campaign.created`` is the one action whose noun is the
+#: prefix: stripped bare it is a kind called "created", which says nothing about
+#: what was.
+_MILESTONE_PREFIX = "campaign."
+_MILESTONE_KINDS = {"campaign.created": "campaign_created"}
+
+#: A server that fell over, told from a bot wall and a dead board by its status.
+_HTTP_5XX = re.compile(r"HTTP (5\d\d)")
+
+#: The most events one poll may carry.  The panel shows six at a time, so this
+#: is a ceiling on the payload rather than a page size anyone reads to the end.
+ACTIVITY_MAX_LIMIT = 200
+
+
+def _event_text(kind: str, row: dict) -> str:
+    """One plain clause saying what happened, never a raw exception (FR-361).
+
+    The exception string is what ``last_error`` already holds and what the
+    ``detail`` field carries to a tooltip.  A log line six of which are visible
+    at once has room for the verdict and not for the stack it came off.
+    """
+    evidence = f"{row.get('outcome_reason') or ''} {row.get('last_error') or ''}"
+    if kind == "started":
+        return "started"
+    if kind == "succeeded":
+        count = int(row.get("records_collected") or 0)
+        if not count:
+            # It read the source and everything in it was already known.  That
+            # is not "0 records": nothing was collected and nothing went wrong.
+            return "read, nothing new"
+        singular, plural = _RECORD_NOUN.get(str(row.get("source_type") or ""), _DEFAULT_NOUN)
+        return f"{count:,} {singular if count == 1 else plural}"
+    if kind == "no_matches":
+        return "read, nothing to collect"
+    if kind == "blocked":
+        if "robots.txt" in evidence:
+            return "declined, robots.txt says no"
+        if "HTTP 403" in evidence:
+            return "the site refused a bot (HTTP 403)"
+        if "HTTP 451" in evidence:
+            return "blocked for legal reasons (HTTP 451)"
+        return "declined on principle"
+    if kind == "gone":
+        if "HTTP 404" in evidence:
+            return "the target is gone (HTTP 404)"
+        if "HTTP 410" in evidence:
+            return "the target is gone (HTTP 410)"
+        return "the target is gone"
+    if kind == "failed":
+        if "RateLimited" in evidence or "rate limit" in evidence.lower():
+            return "rate limited, nothing collected"
+        if "Timeout" in evidence:
+            return "the connection timed out"
+        server = _HTTP_5XX.search(evidence)
+        if server:
+            return f"the server failed (HTTP {server.group(1)})"
+        return "failed"
+    if kind == "rejected":
+        return "the knowledge base refused what it produced"
+    if kind == "normalised_nothing":
+        return "parsed records, none usable"
+    if kind == "extracted_nothing":
+        return "fetched a page, read nothing from it"
+    if kind == "no_work":
+        return "nothing to do"
+    if kind == "cancelled":
+        return "cancelled, resumable"
+    # An end state nobody taught this endpoint about.  It is shown as itself
+    # rather than dropped: a feed that quietly omits what it does not recognise
+    # is how "done, 0 records, 0 errors" hid a total retrieval failure.
+    return kind.replace("_", " ")
+
+
+def _source_event(row: dict) -> dict:
+    """One line about one plan item: when, what, and which target it was.
+
+    The source is named the way the per-source list names it - the catalogue's
+    display name without its parenthetical, then the item's own label - so a
+    reader moving between the two screens is reading about the same row
+    (FR-162, FR-361).
+    """
+    kind = str(row.get("kind") or "").strip()
+    at = str(row.get("at") or "")
+    adapter_key = str(row.get("adapter_key") or "")
+    label = planning.plan_item_label(adapter_key, row.get("native_query"))[0]
+    name = planning.short_source_name(str(row.get("display_name") or adapter_key))
+    return {
+        "id": f"{row.get('plan_item_id')}:{at}",
+        "at": at,
+        "kind": kind,
+        "source": f"{name} · {label}" if label else name,
+        "text": _event_text(kind, row),
+        "detail": _shorten(row.get("outcome_reason") or row.get("last_error")),
+        "adapter_key": adapter_key or None,
+        "plan_item_id": row.get("plan_item_id"),
+    }
+
+
+def _milestone_text(kind: str, detail: dict) -> str:
+    """What a campaign-level audit event says, in the numbers it recorded.
+
+    A key the audit row does not carry is left out of the clause rather than
+    printed as zero: an older campaign recorded fewer of them, and "Plan ready -
+    0 sources" is a false statement about a plan that has 4,843.
+    """
+    if kind == "campaign_created":
+        return "Campaign created"
+    if kind == "plan_generated":
+        sources = detail.get("sources")
+        targets = detail.get("targets")
+        bits = []
+        if isinstance(sources, int):
+            bits.append(f"{sources:,} sources")
+        if isinstance(targets, int):
+            bits.append(f"over {targets:,} targets")
+        return "Plan ready" + (f" — {' '.join(bits)}" if bits else "")
+    if kind == "collection_started":
+        bits = []
+        items = detail.get("plan_items")
+        if isinstance(items, int):
+            bits.append(f"{items:,} sources")
+        max_pages = (detail.get("caps") or {}).get("max_pages")
+        if isinstance(max_pages, int):
+            bits.append(f"{max_pages:,}-page cap")
+        return "Collection started" + (f" — {', '.join(bits)}" if bits else "")
+    if kind == "collection_finished":
+        bits = []
+        records = detail.get("records")
+        pages = detail.get("pages")
+        if isinstance(records, int):
+            bits.append(f"{records:,} records")
+        if isinstance(pages, int):
+            bits.append(f"from {pages:,} pages")
+        return "Collection finished" + (f" — {' '.join(bits)}" if bits else "")
+    if kind == "collection_cancelled":
+        return "Collection cancelled"
+    if kind == "stage_rerun":
+        stage = str(detail.get("stage") or "").strip()
+        return f"Stage re-run — {stage}" if stage else "Stage re-run"
+    return kind.replace("_", " ").capitalize()
+
+
+def _milestone_event(row: dict) -> dict | None:
+    """A campaign-level line: created, planned, started, finished (FR-361).
+
+    Only the campaign's own actions.  ``audit_event`` is the whole product's
+    ledger and this endpoint is one campaign's chronology, so an action from
+    another namespace is not this feed's to render.
+    """
+    action = str(row.get("action") or "")
+    if not action.startswith(_MILESTONE_PREFIX):
+        return None
+    kind = _MILESTONE_KINDS.get(action, action[len(_MILESTONE_PREFIX):])
+    detail = from_json(row.get("detail"), {}) or {}
+    if not isinstance(detail, dict):
+        detail = {}
+    return {
+        "id": str(row.get("id")),
+        "at": str(row.get("at") or ""),
+        "kind": kind,
+        "source": None,
+        "text": _milestone_text(kind, detail),
+        "detail": None,
+        "adapter_key": None,
+        "plan_item_id": None,
+    }
+
+
+def _job_events(jobs: list[dict]) -> list[dict]:
+    """The collection job's own two moments, which no plan item records.
+
+    A run that started and has settled nothing yet - the first minutes of a
+    plan whose first pages are still in flight - would otherwise have an empty
+    feed, which reads like a failure rather than like a beginning.
+    """
+    events: list[dict] = []
+    for job in jobs:
+        job_id = str(job.get("id"))
+        started = job.get("started_at")
+        if started:
+            events.append(
+                {
+                    "id": f"{job_id}:started",
+                    "at": str(started),
+                    "kind": "job_started",
+                    "source": None,
+                    "text": "Collection job started",
+                    "detail": None,
+                    "adapter_key": None,
+                    "plan_item_id": None,
+                }
+            )
+        finished = job.get("finished_at")
+        if finished:
+            pages = job.get("progress_done")
+            done = f" — {int(pages):,} pages" if isinstance(pages, int) else ""
+            events.append(
+                {
+                    "id": f"{job_id}:finished",
+                    "at": str(finished),
+                    "kind": "job_finished",
+                    "source": None,
+                    "text": f"Collection job finished{done}",
+                    "detail": None,
+                    "adapter_key": None,
+                    "plan_item_id": None,
+                }
+            )
+    return events
+
+
+def _activity_events(sources: list[dict], audits: list[dict], jobs: list[dict]) -> list[dict]:
+    """Merge the three chronologies into one, newest first (FR-361).
+
+    Ordering is ``(at, id)`` descending and not ``at`` alone: :func:`utcnow` is
+    second-resolution and a wave settles a dozen sources inside one second, so
+    without the tiebreak the same poll can return them in a different order
+    each time and the client's list reshuffles under the reader.
+    """
+    events = [_source_event(row) for row in sources if row.get("at")]
+    for row in audits:
+        milestone = _milestone_event(row)
+        if milestone is not None:
+            events.append(milestone)
+    events.extend(_job_events(jobs))
+    events.sort(key=lambda event: (event["at"], event["id"]), reverse=True)
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Execution (FR-181..186)
 # ---------------------------------------------------------------------------
 
@@ -618,6 +880,67 @@ def campaign_status(campaign_id: str, seeker: Seeker) -> dict:
     catalogue = {entry["adapter_key"]: entry for entry in repo.list_catalogue(enabled_only=False)}
     payload["outcomes"] = collection_outcomes(payload.get("sources") or [], catalogue)
     return payload
+
+
+@router.get("/{campaign_id}/activity")
+def campaign_activity(
+    campaign_id: str,
+    seeker: Seeker,
+    since: str = Query("", max_length=40),
+    limit: int = Query(60, ge=1, le=200),
+) -> dict:
+    """What this campaign has been doing, newest first (FR-361, FR-101).
+
+    The dashboard's progress bar says how far a four-hour run has got and
+    nothing about what it is doing; this is the other half.  Ownership is
+    checked before any read, and every row returned is reached through
+    ``campaign_id``, so nothing here can cross a tenant even if an id were
+    guessed - and the check raises 404 rather than 403, which is how the rest of
+    this router avoids confirming that another seeker's campaign exists.
+
+    ``since`` is **inclusive**.  ``utcnow`` writes seconds, and a wave settles a
+    dozen sources inside one of them, so an exclusive cursor would drop every
+    event in the boundary second.  One or two rows come back twice per poll
+    instead, and the client dedupes on ``id``.
+    """
+    _campaign_or_404(campaign_id, seeker.id)
+    # Belt and braces: the query parameter is bounded above, and a direct call
+    # from another module is bounded here.  200 lines is already 33 screenfuls
+    # of a six-line panel.
+    limit = max(1, min(ACTIVITY_MAX_LIMIT, int(limit)))
+    since = (since or "").strip()
+    # Read the clock *before* the rows, not after.  The cursor is a watermark -
+    # "everything at or before this has been delivered" - and a watermark taken
+    # after the reads claims more than the reads can support: a source stamped
+    # in the second the reads began, but after they ran, is in neither this
+    # response nor the next one, because the next asks for ``>= now`` and the
+    # row is older than that.  ``activity_at`` is one column per item, so
+    # nothing ever restates it and the line is lost for the rest of the run.
+    # Taking it first costs only the overlap the inclusive cursor already
+    # exists for, and the client dedupes on the event id (FR-361).
+    now = utcnow()
+    source_rows = repo.list_plan_activity(campaign_id, since, limit)
+    audits = repo.list_campaign_audit(campaign_id, since, limit)
+    # Only this campaign's collection jobs: ``list_jobs`` is every job the
+    # campaign has ever had, and a scoring run is not what "Collection job
+    # started" means.
+    jobs = [j for j in repo.list_jobs(campaign_id) if j.get("kind") == collection.JOB_KIND]
+    events = _activity_events(source_rows, audits, jobs)
+    if since:
+        # The two SQL reads are already bounded by ``since``; the job rows are
+        # not, because a job's two moments have two different timestamps and
+        # the row itself has neither.
+        events = [event for event in events if event["at"] >= since]
+    return {
+        "campaign_id": campaign_id,
+        "server_time": now,
+        "cursor": now,
+        # The per-source query filled its page, so there are older events this
+        # response does not carry.  Informational: with six lines visible, the
+        # newest are the only ones anybody was going to read.
+        "truncated": len(source_rows) == limit,
+        "events": events[:limit],
+    }
 
 
 @router.post("/{campaign_id}/pause")

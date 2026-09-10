@@ -336,8 +336,11 @@ export default function CampaignDetailPage() {
 
       {active === 'live' && (
         <LiveDashboard
+          // No `plan`: the dashboard used to join each source's estimate from
+          // `/plan`, which returns one page of 100 items, so 6,424 rows of a
+          // 6,524-item plan drew their bar against a hard-coded guess. The
+          // estimate now comes off the source row itself (FR-186).
           live={live}
-          plan={plan}
           campaign={campaign}
           busy={busy}
           onPause={() => control('pause')}

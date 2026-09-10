@@ -1243,6 +1243,48 @@ a.btn { text-decoration: none; }
 
 .cmp-stat-note { font-size: 11.5px; color: var(--ink-4); line-height: 1.4; }
 
+/* --------------------------------------------------------------------------
+   The per-source list, grouped (FR-162, FR-166)
+
+   One line per adapter, opened on demand, because a plan holds thousands of
+   items and the flat list of them was both unreadable and expensive to draw.
+   The head is a real <button> so it can be reached from the keyboard, which
+   means it has to be told the font and the alignment it would otherwise not
+   inherit - the same note the log's file picker carries further down.
+   -------------------------------------------------------------------------- */
+
+.cmp-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 2px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cmp-group-head:hover { background: var(--surface-2); }
+.cmp-group-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.cmp-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The shared shape of an item's query - "workday/deloitteie.wd3.… · 6
+   keywords". It is the part that can be arbitrarily long, so it is the part
+   that ellipsises; the full string is on the row's title attribute. */
+.cmp-src-detail {
+  font-family: var(--mono);
+  font-size: 11px;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ==========================================================================
    Directive editor (FR-141..149, FR-385)
 
@@ -2050,3 +2092,57 @@ tr.seg-thin .seg-value { font-style: italic; }
    the tail is a real <button> so it can be reached from the keyboard, which
    means it has to be told the font it would otherwise not inherit. */
 button.chip { font: inherit; font-size: 12px; cursor: pointer; }
+
+/* ==========================================================================
+   Campaign activity log (FR-361)
+
+   The same rows the administration screen's log uses, at the height this card
+   can afford: six lines between the progress bar and the outcomes ledger. The
+   row count is a custom property rather than a pixel number so that "about six
+   visible lines" is legible here instead of being arithmetic someone has to
+   reverse - 1.55 and 11.5px are .log-view's own line-height and font-size, 2px
+   is what a .log-line adds in vertical padding, 8px is the view's own, and the
+   last 2px is its 1px border top and bottom. Every one of those four is inside
+   the box because box-sizing is border-box for everything (line 96), so a term
+   left out of the sum is a row clipped off the bottom rather than spare space.
+
+   The source name is the part that can be arbitrarily long - "Company
+   newsroom / RSS · northwind-data.example.com" - so it is the part that
+   ellipsises, and the verdict never truncates.
+
+   The colours differ from the administration log on purpose. There the
+   timestamp is --ink-4, which measures 2.2:1 against --surface-sunk and is a
+   decoration on a developer's tool. Here the time of each line is the thing
+   the person asked for, so the two secondary columns are raised to --ink-2
+   (7.7:1 in light, 9.5:1 in dark) and the verdict takes --ink. Tokens only, so
+   both themes follow without a second rule.
+   ========================================================================== */
+
+.cmp-activity {
+  --log-rows: 6;
+  max-height: calc(var(--log-rows) * (1.55 * 11.5px + 2px) + 8px + 2px);
+}
+
+.cmp-activity:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.cmp-activity .log-ts { color: var(--ink-2); }
+
+.cmp-activity .log-src {
+  flex: none;
+  max-width: 42%;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmp-activity .log-msg {
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* An empty feed is not a failure: a run from before the activity columns
+   existed has nothing to report, and says so quietly rather than in red. */
+.cmp-activity .log-msg.is-quiet { color: var(--ink-2); }

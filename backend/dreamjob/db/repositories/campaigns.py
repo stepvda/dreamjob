@@ -478,10 +478,16 @@ def plan_items_with_provenance(campaign_id: str) -> set[str]:
 
 
 def reset_plan_progress(campaign_id: str) -> int:
-    """NFR-603: re-running collection starts from a clean per-item counter."""
+    """NFR-603: re-running collection starts from a clean per-item counter.
+
+    The activity stamps go with the counters.  Left behind, the second run's
+    feed opens with the first run's chronology - lines dated hours before the
+    job it claims to be reporting on (FR-361).
+    """
     return execute(
         "UPDATE source_plan_item SET status = 'planned', records_collected = 0, "
-        "error_count = 0, last_error = NULL WHERE campaign_id = ? AND excluded_by_user = 0",
+        "error_count = 0, last_error = NULL, activity_at = NULL, activity_kind = NULL "
+        "WHERE campaign_id = ? AND excluded_by_user = 0",
         (campaign_id,),
     )
 
@@ -489,6 +495,44 @@ def reset_plan_progress(campaign_id: str) -> int:
 # ---------------------------------------------------------------------------
 # Dashboard (FR-185, FR-361)
 # ---------------------------------------------------------------------------
+
+
+def list_plan_activity(campaign_id: str, since: str, limit: int) -> list[dict]:
+    """What each source of this campaign last did, newest first (FR-361).
+
+    ``activity_at >= ''`` excludes NULL on its own, so the range stays pure and
+    the index is used end to end.  ``>=`` and not ``>``: :func:`utcnow` is
+    second-resolution and a wave settles a dozen sources inside one second, so
+    an exclusive cursor drops most of them; the caller dedupes on the event id.
+    """
+    rows = query_all(
+        "SELECT s.id AS plan_item_id, s.activity_at AS at, s.activity_kind AS kind, "
+        "s.adapter_key AS adapter_key, s.native_query AS native_query, "
+        "s.outcome_reason AS outcome_reason, s.last_error AS last_error, "
+        "s.records_collected AS records_collected, s.error_count AS error_count, "
+        "c.display_name AS display_name, c.source_type AS source_type "
+        "FROM source_plan_item s "
+        "LEFT JOIN source_catalogue c ON c.adapter_key = s.adapter_key "
+        "WHERE s.campaign_id = ? AND s.activity_at >= ? "
+        "ORDER BY s.activity_at DESC, s.id DESC LIMIT ?",
+        (campaign_id, since or "", limit),
+    )
+    return [_decode(row, ("native_query",)) or {} for row in rows]
+
+
+def list_campaign_audit(campaign_id: str, since: str, limit: int) -> list[dict]:
+    """The campaign's own milestones (FR-361).
+
+    ``detail`` is decoded here rather than by the caller, so that every JSON
+    column this module hands out has been decoded in the same place.
+    """
+    rows = query_all(
+        "SELECT id, action, detail, created_at AS at FROM audit_event "
+        "WHERE entity_type = 'campaign' AND entity_id = ? AND created_at >= ? "
+        "ORDER BY created_at DESC, id DESC LIMIT ?",
+        (campaign_id, since or "", limit),
+    )
+    return [_decode(row, ("detail",)) or {} for row in rows]
 
 
 def llm_totals(campaign_id: str) -> dict:

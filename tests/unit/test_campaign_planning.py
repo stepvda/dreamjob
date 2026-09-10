@@ -21,6 +21,7 @@ from dreamjob.adapters.base import (
     SourceType,
     register_adapter,
 )
+from dreamjob.adapters.compensation.eurostat import EurostatEarningsAdapter
 from dreamjob.config import get_settings
 from dreamjob.db.connection import insert_row, query_all, query_one, upsert_row, utcnow
 from dreamjob.db.migrator import migrate
@@ -286,6 +287,66 @@ def test_nothing_marked_undisclosable_reaches_the_prompt(db):
     assert "a condition" not in llm.sent, "FR-127: special-category data never reaches a prompt"
     assert "85000" not in llm.sent, "CR-410: a do-not-disclose field never reaches a prompt"
     assert "discretion_mode" in llm.sent, "the planner still knows discretion mode is on"
+
+
+def test_replan_retires_a_duplicate_row_a_record_points_at_rather_than_deleting_it(db):
+    """FR-166: the link holds for the twin too, not only for the row that matched.
+
+    ``persist_plan`` keys the stored rows by plan identity to match a re-plan to
+    them, and that dict keeps one row per key.  A campaign planned before the
+    collapse net existed can hold twenty rows under one key - one running
+    campaign holds 39 such rows with 16,234 provenance rows pointing at them -
+    and nineteen of the twenty are invisible in that dict.  Deciding what to
+    retire from the survivors alone left them in neither ``ids`` nor ``retired``,
+    so the delete swept them: ``provenance.source_plan_item_id`` carries no
+    foreign key, so nothing raised and the records simply stopped naming where
+    they came from.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("vdab")
+    query = {"queries": ["data engineer"], "locations": ["Gent"]}
+
+    # Two rows asking one question, the shape a pre-net plan left behind.
+    twins = [
+        campaign_repo.insert_plan_item(
+            campaign_id,
+            {"adapter_key": "vdab", "native_query": dict(query), "rationale": f"worded {n} ways",
+             "estimated_pages": 1},
+        )
+        for n in range(2)
+    ]
+    for plan_item_id in twins:
+        knowledge_base.KnowledgeBaseWriter(
+            adapter_key="vdab", plan_item_id=plan_item_id, campaign_id=campaign_id
+        ).write(
+            {
+                "entity_type": "vacancy",
+                "data": {"title": f"Data Engineer {plan_item_id[:4]}", "location": "Gent"},
+                "confidence": 0.8,
+            }
+        )
+    pointed_at = {
+        r["source_plan_item_id"]
+        for r in query_all("SELECT * FROM provenance WHERE source_plan_item_id IS NOT NULL")
+    }
+    assert pointed_at == set(twins), "both twins carry provenance before the re-plan"
+
+    planning.persist_plan(
+        campaign_id,
+        [planning.PlannedSource(adapter_key="vdab", native_query=dict(query), estimated_pages=1)],
+    )
+
+    live = {i["id"] for i in campaign_repo.list_plan_items(campaign_id)}
+    dangling = [
+        r["id"]
+        for r in query_all("SELECT * FROM provenance WHERE source_plan_item_id IS NOT NULL")
+        if r["source_plan_item_id"] not in live
+    ]
+    assert not dangling, "no record may be left naming a plan item that is gone"
+    assert set(twins) <= live, "the twin is retired, not deleted"
+    retired = [i for i in campaign_repo.list_plan_items(campaign_id) if i["status"] == "skipped"]
+    assert len(retired) == 1 and retired[0]["last_error"] == "no longer part of the plan"
 
 
 def test_replan_keeps_the_plan_item_a_collected_record_points_at(db):
@@ -1009,3 +1070,261 @@ def test_campaigns_are_isolated_between_job_seekers(db):
     client = _client(other)
     assert client.get(f"/api/campaigns/{campaign_id}").status_code == 404
     assert campaign_repo.get_campaign(campaign_id, other) is None
+
+
+# ---------------------------------------------------------------------------
+# FR-162: one model answer per source, many plan items per source
+# ---------------------------------------------------------------------------
+
+
+@register_adapter
+class _MultiQueryBoard(SourceAdapter):
+    """A board that plans one item per keyword, the way EURES does."""
+
+    key = "stub_multi_query_board"
+    display_name = "Stub Multi-Query Board"
+    source_type = SourceType.JOB_BOARD
+    coverage_countries = ["BE", "NL"]
+
+    def plan(self, directives: dict, composite_profile: dict, caps: dict) -> list[PlanItem]:
+        pages = max(1, int(caps.get("max_pages_per_source") or 1))
+        return [
+            PlanItem(
+                adapter_key=self.key,
+                native_query={"keyword": word, "results_per_page": 50, "language": "en"},
+                rationale=f"Search for {word}",
+                estimated_pages=pages,
+            )
+            for word in ("data engineer", "platform architect", "analytics translator")
+        ]
+
+    async def fetch(self, item: PlanItem) -> list[RawRecord]:
+        return []
+
+    def parse(self, raw: RawRecord) -> list[dict]:
+        return []
+
+    def normalise(self, parsed: dict, raw: RawRecord) -> NormalisedRecord:
+        return NormalisedRecord(entity_type="vacancy", data=dict(parsed))
+
+
+@register_adapter
+class _PagePartitioningBoard(SourceAdapter):
+    """A board that wrongly partitions itself on the pipeline's own page key."""
+
+    key = "stub_page_partitioning_board"
+    display_name = "Stub Page-Partitioning Board"
+    source_type = SourceType.JOB_BOARD
+    coverage_countries = ["BE", "NL"]
+
+    def plan(self, directives: dict, composite_profile: dict, caps: dict) -> list[PlanItem]:
+        pages = max(1, int(caps.get("max_pages_per_source") or 1))
+        return [
+            PlanItem(adapter_key=self.key,
+                     native_query={"page": page, "keywords": ["data"]},
+                     rationale=f"Page {page}", estimated_pages=1)
+            for page in range(1, pages + 1)
+        ]
+
+    async def fetch(self, item: PlanItem) -> list[RawRecord]:
+        return []
+
+    def parse(self, raw: RawRecord) -> list[dict]:
+        return []
+
+    def normalise(self, parsed: dict, raw: RawRecord) -> NormalisedRecord:
+        return NormalisedRecord(entity_type="vacancy", data=dict(parsed))
+
+
+class _OneAnswerLLM:
+    """A model that answers once for a source, in the shape it was shown."""
+
+    def __init__(self, campaign_id: str, adapter_key: str, native_query: dict):
+        self.campaign_id = campaign_id
+        self._plan = {"adapter_key": adapter_key, "native_query": native_query,
+                      "rationale": "Belgian and Dutch data roles", "estimated_pages": 4}
+
+    class budget:  # noqa: N801 - mirrors LLMClient.budget
+        @staticmethod
+        def should_degrade() -> bool:
+            return False
+
+    def complete_json(self, task, *, system, user, untrusted=None, **kw):
+        return {"plans": [self._plan]}
+
+
+def test_a_model_answer_never_collapses_the_queries_a_source_planned(db):
+    """FR-162: one answer per source must not overwrite what separates its items.
+
+    The model is asked once per adapter, but an adapter plans as many items as
+    it has units of work.  Letting that single answer write the discriminating
+    key into every item turned many searches into one search repeated: the same
+    records fetched again and again, the rest never fetched, and rows nothing
+    could tell apart afterwards.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("stub_multi_query_board", query_capabilities=AdapterCapabilities().__dict__)
+
+    llm = _OneAnswerLLM(campaign_id, "stub_multi_query_board",
+                        {"keyword": "data engineer", "results_per_page": 100,
+                         "language": "nl"})
+    planning.generate_plan(campaign_id, seeker, use_llm=True, llm=llm,
+                           assess_knowledge_base=False)
+
+    items = campaign_repo.list_plan_items(campaign_id)
+    assert sorted(i["native_query"]["keyword"] for i in items) == [
+        "analytics translator", "data engineer", "platform architect",
+    ]
+    # What every item shares is still the model's to refine.
+    assert all(i["native_query"]["language"] == "nl" for i in items)
+    assert all(i["native_query"]["results_per_page"] == 100 for i in items)
+    # ...and the adapter's own page count stands, rather than the model's
+    # per-source estimate being charged once per item.
+    assert all(i["estimated_pages"] == 3 for i in items)
+
+
+def test_a_model_answer_never_collapses_the_companies_a_source_planned():
+    """FR-162: the website crawler's per-company target is the adapter's alone.
+
+    ``website.crawl`` plans one item per company site.  A single model answer
+    naming one URL once overwrote all 149 of them, so one company was crawled
+    149 times and 148 were never crawled at all.
+    """
+    items = [
+        PlanItem(adapter_key="website.crawl",
+                 native_query={"url": f"https://{name}.example.com", "company_id": name,
+                               "max_pages": 12, "max_depth": 2})
+        for name in ("acme", "borealis", "ceres")
+    ]
+    protected = planning.discriminating_keys(items)
+    assert protected == frozenset({"url", "company_id"})
+
+    generated = {"url": "https://dovane.be", "company_id": "dovane", "max_pages": 4}
+    enriched = [planning.enrich_native_query(i.native_query, generated, protected)
+                for i in items]
+    assert [q["url"] for q in enriched] == [
+        "https://acme.example.com", "https://borealis.example.com",
+        "https://ceres.example.com",
+    ]
+    assert [q["company_id"] for q in enriched] == ["acme", "borealis", "ceres"]
+    # What every item shares is still the model's to refine.
+    assert all(q["max_pages"] == 4 for q in enriched)
+
+
+def test_a_model_may_not_write_the_page_the_pipeline_owns():
+    """FR-181: ``page`` belongs to collection, whatever the model answers.
+
+    ``collection._run_page`` re-issues a plan item once per page with its own
+    counter in ``native_query["page"]`` (``vacancy_source.requested_page``), so
+    a page a model wrote would be overwritten anyway - after having made two
+    items look identical in the plan the job seeker reviews.
+    """
+    native = {"keyword": "data engineer", "page": 3}
+    assert planning.enrich_native_query(native, {"keyword": "data lead", "page": 1}) == {
+        "keyword": "data lead", "page": 3,
+    }
+
+
+def test_an_adapter_that_partitions_on_the_pipelines_page_is_caught_at_plan_time(db, caplog):
+    """FR-162, FR-166: two items with one question are one unit of work.
+
+    ``board.actiris`` and ``board.arbeitnow`` planned one item per page, but
+    collection overwrites ``page`` with its own counter, so all twenty items
+    fetched page 1: the same adverts twenty times over, and pages 2-20 never
+    read.  The identity of a plan item ignores ``page`` for exactly that reason,
+    so items like these collapse to one - loudly, because a plan that quietly
+    shrinks from twenty rows to one is a plan nobody can review.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("stub_page_partitioning_board",
+               query_capabilities=AdapterCapabilities().__dict__)
+
+    with caplog.at_level("WARNING"):
+        planning.generate_plan(campaign_id, seeker, use_llm=False,
+                               assess_knowledge_base=False)
+
+    items = campaign_repo.list_plan_items(campaign_id)
+    assert len(items) == 1, "one question is one plan item"
+    assert "Dropped 2 duplicate plan item(s) for stub_page_partitioning_board" in caplog.text
+
+
+def test_persisting_a_plan_refuses_to_write_the_same_question_twice(db, caplog):
+    """FR-162, FR-166: two items with one query would fetch the same records twice."""
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("vdab")
+    query = {"queries": ["data engineer"], "locations": ["Gent"], "page": 1}
+    planned = [
+        planning.PlannedSource(adapter_key="vdab", native_query=dict(query),
+                               rationale=f"worded {n} ways", estimated_pages=1)
+        for n in range(3)
+    ]
+
+    with caplog.at_level("WARNING"):
+        ids = planning.persist_plan(campaign_id, planned)
+
+    assert len(ids) == 1, "three identical questions are one unit of work"
+    assert len(campaign_repo.list_plan_items(campaign_id)) == 1
+    assert "Dropped 2 duplicate plan item(s) for vdab" in caplog.text
+
+
+def test_a_source_that_partitions_on_geography_keeps_every_partition(db, caplog):
+    """FR-162, FR-166, N4: the collapse net may only drop work, never coverage.
+
+    ``compensation.eurostat_ses`` can ask the survey for twelve countries at a
+    time, so it plans one item per twelve-country chunk and ``countries`` is the
+    only key those items differ in.  While the identity of a plan item ignored
+    ``countries``, a nineteen-country campaign had its second chunk dropped as a
+    duplicate: seven countries silently lost their salary anchor, and the two
+    chunks shared one ``target_key``, so per-target reuse reported a chunk
+    fetched that no run had ever fetched.  A key that names *what* an item
+    reads can never be volatile, however ambient it looks.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("compensation.eurostat_ses", source_type="compensation")
+    countries = ["BE", "NL", "LU", "DE", "FR", "IE", "AT", "FI", "ES", "IT",
+                 "PT", "GR", "PL", "CZ", "SK", "DK", "SE", "NO", "CH"]
+
+    items = EurostatEarningsAdapter(egress=None).plan(
+        {"location": {"countries": countries}}, {}, {}
+    )
+    assert len(items) == 2, "nineteen covered countries are two twelve-country requests"
+
+    with caplog.at_level("WARNING"):
+        ids = planning.persist_plan(campaign_id, [
+            planning.PlannedSource(
+                adapter_key=i.adapter_key, native_query=dict(i.native_query),
+                rationale=i.rationale, estimated_pages=i.estimated_pages,
+            )
+            for i in items
+        ])
+
+    assert len(ids) == 2
+    rows = campaign_repo.list_plan_items(campaign_id)
+    stored = {c for r in rows for c in (r["native_query"] or {}).get("countries", [])}
+    assert stored == set(countries), "no country may be dropped as a duplicate"
+    assert "Dropped" not in caplog.text
+
+    # ...and the fetch ledger sees two targets, so reuse cannot call one fetched
+    # on the strength of the other (N4).
+    assert planning.target_key("compensation.eurostat_ses", items[0].native_query) != (
+        planning.target_key("compensation.eurostat_ses", items[1].native_query)
+    )
+
+
+def test_two_items_differing_only_in_page_are_still_one_unit_of_work():
+    """FR-181: the keys identity ignores are ceilings on a walk, never its scope.
+
+    The counterpart to the test above: ``page`` and the budget keys around it
+    must stay ignored, or ``board.actiris``'s twenty page-partitioned items - all
+    of which collection would have re-issued as page 1 - come back.
+    """
+    base = {"language": "nl", "keywords": ["data engineer"], "offers_per_page": 50}
+    key = planning._plan_key("board.actiris", base)
+    for volatile in ("page", "pages", "max_records", "max_pages"):
+        assert planning._plan_key("board.actiris", {**base, volatile: 7}) == key
+    # Geography is not one of them.
+    assert planning._plan_key("board.actiris", {**base, "countries": ["BE"]}) != key

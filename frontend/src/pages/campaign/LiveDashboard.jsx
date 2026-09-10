@@ -9,7 +9,6 @@
  * findable rather than buried (FR-185).
  */
 
-import { HelpTip } from '../../components/Help'
 import Icon from '../../components/Icon'
 import {
   Badge,
@@ -22,16 +21,14 @@ import {
   formatDuration,
 } from '../../components/ui'
 
+import ActivityLog from './ActivityLog'
 import CollectionOutcomes from './CollectionOutcomes'
-import { OUTCOME_BADGE, Stat, cost, num, secondsBetween } from './shared'
+import SourceList from './SourceList'
+import { Stat, cost, num, secondsBetween } from './shared'
 
-export default function LiveDashboard({ live, plan, campaign, busy, onPause, onResume, onCancel }) {
+export default function LiveDashboard({ live, campaign, busy, onPause, onResume, onCancel }) {
   if (!live) return <Loading rows={4} />
 
-  // The status payload carries no per-source estimate, so the plan supplies it.
-  const estimateByItem = Object.fromEntries(
-    (plan?.items || []).map((i) => [i.id, { seconds: i.estimated_seconds, caps: i.caps }]),
-  )
   const collected = live.collected || {}
   const records = Object.values(collected).reduce((a, b) => a + b, 0)
   const budget = live.budget || {}
@@ -132,32 +129,16 @@ export default function LiveDashboard({ live, plan, campaign, busy, onPause, onR
         onCancel={busy ? undefined : onCancel}
       />
 
-      <SectionCard
-        icon="browser"
-        title={
-          <>
-            Per source
-            <HelpTip term="extraction_rate" />
-          </>
-        }
-        phase="phase-2"
-        actions={<span className="small muted">{(live.sources || []).length} adapters</span>}
-      >
-        <div className="col" style={{ gap: 10 }}>
-          {(live.sources || []).map((source) => (
-            <SourceProgress
-              key={source.plan_item_id}
-              source={source}
-              estimate={estimateByItem[source.plan_item_id]}
-            />
-          ))}
-          {!(live.sources || []).length && (
-            <p className="small muted" style={{ margin: 0 }}>
-              No source plan items.
-            </p>
-          )}
-        </div>
-      </SectionCard>
+      {/* FR-361: the progress bar says how far the run has got; this says what
+          it is doing, newest first, with the time of each line. */}
+      <ActivityLog
+        campaignId={campaign.id}
+        running={(live.status ?? campaign.status) === 'running'}
+      />
+
+      {/* FR-162, FR-166: one line per adapter, one row per distinct target
+          inside it, named by what the item's own query asked for. */}
+      <SourceList sources={live.sources} />
 
       {live.jobs?.length > 1 && (
         <SectionCard icon="clock" title="Job history" phase="phase-2">
@@ -199,43 +180,5 @@ export default function LiveDashboard({ live, plan, campaign, busy, onPause, onR
         </SectionCard>
       )}
     </>
-  )
-}
-
-/**
- * One adapter's progress, shown through the same component as the campaign job
- * so a source and the run it belongs to read identically (NFR-502).
- */
-function SourceProgress({ source, estimate }) {
-  const perPage = estimate?.caps?.records_per_page || 10
-  const expected = Math.max(1, (source.estimated_pages || 0) * perPage)
-  const job = {
-    kind: source.display_name || source.adapter_key,
-    adapter_key: source.adapter_key,
-    status: source.status === 'planned' ? 'pending' : source.status,
-    progress_done: source.records_collected || 0,
-    progress_total: expected,
-    estimated_seconds: estimate?.seconds ?? null,
-    error_count: source.error_count || 0,
-    last_error: source.last_error,
-  }
-  return (
-    <div>
-      <JobProgress job={job} />
-      <div className="row row-wrap small muted" style={{ marginTop: 4 }}>
-        {source.excluded_by_user && <span className="badge">excluded by you</span>}
-        {/* FR-185: the source's own row says which of the six answers it ended
-            on, so a line here and the ledger above can never disagree. */}
-        {source.outcome && (
-          <span className={`badge ${OUTCOME_BADGE[source.outcome] ?? ''}`}>
-            {source.outcome.replace(/_/g, ' ')}
-          </span>
-        )}
-        <span>records against an estimate of {num(expected)}</span>
-        {source.extraction_success_rate != null && (
-          <span>· extraction {Math.round(source.extraction_success_rate * 100)}%</span>
-        )}
-      </div>
-    </div>
   )
 }

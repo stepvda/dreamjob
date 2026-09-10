@@ -110,11 +110,15 @@ class ArbeitnowAdapter(VacancySourceAdapter):
     def plan(self, directives: dict, composite_profile: dict, caps: dict) -> list[PlanItem]:
         keywords = keywords_from(directives, composite_profile)
         pages = max(1, min(MAX_PAGES_PER_ITEM, int(caps.get("max_pages_per_source") or 2)))
+        # One item for the whole feed, paged through by the pipeline.  Planning
+        # one item per page instead handed twenty items to
+        # ``collection._run_page``, which overwrites ``native_query["page"]``
+        # with its own counter (see :func:`requested_page`) - so all twenty read
+        # page 1 and nineteen of them were pure duplicate traffic.
         return [
             PlanItem(
                 adapter_key=self.key,
                 native_query={
-                    "page": page,
                     "pages": 1,
                     "results_per_page": PAGE_SIZE,
                     "keywords": keywords,
@@ -122,13 +126,13 @@ class ArbeitnowAdapter(VacancySourceAdapter):
                 },
                 rationale=(
                     "Arbeitnow publishes a free, keyless job-board API at 250 rows per "
-                    f"request - the cheapest company-per-request source available. Page {page}"
+                    f"request - the cheapest company-per-request source available. "
+                    f"{pages} page(s), newest first"
                 ),
-                estimated_pages=1,
-                estimated_seconds=4,
-                caps={"max_records": PAGE_SIZE},
+                estimated_pages=pages,
+                estimated_seconds=4 * pages,
+                caps={"max_records": PAGE_SIZE * pages},
             )
-            for page in range(1, pages + 1)
         ]
 
     # -- fetch (IR-102, FR-182, FR-185) -------------------------------------

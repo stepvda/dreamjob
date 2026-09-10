@@ -477,10 +477,15 @@ def pre_133_db(tmp_path, monkeypatch) -> Iterator[None]:
     get_settings().ensure_dirs()
     every = migrator.discover()
     earlier = [m for m in every if m[0] < FTS_MIGRATION]
-    assert len(earlier) == len(every) - 1, [m[0] for m in every[-3:]]
+    upto = [m for m in every if m[0] <= FTS_MIGRATION]
+    assert len(upto) == len(earlier) + 1, [m[0] for m in every]
     monkeypatch.setattr(migrator, "discover", lambda: earlier)
     migrate()
-    monkeypatch.setattr(migrator, "discover", lambda: every)
+    # 133 is the only pending migration inside the test.  Anything added after
+    # it is not what this fixture is about, and letting it run would turn every
+    # future migration into a change to these assertions - which is exactly what
+    # the "133 is the last file" guard that used to sit here did.
+    monkeypatch.setattr(migrator, "discover", lambda: upto)
     yield
     get_settings.cache_clear()
 

@@ -267,6 +267,125 @@ def test_login_state_is_read_from_the_page_not_from_cookies():
 
 
 # ---------------------------------------------------------------------------
+# FR-202: the markers live on a client-rendered page, so the check has to wait
+# for one before it judges.  Reading the shell at domcontentloaded reported
+# "could not tell" for a session that was in fact signed in.
+# ---------------------------------------------------------------------------
+
+
+def test_markers_become_selectors_that_match_the_same_thing():
+    # A bare token is matched as a substring of class or id, exactly as
+    # login_state matches it as a substring of the HTML.
+    assert session_mod.marker_selector("global-nav__me") == (
+        '[class*="global-nav__me"],[id*="global-nav__me"]'
+    )
+    # A marker that already names an attribute becomes an attribute selector.
+    assert session_mod.marker_selector('data-control-name="identity_welcome_message"') == (
+        '[data-control-name="identity_welcome_message"]'
+    )
+    # A URL fragment is judged from the address; there is nothing to wait for.
+    assert session_mod.marker_selector("/uas/login") is None
+    assert session_mod.marker_selector("") is None
+
+
+def test_login_selectors_cover_both_directions_and_no_unknown_site():
+    selector = session_mod.login_selectors("linkedin")
+    # Signed in ...
+    assert '[class*="global-nav__me"]' in selector
+    assert '[data-control-name="identity_welcome_message"]' in selector
+    # ... and signed out: the first marker either way ends the wait.
+    assert '[class*="authwall"]' in selector
+    # The URL-only marker contributes nothing to the selector.
+    assert "/uas/login" not in selector
+    assert selector.count(",") + 1 == len(set(selector.split(",")))  # no duplicates
+    assert session_mod.login_selectors("nope") == ""
+
+
+class _HydratingPage:
+    """A page whose markers appear only once someone waits for them."""
+
+    SHELL = '<html><body><div id="app"></div></body></html>'
+    HYDRATED = '<html><body><nav class="artdeco-globalnav"></nav></body></html>'
+
+    def __init__(self, url: str, *, hydrates: bool = True):
+        self.url = url
+        self._hydrates = hydrates
+        self.waited_for: list[str] = []
+        self._ready = False
+
+    async def goto(self, url: str, wait_until: str = "domcontentloaded"):
+        self.url = url
+        return None
+
+    async def title(self) -> str:
+        return "Feed | LinkedIn"
+
+    def set_default_navigation_timeout(self, ms: int) -> None:
+        pass
+
+    async def wait_for_selector(self, selector: str, timeout: int = 0, state: str = ""):
+        self.waited_for.append(selector)
+        if not self._hydrates:
+            raise TimeoutError("no marker appeared")
+        self._ready = True
+        return object()
+
+    async def content(self) -> str:
+        return self.HYDRATED if self._ready else self.SHELL
+
+
+def _session_on(page):
+    live = session_mod.BrowserSession()
+    live._context = object()
+    live._page = page
+    return live
+
+
+def test_check_login_waits_for_the_marker_instead_of_reading_the_shell():
+    page = _HydratingPage("https://www.linkedin.com/feed/")
+    result = asyncio.run(_session_on(page).check_login("linkedin"))
+    assert page.waited_for, "the shell must not be judged before it has rendered"
+    assert result["logged_in"] is True
+    assert result["detail"] == "Signed in."
+
+
+def test_check_login_still_answers_when_no_marker_ever_appears():
+    page = _HydratingPage("https://www.linkedin.com/feed/", hydrates=False)
+    result = asyncio.run(_session_on(page).check_login("linkedin"))
+    assert result["logged_in"] is None
+    assert "Could not tell" in result["detail"]
+
+
+def test_check_login_does_not_wait_when_the_url_already_answered():
+    # Redirected to the authwall: waiting for a marker that will never come
+    # would only spend the timeout.
+    page = _HydratingPage("https://www.linkedin.com/authwall", hydrates=False)
+
+    async def goto(url: str, wait_until: str = "domcontentloaded"):
+        return None  # the redirect already happened; page.url stays the authwall
+
+    page.goto = goto
+    result = asyncio.run(_session_on(page).check_login("linkedin"))
+    assert page.waited_for == [], "a settled URL needs no wait"
+    assert result["logged_in"] is False
+
+
+def test_goto_records_the_url_the_browser_landed_on():
+    # pacing.detect_challenge reads "the URL the browser ended on": a redirect
+    # to a checkpoint is invisible if goto reports the URL that was asked for.
+    page = _HydratingPage("https://www.linkedin.com/feed/")
+
+    async def goto(url: str, wait_until: str = "domcontentloaded"):
+        page.url = "https://www.linkedin.com/checkpoint/challenge/"
+        return None
+
+    page.goto = goto
+    load = asyncio.run(_session_on(page).goto("https://www.linkedin.com/feed/"))
+    assert load.url == "https://www.linkedin.com/checkpoint/challenge/"
+    assert pacing_mod.detect_challenge(load.url).is_challenge is True
+
+
+# ---------------------------------------------------------------------------
 # FR-205: the target list is closed
 # ---------------------------------------------------------------------------
 

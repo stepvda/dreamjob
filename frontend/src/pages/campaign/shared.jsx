@@ -57,6 +57,12 @@ export const OUTCOME_BADGE = {
   rejected: 'badge-danger',
   normalised_nothing: 'badge-danger',
   extracted_nothing: 'badge-danger',
+  // FR-361: the activity feed names two more things a source can be doing, and
+  // it reads its severity out of this map so that a line in the log and a badge
+  // on the row can never disagree about how serious something is. Neither is a
+  // verdict, so neither is coloured.
+  started: '',
+  cancelled: '',
 }
 
 export const ACTION_TONE = { collect: undefined, collect_partial: 'info', skip: 'ok' }

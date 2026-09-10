@@ -43,9 +43,16 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dreamjob.adapters.base import PlanItem as AdapterPlanItem
 from dreamjob.adapters.base import SourceAdapter, get_adapter
+from dreamjob.adapters.vacancy_source import (
+    country_terms,
+    location_terms,
+    query_terms,
+    requested_page,
+)
 from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as repo
@@ -655,7 +662,50 @@ def fallback_query(
     )
 
 
-def enrich_native_query(native: dict, generated: dict | None) -> dict:
+# Keys that name the slice of a list an item reads.  A model answer is one
+# answer for a whole source, so it can never speak for a particular slice.
+_CURSOR_KEYS = frozenset({"page", "offset", "cursor", "start", "from"})
+
+
+def discriminating_keys(items: list[AdapterPlanItem]) -> frozenset[str]:
+    """The query keys that tell one of a source's own plan items from another.
+
+    The model is asked once per *source*, but a source plans as many *items* as
+    it has units of work: one per page for a paginated board, one per company
+    website for the crawler, one per region x sector for an aggregator.  The
+    keys those items differ in are the only thing keeping them separate work,
+    so a single answer must not be allowed to write over them.
+
+    It could, and it did.  ``website.crawl`` plans one item per company site;
+    the model was shown that shape (:func:`_native_query_shape` samples the
+    first item), answered with the single ``url`` the shape asked for, and
+    :func:`enrich_native_query` stamped it onto every item.  One campaign wrote
+    149 crawl items that all named ``https://dovane.be`` - one company crawled
+    149 times, 148 companies never crawled - and nothing afterwards could tell
+    the rows apart, because the only thing that had distinguished them was the
+    field that got overwritten.
+
+    Derived from the items rather than listed per adapter, so a source that
+    starts partitioning itself on a new key is protected without an edit here.
+    """
+    if len(items) < 2:
+        return frozenset()
+    queries = [i.native_query or {} for i in items]
+    marks: dict[str, str] = {}
+    varying: set[str] = set()
+    for query in queries:
+        for key, value in query.items():
+            mark = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+            if marks.setdefault(key, mark) != mark:
+                varying.add(key)
+    # A key some items carry and others do not separates them just as surely.
+    shared = set.intersection(*(set(q) for q in queries))
+    return frozenset(varying | (set(marks) - shared))
+
+
+def enrich_native_query(
+    native: dict, generated: dict | None, protected: frozenset[str] = frozenset()
+) -> dict:
     """Let the model refine an adapter-authored query without re-shaping it.
 
     The adapter owns the key set: a model answer may only replace a value the
@@ -663,12 +713,18 @@ def enrich_native_query(native: dict, generated: dict | None) -> dict:
     keeps FR-162's "the LLM translates into the source's native query" true
     while making it impossible for a model answer to produce a query the
     adapter cannot execute.
+
+    ``protected`` names the keys this source varies from one item to the next
+    (see :func:`discriminating_keys`), plus the cursor keys no per-source answer
+    can speak for.  Those are the adapter's alone: one answer covering twenty
+    items has nothing to say about which page the seventh of them reads.
     """
     if not generated:
         return dict(native)
     out = dict(native)
+    blocked = protected | _CURSOR_KEYS
     for key, value in (generated or {}).items():
-        if key not in out or value in (None, "", [], {}):
+        if key in blocked or key not in out or value in (None, "", [], {}):
             continue
         current = out[key]
         if isinstance(current, bool) or isinstance(value, bool):
@@ -1263,12 +1319,21 @@ def generate_plan(
         items = adapter_items.get(entry["adapter_key"])
         area = "/".join(countries) or "the stated geography"
         if items:
+            # One answer for the whole source may refine what every item of it
+            # shares, and nothing that separates them (FR-162).
+            protected = discriminating_keys(items)
             for item in items:
                 native_query = enrich_native_query(
-                    item.native_query, (generated or {}).get("native_query")
+                    item.native_query, (generated or {}).get("native_query"), protected
                 )
+                # The adapter's own page count wins over the model's.  The
+                # model answers once for the whole source, so applying its
+                # number per item multiplied it by however many items the
+                # adapter had planned: a four-page estimate for Actiris became
+                # four pages each across twenty items, eighty page-fetches of a
+                # board that holds twenty.
                 pages = _clamp_int(
-                    (generated or {}).get("estimated_pages") or item.estimated_pages,
+                    item.estimated_pages or (generated or {}).get("estimated_pages"),
                     1,
                     per_source_pages,
                 )
@@ -1493,13 +1558,43 @@ def persist_plan(campaign_id: str, planned: list[PlannedSource]) -> list[str]:
     something does, the row is retired as ``skipped`` so it stops being
     collected without breaking the records it already produced.
     """
-    existing = {_plan_key(i["adapter_key"], i.get("native_query")): i
-                for i in repo.list_plan_items(campaign_id)}
+    stored = repo.list_plan_items(campaign_id)
+    #: Keyed for matching, last row of a key winning as it always has.  ``stored``
+    #: is kept alongside it because this dict *loses* rows: a campaign planned
+    #: before the collapse net below existed can hold twenty items under one key,
+    #: and nineteen of them are invisible here.  Deciding what to retire from the
+    #: survivors alone deleted those nineteen outright - one running campaign has
+    #: 16,234 provenance rows pointing at 39 such items, and ``source_plan_item_id``
+    #: carries no foreign key, so the link would not fail loudly, it would just be
+    #: gone.  Retirement is decided over ``stored`` instead (FR-166).
+    existing = {_plan_key(i["adapter_key"], i.get("native_query")): i for i in stored}
     referenced = repo.plan_items_with_provenance(campaign_id)
     ids: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    collapsed: dict[str, int] = {}
+    #: The label of the first item each adapter collapsed, so the warning names
+    #: the *target* that was planned twice and not only the source it belongs to
+    #: (FR-162).  "Dropped 19 duplicate plan item(s) for board.actiris" cannot be
+    #: checked against anything; the label can.
+    collapsed_first: dict[str, str] = {}
     for item in planned:
+        key = _plan_key(item.adapter_key, item.native_query)
+        if key in seen:
+            # Two items asking the same source the same question are not two
+            # units of work: collection would issue the identical request twice
+            # and write the same records under two provenance parents.  Nothing
+            # legitimately produces one - stage follows source_type, so every
+            # item of an adapter carries the same stage - so this is a net, not
+            # a policy, and it says so out loud rather than quietly halving a
+            # plan someone will later count.
+            collapsed[item.adapter_key] = collapsed.get(item.adapter_key, 0) + 1
+            collapsed_first.setdefault(
+                item.adapter_key, plan_item_label(item.adapter_key, item.native_query)[0]
+            )
+            continue
+        seen.add(key)
         row = item.to_row()
-        previous = existing.pop(_plan_key(item.adapter_key, item.native_query), None)
+        previous = existing.pop(key, None)
         if previous is None:
             ids.append(repo.insert_plan_item(campaign_id, row))
             continue
@@ -1509,7 +1604,15 @@ def persist_plan(campaign_id: str, planned: list[PlannedSource]) -> list[str]:
         repo.update_plan_item(previous["id"], row)
         ids.append(previous["id"])
 
-    retired = [i["id"] for i in existing.values() if i["id"] in referenced]
+    for adapter_key, count in sorted(collapsed.items()):
+        log.warning(
+            "Dropped %d duplicate plan item(s) for %s (first: %s): same source, same "
+            "query, so they would have fetched the same records twice (FR-162, FR-166)",
+            count, adapter_key, collapsed_first.get(adapter_key, ""),
+        )
+
+    matched = set(ids)
+    retired = [i["id"] for i in stored if i["id"] not in matched and i["id"] in referenced]
     for retired_id in retired:
         repo.update_plan_item(
             retired_id, {"status": "skipped", "last_error": "no longer part of the plan"}
@@ -1518,8 +1621,22 @@ def persist_plan(campaign_id: str, planned: list[PlannedSource]) -> list[str]:
     return ids
 
 
-# Volatile keys: they say where a run got to, not which work this item is.
-_PLAN_KEY_IGNORED = frozenset({"page", "pages", "max_records", "max_pages", "countries"})
+# Volatile keys: they say how far into a source a run may go, never which part
+# of it this item reads.  ``page`` is the clearest case - a stored plan item
+# never owns its page, because ``collection._run_page`` re-issues the item once
+# per page with its own counter in ``native_query["page"]`` (see
+# ``vacancy_source.requested_page``) - and the rest are ceilings on the same
+# walk.  Only a key of that kind belongs here.  A key that names *what* is
+# fetched must not: since ``persist_plan`` began collapsing items that share an
+# identity, an over-broad entry no longer merely mismatches a row on a re-plan,
+# it deletes work.  ``countries`` sat here and did exactly that.
+# ``compensation.eurostat_ses`` plans one item per twelve-country chunk of a
+# survey it can only request twelve countries at a time from, and ``countries``
+# is the only key those items differ in, so a nineteen-country campaign had its
+# second chunk dropped as a duplicate and never learned a salary band for the
+# seven countries in it.  The same collision gave both chunks one ``target_key``
+# (N4), so per-target reuse called a chunk fetched that no run had fetched.
+_PLAN_KEY_IGNORED = frozenset({"page", "pages", "max_records", "max_pages"})
 
 
 def _plan_key(adapter_key: str, native_query: Any) -> tuple[str, str]:
@@ -1569,6 +1686,270 @@ def target_key(adapter_key: str, native_query: Any, board: tuple[str, str] | Non
         return f"{board[0]}/{board[1]}"
     _, digest = _plan_key(adapter_key, native_query)
     return digest or adapter_key
+
+
+# ---------------------------------------------------------------------------
+# Telling one plan item from another (FR-162, FR-163)
+# ---------------------------------------------------------------------------
+
+#: Subdomains that say which door of a site was used, never which employer it
+#: belongs to.  ``jobs.northwind.com`` and ``northwind.com`` are one target to a
+#: reader and stripping them is what stops the list reading as two.
+_LABEL_HOST_TRIM = re.compile(r"^(www|jobs|careers|m)\.", re.IGNORECASE)
+
+#: The longest label a per-source row and a one-line activity feed can both
+#: hold.  Measured over all 57,250 plan items: median 10, p95 27.
+LABEL_MAX_CHARS = 48
+
+#: The longest single term inside a label.  Without it one 90-character Workday
+#: search string is the whole label and the company it belongs to is cut off.
+_LABEL_TERM_CHARS = 28
+
+
+def _label_list(payload: dict, *keys: str) -> list[str]:
+    """Read one vocabulary more than the adapters' own readers know about.
+
+    :func:`~dreamjob.adapters.vacancy_source.query_terms` and its siblings are
+    the *collection* pipeline's readers: they answer for the keys an adapter
+    fetches with, and widening them there would hand every adapter a key none
+    of them writes.  A label is read off plans older passes wrote in their own
+    words - ``topics``, ``regions`` - so those keys are asked for here instead.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        value = payload.get(key)
+        candidates = value if isinstance(value, (list, tuple, set)) else [value]
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate = candidate.get("label") or candidate.get("name")
+            text = str(candidate or "").strip()
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                out.append(text)
+    return out
+
+
+def _scalar_term(payload: dict) -> str:
+    """A search string this item alone issues, as against the shared keyword bag.
+
+    A list under ``keywords``/``queries`` is the campaign's scoring vocabulary
+    and is byte-identical on every sibling; a *scalar* ``search_text``/``query``
+    is the one query this item sends, and is the only thing telling Deloitte's
+    seven Workday items apart.
+    """
+    for key in ("search_text", "query", "keyword"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _label_host(url: Any) -> str:
+    """The site a crawl seed or a feed points at, without its scheme or door."""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if "//" not in text:
+        text = "https://" + text.lstrip("/")
+    host = (urlparse(text).netloc or "").split("@")[-1].split(":")[0]
+    return _LABEL_HOST_TRIM.sub("", host).lower()
+
+
+def _label_slugs(payload: dict) -> list[str]:
+    """The board slugs this item reads, in either the singular or plural key."""
+    raw = payload.get("slug") or payload.get("board_slugs") or payload.get("slugs") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(slug).strip() for slug in raw if str(slug).strip()]
+
+
+def _label_company(payload: dict) -> str:
+    """The employer this item is about, in whichever vocabulary named it."""
+    for key in ("company_name", "employer", "organisation"):
+        if str(payload.get(key) or "").strip():
+            return str(payload[key]).strip()
+    company = payload.get("company")
+    if isinstance(company, dict):
+        return str(company.get("name") or company.get("legal_name") or "").strip()
+    if isinstance(company, str):
+        return company.strip()
+    return ""
+
+
+def _label_sections(payload: dict) -> list[str]:
+    """NACE sections, which is what one partition of a register sweep asks for."""
+    raw = (
+        payload.get("nace_section")
+        or payload.get("nace_sections")
+        or payload.get("sector_codes")
+        or payload.get("sectorCodes")
+        or []
+    )
+    if isinstance(raw, (str, int)):
+        raw = [raw]
+    return [str(code).strip().upper() for code in raw if str(code).strip()]
+
+
+def _label_regions(payload: dict) -> list[str]:
+    """NUTS or region codes, which is the other axis a sweep is partitioned on."""
+    for key in ("nuts_codes", "nuts", "region_codes", "regions", "region"):
+        raw = payload.get(key)
+        if isinstance(raw, str):
+            raw = [raw]
+        codes = [str(code).strip().upper() for code in (raw or []) if str(code).strip()]
+        if codes:
+            return codes
+    return []
+
+
+def _clip_label(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _terms_phrase(terms: list[str]) -> str:
+    """The first term and how many others there are: "data engineer +4"."""
+    if not terms:
+        return ""
+    head = _clip_label(terms[0], _LABEL_TERM_CHARS)
+    return f"{head} +{len(terms) - 1}" if len(terms) > 1 else head
+
+
+def plan_item_label(adapter_key: str, native_query: Any) -> tuple[str, str]:
+    """A short name telling one plan item apart from its siblings (FR-162, FR-163).
+
+    ``source_plan_item`` has no name column and ``display_name`` belongs to the
+    *adapter*, so a plan with 2,417 Personio boards in it renders 2,417 rows
+    reading "Personio".  What separates them is in ``native_query``, and every
+    adapter family writes a different shape there.
+
+    Returns ``(label, detail)``: ``label`` is the axis siblings differ on, at
+    most 48 characters and never empty; ``detail`` is the shared query shape,
+    for the muted second line.  Keyed on the *shape of the query* rather than on
+    the adapter key, so an adapter this function has never seen still gets a
+    name from whichever rule its query answers.
+    """
+    query = native_query if isinstance(native_query, dict) else {}
+    terms = query_terms(query) or _label_list(query, "topics")
+    detail_bits: list[str] = []
+    label = ""
+
+    # R1: the plan already named it.
+    for key in ("label", "name", "title"):
+        if str(query.get(key) or "").strip():
+            label = str(query[key]).strip()
+            break
+
+    if not label:
+        slugs = _label_slugs(query)
+        company = _label_company(query)
+        # R2/R3: a named target - a company's board, a register subject.  The
+        # slug goes to the detail line as ``target_key`` spells it, so the row
+        # and the fetch ledger name the same thing the same way (N4).
+        if company or slugs:
+            label = company or "/".join(slugs[:2])
+            if slugs:
+                vendor = (
+                    adapter_key[len(ATS_ADAPTER_PREFIX):]
+                    if adapter_key.startswith(ATS_ADAPTER_PREFIX)
+                    else adapter_key.split(".")[-1]
+                )
+                more = f" +{len(slugs) - 1}" if len(slugs) > 1 else ""
+                detail_bits.append(f"{vendor}/{slugs[0]}{more}")
+            entity = query.get("company") if isinstance(query.get("company"), dict) else {}
+            legal = str(entity.get("legal_id") or entity.get("vat_number") or "").strip()
+            if legal:
+                detail_bits.append(legal)
+
+    if not label:
+        # R4: a URL is the target - a crawl seed, a newsroom feed.
+        seeds = query.get("crawl_seeds") if isinstance(query.get("crawl_seeds"), list) else []
+        url = (
+            query.get("url")
+            or query.get("feed_url")
+            or query.get("website")
+            or (seeds[0] if seeds else None)
+        )
+        host = _label_host(url)
+        if host:
+            label = host
+            paths = query.get("paths") if isinstance(query.get("paths"), list) else []
+            if paths:
+                detail_bits.append(f"{len(paths)} paths")
+
+    if label:
+        # A named target's siblings differ on the one query they each send, and
+        # on nothing else: Deloitte's seven Workday rows share their slug.
+        term = _scalar_term(query)
+        if term:
+            label = f"{label} · {_terms_phrase([term])}"
+
+    if not label:
+        # R5: one partition of a register sweep - region x sector x period.
+        sections = _label_sections(query)
+        regions = _label_regions(query)
+        if sections or (regions and adapter_key.startswith("board.")):
+            where = regions[0] if regions else (country_terms(query) or ["?"])[0]
+            label = f"{where} · NACE {', '.join(sections[:3])}" if sections else where
+            period = str(
+                query.get("publication_period") or query.get("publicationPeriod") or ""
+            ).strip()
+            if period:
+                detail_bits.append(period.replace("_", " ").lower())
+
+    if not label and terms:
+        # R6: a keyword search, which is what a job board is asked.
+        label = _terms_phrase(terms)
+        places = (
+            location_terms(query)
+            or _label_list(query, "region", "regions")
+            or country_terms(query)
+        )
+        if places:
+            label += f" · {places[0]}"
+
+    if not label and not adapter_key.startswith(ATS_ADAPTER_PREFIX):
+        # R7: a country sweep.  Not for an ATS item: one with no slug and no
+        # company names no board, and "BE" would say it reads the whole country.
+        codes = country_terms(query)
+        if codes:
+            label = ", ".join(codes[:3])
+            occupations = query.get("occupations") if isinstance(
+                query.get("occupations"), list
+            ) else []
+            if occupations:
+                detail_bits.append(f"{len(occupations)} occupations")
+
+    # The page is an axis of its own: collection re-issues one plan item once
+    # per page, so a stored ``page`` is which slice of the source this row is.
+    page = requested_page(query)
+    if page is not None:
+        label = f"{label} · page {page}" if label else f"page {page}"
+    language = str(query.get("language") or "").strip()
+    if language and len(language) <= 5:
+        detail_bits.append(language)
+
+    label = _clip_label(label, LABEL_MAX_CHARS)
+
+    if not label:
+        # R8: nothing in the query names a target.  The fetch ledger's own key
+        # is used, so a row nobody can name is still greppable in the ledger.
+        key = target_key(adapter_key, query)
+        label = f"#{key[:8]}" if key and key != adapter_key else adapter_key
+
+    if len(terms) > 1 and "+" not in label:
+        detail_bits.append(f"{len(terms)} keywords")
+    return label, " · ".join(detail_bits[:3])
+
+
+def short_source_name(display_name: str) -> str:
+    """The head of a catalogue name, for a one-line feed (FR-361).
+
+    ``Actiris (Brussels public employment service)`` is 44 characters before the
+    item's own label starts.  The parenthetical is what the per-source row has
+    room for and a log line does not.
+    """
+    return (display_name or "").split(" (")[0].strip() or display_name
 
 
 def aggregate_by_adapter(items: list[dict], catalogue: dict[str, dict]) -> list[dict]:
@@ -1651,6 +2032,13 @@ def plan_summary(
         item["source_type"] = entry.get("source_type")
         item["access_method"] = entry.get("access_method")
         item["tos_status"] = entry.get("tos_status")
+        # FR-162: the same three fields the live dashboard names a source by, so
+        # the review screen and the collection screen cannot call one plan item
+        # two different things.
+        label, label_detail = plan_item_label(item["adapter_key"], item.get("native_query"))
+        item["label"] = label
+        item["label_detail"] = label_detail
+        item["target_key"] = target_key(item["adapter_key"], item.get("native_query"))
     return {
         "campaign_id": campaign_id,
         "status": campaign.get("status"),

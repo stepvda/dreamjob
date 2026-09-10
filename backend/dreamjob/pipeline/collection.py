@@ -909,6 +909,10 @@ class _Unit:
     #: The board's company, resolved once per item rather than once per posting.
     board_company_id: str | None = None
     board_company_resolved: bool = False
+    #: The activity kind last written onto this row (FR-361).  ``_settle`` reads
+    #: it to tell a verdict that merely confirms the live stamp from one that
+    #: corrects it, so the feed carries the correction and not the repetition.
+    activity_kind: str | None = None
 
     @property
     def id(self) -> str:
@@ -1617,6 +1621,10 @@ async def collection_worker(ctx: JobContext) -> None:
                         if unit.running
                         else "cancelled before its outcome was written; resumable"
                     ),
+                    # FR-361: a cancel is the last thing that happened to this
+                    # source, and it supersedes whatever it was doing before.
+                    "activity_at": utcnow(),
+                    "activity_kind": "cancelled",
                 },
             )
         repo.set_stage(campaign_id, "collection", "cancelled")
@@ -1640,6 +1648,10 @@ async def collection_worker(ctx: JobContext) -> None:
                 {
                     "status": "failed",
                     "last_error": reason,
+                    # FR-361: the run fell over underneath this source; that is
+                    # the last thing that happened to it.
+                    "activity_at": utcnow(),
+                    "activity_kind": "failed",
                     **_outcome_columns(unit, "failed", reason),
                 },
             )
@@ -1780,6 +1792,10 @@ async def _build_units(
                     "outcome_state": "failed",
                     "outcome_reason": reason[:2000],
                     "failed_count": int(item.get("failed_count") or 0) + 1,
+                    # FR-361: it never ran, so nothing else will ever say what
+                    # became of it.
+                    "activity_at": utcnow(),
+                    "activity_kind": "failed",
                 },
             )
             repo.bump_plan_item(item["id"], errors=1)
@@ -2068,6 +2084,7 @@ async def _run_unit(
         await _drive_unit(unit, limit, books, stats, caps, started, completed, total_pages)
     finally:
         books.flush_counters(unit.id)
+        _stamp_finished(unit)
     unit.running = False
 
 
@@ -2084,7 +2101,14 @@ async def _drive_unit(
     """Run one source up to ``limit`` pages, recording what it did (FR-181)."""
     if not unit.started:
         unit.started = True
-        repo.update_plan_item(unit.id, {"status": "running"})
+        # FR-361: the first thing the activity feed can say about a source is
+        # that it has started, and it is said in the write that was happening
+        # anyway rather than in one of its own.
+        repo.update_plan_item(
+            unit.id,
+            {"status": "running", "activity_at": utcnow(), "activity_kind": "started"},
+        )
+        unit.activity_kind = "started"
     bucket = stats.adapter(unit.adapter_key)
     while unit.done < min(limit, unit.pages):
         reason = _cap_hit(stats, caps, started)
@@ -2250,6 +2274,25 @@ def _outcome_columns(unit: _Unit, state: str, reason: str | None) -> dict[str, A
     }
 
 
+def _stamp_finished(unit: _Unit) -> None:
+    """Record that this source has stopped working, while the run is still on (FR-361).
+
+    :func:`_settle` writes the verdict, but it runs once for the whole plan
+    after both waves have finished - so on a four-hour run it is four hours
+    late.  What the activity feed needs is the moment the page loop ended, which
+    is here, and what it ended on, which :meth:`ItemOutcome.state` already
+    computes from the same counters :func:`_settle` will read.  Nothing about
+    the verdict is written early: the row keeps ``status='running'`` and a NULL
+    ``outcome_state`` until :func:`_settle`, so the FR-185 ledger, which reads
+    ``status`` first, does not see this at all.
+    """
+    if unit.remaining > 0:
+        return  # a cap or a stage reservation ended the wave, not the source
+    state = unit.outcome.state()
+    repo.update_plan_item(unit.id, {"activity_at": utcnow(), "activity_kind": state})
+    unit.activity_kind = state
+
+
 def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     """Write down what this source did, in words that distinguish the cases."""
     unit.settled = True
@@ -2322,6 +2365,15 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     reason = outcome.block_reason if state == "blocked" else (
         outcome.gone_reason if state == "gone" else message
     )
+    # FR-361: the settle pass runs once, after the whole plan has finished, so
+    # what it writes here is hours behind the feed for most of a run.  It is
+    # worth a line only when it *changes* the answer - a source that succeeded
+    # and was then capped - and never when it repeats one the reader has read.
+    changed = (
+        {"activity_at": utcnow(), "activity_kind": state}
+        if state != unit.activity_kind
+        else {}
+    )
     repo.update_plan_item(
         unit.id,
         {
@@ -2329,6 +2381,7 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
             "last_error": message,
             "caps": caps_payload,
             **_outcome_columns(unit, state, reason),
+            **changed,
         },
     )
 
@@ -2465,11 +2518,27 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
             outcomes[str(state)] = outcomes.get(str(state), 0) + 1
         item_caps = item.get("caps") if isinstance(item.get("caps"), dict) else {}
         outcome = (item_caps or {}).get("outcome") or {}
+        label, label_detail = planning.plan_item_label(
+            item["adapter_key"], item.get("native_query")
+        )
         sources.append(
             {
                 "plan_item_id": item["id"],
                 "adapter_key": item["adapter_key"],
                 "display_name": entry.get("display_name") or item["adapter_key"],
+                # FR-162: ``display_name`` belongs to the adapter, so a plan
+                # with 2,417 Personio boards in it draws 2,417 rows all reading
+                # "Personio".  ``label`` is what this particular item asked for.
+                "label": label,
+                "label_detail": label_detail,
+                # Two plan items with one target read the identical thing.  The
+                # reuse assessment leaves a 'skipped' twin beside 1,426 running
+                # items in one campaign, and no label can separate rows that are
+                # the same row - so the screen is given the key that says so
+                # instead (FR-166, FR-342).
+                "target_key": planning.target_key(
+                    item["adapter_key"], item.get("native_query")
+                ),
                 "status": item["status"],
                 # FR-185: what the source actually did, not just whether the
                 # worker reached the end of its page loop.
@@ -2494,6 +2563,12 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
                 "error_count": item["error_count"],
                 "last_error": item["last_error"],
                 "estimated_pages": item["estimated_pages"],
+                # FR-185: the two numbers the per-source bar is drawn from.  The
+                # screen used to join them from ``/plan``, which returns one
+                # page of 100 items, so 6,424 rows of a 6,524-item plan drew
+                # their bar against a hard-coded guess.
+                "estimated_seconds": item["estimated_seconds"],
+                "records_per_page": (item_caps or {}).get("records_per_page"),
                 "extraction_success_rate": rate,
             }
         )

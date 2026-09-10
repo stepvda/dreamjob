@@ -147,32 +147,40 @@ class ActirisAdapter(VacancySourceAdapter):
         language = str(directives.get("language") or "nl").lower()
         if language not in LANGUAGES:
             language = "nl"
-        items: list[PlanItem] = []
-        for page in range(1, pages + 1):
-            items.append(
-                PlanItem(
-                    adapter_key=self.key,
-                    native_query={
-                        "language": language,
-                        "page": page,
-                        "offers_per_page": OFFERS_PER_PAGE,
-                        "max_age_days": DEFAULT_MAX_AGE_DAYS,
-                        "keywords": keywords,
-                        "title_filter": bool(caps.get("title_filter")),
-                    },
-                    rationale=(
-                        "Actiris is the Brussels public employment service; its offers "
-                        "name distinct SME employers that no ATS board carries. "
-                        f"Offers {(page - 1) * OFFERS_PER_PAGE + 1}-{page * OFFERS_PER_PAGE}, "
-                        "newest first"
-                    ),
-                    estimated_pages=1,
-                    # one sitemap read plus one advert per offer, at 2 s each
-                    estimated_seconds=2 * (OFFERS_PER_PAGE + 1),
-                    caps={"max_records": OFFERS_PER_PAGE},
-                )
+        # One item for the whole search, paged through by the pipeline.
+        #
+        # This used to return one item *per page*, each carrying its own
+        # ``page``.  It never worked: ``collection._run_page`` re-issues a plan
+        # item once per page with its own counter written into
+        # ``native_query["page"]`` (see :func:`requested_page`), so every one of
+        # those twenty items was fetched as page 1.  The same fifty adverts were
+        # read twenty times, offers 51-1000 were never read at all, and the rows
+        # were indistinguishable on the collection screen because the only thing
+        # separating them - the page - had been overwritten before the first
+        # request went out.  ``estimated_pages`` is how an adapter asks for
+        # depth; one item is how it asks for one search.
+        return [
+            PlanItem(
+                adapter_key=self.key,
+                native_query={
+                    "language": language,
+                    "offers_per_page": OFFERS_PER_PAGE,
+                    "max_age_days": DEFAULT_MAX_AGE_DAYS,
+                    "keywords": keywords,
+                    "title_filter": bool(caps.get("title_filter")),
+                },
+                rationale=(
+                    "Actiris is the Brussels public employment service; its offers "
+                    "name distinct SME employers that no ATS board carries. "
+                    f"The {pages * OFFERS_PER_PAGE} most recently modified offers, "
+                    "newest first"
+                ),
+                estimated_pages=pages,
+                # one sitemap read plus one advert per offer, at 2 s each
+                estimated_seconds=2 * (OFFERS_PER_PAGE + 1) * pages,
+                caps={"max_records": OFFERS_PER_PAGE * pages},
             )
-        return items
+        ]
 
     # -- fetch (IR-102, FR-182, FR-185) -------------------------------------
     async def fetch(self, item: PlanItem) -> list[RawRecord]:

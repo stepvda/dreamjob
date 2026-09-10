@@ -191,12 +191,36 @@ def create_app() -> FastAPI:
     dist = REPO_ROOT / "frontend" / "dist"
     if dist.exists():
         app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+        dist_root = dist.resolve()
 
-        @app.get("/{full_path:path}")
-        def spa(full_path: str) -> FileResponse:
-            candidate = dist / full_path
-            if full_path and candidate.is_file():
-                return FileResponse(candidate)
+        # ``response_model=None``: the route answers with two different
+        # response classes and FastAPI would otherwise try to build a schema
+        # out of the union of them.
+        @app.get("/{full_path:path}", response_model=None)
+        def spa(full_path: str) -> FileResponse | JSONResponse:
+            """Deep links land on the SPA; everything under /api does not.
+
+            This route matches every GET no other route claimed, and that used
+            to include ``/api`` - so an endpoint that did not exist answered
+            ``200 text/html`` with the SPA shell in it rather than 404.  The
+            client parses that body as JSON, fails, and hands the caller a
+            *string*, which reads as a successful but empty answer: the
+            activity panel polled a route the server does not have every four
+            seconds for the length of a run and reported "nothing recorded"
+            rather than "unavailable" (FR-361).  Nothing that is not the SPA
+            can be served from here, so a miss under /api is a 404 in the JSON
+            shape the rest of the API answers in.
+
+            The path is also resolved against ``dist`` before it is served.
+            ``dist / full_path`` follows ``..`` out of the directory, and the
+            repository root above it holds ``.env`` (NFR-201).
+            """
+            if full_path == "api" or full_path.startswith("api/"):
+                return JSONResponse(status_code=404, content={"detail": "Not Found"})
+            if full_path:
+                candidate = (dist / full_path).resolve()
+                if candidate.is_file() and candidate.is_relative_to(dist_root):
+                    return FileResponse(candidate)
             return FileResponse(dist / "index.html")
 
     return app

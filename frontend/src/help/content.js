@@ -169,6 +169,7 @@ export const PAGE_HELP = {
       'The planner checks the shared knowledge base first and only collects what is missing or stale. The saving is reported before you launch.',
       'A crash loses at most the page in flight; jobs resume from their last checkpoint.',
       'The token budget caps AI spend. Near the limit the system degrades gracefully, dropping speculative openings for low-ranked companies first.',
+      'The activity list shows the last thing each source did while a run is going. The refreshing stops when the campaign does.',
     ],
   },
 
@@ -1170,6 +1171,25 @@ export const GLOSSARY = {
     term: 'Not started: page budget',
     body:
       'Not an outcome at all, which is why it sits on its own below the rule. These plan items were never asked anything: the run reached its page cap first (FR-186) and stopped, leaving them runnable. Raising the cap and resuming continues them from the checkpoint rather than starting over. A large number here is normal on a broad plan and means only that the campaign is bounded — it says nothing about whether the sources work.',
+  },
+  // --- Telling one plan item from another (FR-162, FR-163) ----------------
+  source_target: {
+    term: 'Target',
+    body:
+      'Which particular thing one row asked for. A source appears once per ' +
+      'target, so a plan can hold 2,417 Personio rows that all read "Personio" ' +
+      'until the target is named: the company board, the region and sector, the ' +
+      'website. Two rows with the same target read the identical thing, and are ' +
+      'shown as one row that says how many plan items name it.',
+  },
+  // --- The activity log on the live dashboard (FR-361) --------------------
+  activity_log: {
+    term: 'Activity',
+    body:
+      'The last thing each source did, newest first, with the time it happened. ' +
+      'It refreshes every few seconds while collection is running and stops when ' +
+      'the run does. Each source appears once, showing its most recent action, ' +
+      'so a run with thousands of sources in it stays readable.',
   },
 }
 

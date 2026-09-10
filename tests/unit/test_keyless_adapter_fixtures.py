@@ -30,7 +30,7 @@ from dreamjob.adapters import load_all
 from dreamjob.adapters.ats.teamtailor import TeamtailorAdapter
 from dreamjob.adapters.ats.workable import WorkableAdapter
 from dreamjob.adapters.base import PlanItem, RawRecord, all_adapters, get_adapter
-from dreamjob.adapters.jobboards.actiris import ActirisAdapter
+from dreamjob.adapters.jobboards.actiris import OFFERS_PER_PAGE, ActirisAdapter
 from dreamjob.adapters.jobboards.arbeitnow import ArbeitnowAdapter
 from dreamjob.adapters.vacancy_source import VACANCY_COLUMNS, SourceUnavailable
 from dreamjob.config import get_settings
@@ -678,7 +678,35 @@ async def test_arbeitnow_follows_its_own_next_link_and_then_stops(db):
     ]
 
 
+def test_actiris_plans_one_search_rather_than_one_item_per_page():
+    """FR-162, FR-186: the page belongs to collection, so an item may not carry one.
+
+    These are the exact conditions that put twenty indistinguishable Actiris rows
+    on the collection screen: a twenty-page budget turned into twenty items, each
+    naming its own ``page``.  ``collection._run_page`` overwrites
+    ``native_query["page"]`` with its own counter, so all twenty fetched offers
+    1-50 - the same fifty adverts twenty times, and offers 51-1000 never read.
+    One item asking for twenty pages of depth is the same budget spent on twenty
+    different slices.
+    """
+    items = ActirisAdapter().plan({}, {}, {"max_pages_per_source": 20})
+    assert len(items) == 1, "one search is one plan item, however deep it goes"
+    assert "page" not in items[0].native_query
+    assert items[0].estimated_pages == 20
+    # The depth is not lost with the nineteen rows: the estimate still covers
+    # twenty pages, so the review screen prices the same work (FR-163).
+    assert items[0].estimated_seconds == 2 * (OFFERS_PER_PAGE + 1) * 20
+
+
 def test_arbeitnow_bounds_one_plan_item_however_generous_the_caps_are():
+    """One item for the feed, bounded by MAX_PAGES_PER_ITEM (IR-101).
+
+    The page is collection's to set - it re-issues the item once per page (see
+    ``vacancy_source.requested_page``) - so an item that named its own page was
+    overwritten and nineteen of twenty such items were duplicate traffic against
+    an API whose terms say "do not abuse".
+    """
     items = ArbeitnowAdapter().plan({}, {}, {"max_pages_per_source": 10_000})
-    assert len(items) == 20
-    assert [i.native_query["page"] for i in items] == list(range(1, 21))
+    assert len(items) == 1
+    assert "page" not in items[0].native_query
+    assert items[0].estimated_pages == 20

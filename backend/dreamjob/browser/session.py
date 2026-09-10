@@ -43,6 +43,10 @@ log = logging.getLogger(__name__)
 
 DEFAULT_NAVIGATION_TIMEOUT_MS = 45_000
 MAX_CAPTURE_CHARS = 400_000
+#: How long to let a client-rendered page draw one of its login markers before
+#: giving up and judging the shell as it stands.  Only the ambiguous case ever
+#: waits this long: the wait ends the moment a marker appears.
+LOGIN_MARKER_TIMEOUT_MS = 8_000
 
 
 class BrowserUnavailable(RuntimeError):
@@ -325,6 +329,49 @@ def login_state(site: str, url: str, html: str) -> bool | None:
     if any(marker in haystack for marker in profile.logged_in_markers):
         return True
     return None
+
+
+#: ``data-control-name="identity_welcome_message"`` and friends: a marker that
+#: already names an attribute is one, and becomes an attribute selector.
+_ATTR_MARKER_RE = re.compile(r'^([a-zA-Z][\w:-]*)\s*=\s*"([^"]*)"$')
+_TOKEN_MARKER_RE = re.compile(r"^[\w-]+$")
+
+
+def marker_selector(marker: str) -> str | None:
+    """The CSS selector that finds ``marker`` in a rendered page, or ``None``.
+
+    ``None`` where the marker is a URL fragment (``/uas/login``): those are
+    judged from the address, which needs no DOM at all.
+
+    Derived from :attr:`SiteProfile.logged_in_markers` rather than maintained
+    beside them on purpose.  The markers are the fragile part (RK-04) and one
+    fragile list is better than two that can drift apart; substring matching is
+    preserved as ``[class*=]`` / ``[id*=]`` so a selector never claims to be
+    stricter than the :func:`login_state` check it stands in for.
+    """
+    marker = marker.strip()
+    if not marker or marker.startswith("/"):
+        return None
+    attribute = _ATTR_MARKER_RE.match(marker)
+    if attribute is not None:
+        name, value = attribute.groups()
+        return f'[{name}="{value}"]'
+    if not _TOKEN_MARKER_RE.match(marker):
+        return None
+    return f'[class*="{marker}"],[id*="{marker}"]'
+
+
+def login_selectors(site: str) -> str:
+    """One CSS selector matching any login marker of ``site``; "" if there are none.
+
+    Both directions are included: the wait ends as soon as the page has drawn
+    *an* answer, signed in or signed out, and :func:`login_state` reads which.
+    """
+    profile = SITES.get(site)
+    if profile is None:
+        return ""
+    markers = (*profile.logged_in_markers, *profile.logged_out_markers)
+    return ",".join(dict.fromkeys(s for s in map(marker_selector, markers) if s))
 
 
 # ---------------------------------------------------------------------------
@@ -712,7 +759,11 @@ class BrowserSession:
             title = await page.title()
         except Exception:  # noqa: BLE001 - a challenge page can refuse this
             log.debug("Could not read the title of %s", safe_url(url))
-        return PageLoad(url=url, status=status, seconds=seconds, title=title)
+        # The URL the browser *ended* on, not the one asked for: a redirect to
+        # an authwall, a login page or a checkpoint is the whole signal that
+        # login_state and pacing.detect_challenge read off the address.
+        landed = getattr(page, "url", "") or url
+        return PageLoad(url=landed, status=status, seconds=seconds, title=title)
 
     async def content(self) -> str:
         """Raw DOM of the current page.  Sanitised only on the way to storage."""
@@ -739,6 +790,32 @@ class BrowserSession:
         except Exception:  # noqa: BLE001
             log.debug("Could not raise the browser window")
 
+    async def wait_for_login_markers(
+        self, site: str, *, timeout_ms: int = LOGIN_MARKER_TIMEOUT_MS
+    ) -> bool:
+        """Wait for the page to draw a login marker.  ``True`` if one appeared.
+
+        LinkedIn and Glassdoor both render their navigation on the client, so
+        the DOM at ``domcontentloaded`` is a shell carrying neither a signed-in
+        nor a signed-out marker.  Reading it straight away is a race that
+        reports "could not tell" for a session that is in fact signed in.
+
+        Waits for either direction: the first marker to appear ends the wait,
+        and :func:`login_state` reads which one it was.  ``state="attached"``
+        because the markers are matched as text by :func:`login_state`, which
+        does not care whether the element is on screen.
+        """
+        selector = login_selectors(site)
+        if not selector:
+            return False
+        try:
+            page = await self.page()
+            await page.wait_for_selector(selector, timeout=timeout_ms, state="attached")
+            return True
+        except Exception:  # noqa: BLE001 - an unmarked page is an answer too
+            log.debug("No login marker for %s within %dms", site, timeout_ms)
+            return False
+
     # -- login state (FR-202) ----------------------------------------------
     async def check_login(self, site: str) -> dict[str, Any]:
         """Visit the site's home page and judge whether the user is signed in.
@@ -750,6 +827,10 @@ class BrowserSession:
         if profile is None:
             raise ValueError(f"Unknown site {site!r}; known: {sorted(SITES)}")
         load = await self.goto(profile.home_url)
+        # A redirect to the authwall or the login page has already answered the
+        # question; only an ambiguous landing is worth waiting on.
+        if login_state(site, load.url, "") is None:
+            await self.wait_for_login_markers(site)
         html = await self.content()
         state = login_state(site, load.url, html)
         return {
