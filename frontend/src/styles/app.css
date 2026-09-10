@@ -1095,15 +1095,58 @@ a.btn { text-decoration: none; }
   padding: 8px 10px;
 }
 
+/* The whole command, always.  This was `overflow-x: auto; white-space: pre`,
+   so on a 1440px window the macOS Edge line ended inside `--user-data-d`.
+   Someone read the visible text, ran it, and Chromium refused the debugging
+   port for a default profile directory - then opened an ordinary window, so
+   the only symptom here was "No browser attached" with nothing connecting the
+   two.  A soft wrap cannot hide a character at any width or path length, and a
+   soft wrap is not a newline: selecting the block by hand still yields the one
+   correct line (FR-201). */
 .cmd code {
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Hanging indent, so a wrapped command still reads as one command: the
+     continuation sits under the arguments rather than under the binary. */
+  padding-left: 3ch;
+  text-indent: -3ch;
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.6;
   color: var(--ink-2);
+}
+
+/* Selecting the box by hand must yield the command and nothing else. */
+.cmd .btn {
+  flex: 0 0 auto;
+  user-select: none;
+}
+
+/* The profile directory is the only per-machine part of every command below,
+   and the part the truncation used to eat.  Shown first, on its own, so that
+   even a wrap inside the binary path leaves nothing that has to be guessed. */
+.cmd-profile {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+/* Caption above a command box.  It sits on the card surface rather than inside
+   the sunk box on purpose: --ink-3 clears AA on --surface (4.6:1) and does not
+   on --surface-sunk (4.0:1). */
+.cmd-caption {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+.cmd-caption strong {
+  color: var(--ink);
+  font-weight: 600;
 }
 
 /* ==========================================================================

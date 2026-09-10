@@ -163,7 +163,25 @@ class NBBAdapter(RegistryAdapter):
             payload = json.loads(response.text)
         except ValueError:
             return []
-        entries = payload if isinstance(payload, list) else payload.get("References") or []
+        # The deposit list has no count of its own, so the list itself has to
+        # be the evidence: a JSON array is one, and so is a ``References`` key
+        # that is still there and still a list.  An object without that key is
+        # not an empty deposit list, it is a body we no longer know how to read
+        # - and claiming emptiness for it would leave this adapter unable to
+        # report its own breakage (FR-181, NFR-403).
+        if isinstance(payload, list):
+            entries, answered = payload, True
+        elif isinstance(payload, dict):
+            listed = payload.get("References")
+            entries, answered = (listed or []), isinstance(listed, list)
+        else:
+            return []
+        if answered and not entries:
+            # The Central Balance Sheet Office answered with a well-formed and
+            # empty deposit list: this enterprise has filed nothing.  That is an
+            # answer, unlike the outage, the non-2xx and the unparseable body
+            # above, which return the same ``[]`` and claim nothing.
+            self.record_stated_empty()
 
         deposits: list[dict[str, Any]] = []
         for entry in entries:

@@ -736,10 +736,19 @@ class ItemOutcome:
         that returns nothing at all is visible.  The old rate was computed per
         raw record, so an adapter with zero raw records had no rate - the
         detector could only see sources that were already working.
+
+        A page whose answer *stated* that the source holds nothing is not an
+        extraction attempt and is left out of the denominator: the parser was
+        never given anything to extract.  Without this the plan item reads
+        "done, nothing to collect" while the same page pins the catalogue's
+        rolling rate at zero and fires the breakage audit - which is how
+        ``registry.kbo`` came to sit at 0.0001 with 303 breakage events, and
+        ``board.eures`` at 0.05 with 168, both of them working.
         """
-        if not self.pages:
+        attempted = self.pages - min(self.stated_empty, self.pages)
+        if attempted <= 0:
             return None
-        return self.productive_pages / self.pages
+        return self.productive_pages / attempted
 
     def state(self) -> str:
         """The one word this item ended in, never folded into "done".
@@ -838,7 +847,26 @@ NON_FAILURE_STATES: frozenset[str] = frozenset(
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "skipped", "blocked", "gone"})
 
 
-def _state_message(outcome: ItemOutcome) -> str | None:
+#: What a source *holds*, keyed on ``SourceAdapter.source_type``.  A register
+#: holds records and filings, not vacancies, and telling a job seeker that the
+#: Belgian enterprise register "holds no vacancy" for a company is not what
+#: happened.  ``api.routers.campaigns._RECORD_NOUN`` names the same things for
+#: the feed; this one is the pipeline's, so the pipeline does not import a
+#: router.
+_HELD_NOUN: dict[str, str] = {
+    "ats": "vacancy",
+    "job_board": "vacancy",
+    "registry": "record",
+    "directory": "company",
+    "website": "page",
+    "news": "article",
+    "compensation": "pay benchmark",
+    "events": "event",
+    "linkedin": "profile",
+}
+
+
+def _state_message(outcome: ItemOutcome, *, holds: str = "record") -> str | None:
     state = outcome.state()
     if state == "succeeded":
         # A source that collected records and was refused some of what it asked
@@ -877,7 +905,7 @@ def _state_message(outcome: ItemOutcome) -> str | None:
     if state == "no_matches":
         return (
             f"the source answered {outcome.stated_empty} request(s) and stated it holds no "
-            "vacancy for this query: read successfully, nothing to collect"
+            f"{holds} for this query: read successfully, nothing to collect"
         )
     return "the source issued no request for this query: nothing to collect"
 
@@ -923,8 +951,34 @@ class _Unit:
         return str(self.item["adapter_key"])
 
     @property
+    def holds(self) -> str:
+        """The noun this source's answers are counted in (see ``_HELD_NOUN``)."""
+        source_type = getattr(self.adapter, "source_type", None)
+        return _HELD_NOUN.get(str(getattr(source_type, "value", source_type) or ""), "record")
+
+    @property
     def remaining(self) -> int:
         return max(0, self.pages - self.done)
+
+
+def _stated_empty(adapter: Any) -> int:
+    """How many answers this page got in which the source stated it holds nothing.
+
+    Read off the adapter rather than passed back, because the four-step contract
+    only returns records: ``SourceAdapter.record_stated_empty`` is the one way
+    an adapter can say "answered, and the answer was no" without inventing a
+    record to say it with (FR-181).
+
+    ``max`` of the two places it can be found, never a sum: the base counter is
+    the general one and ``FetchOutcome.stated_empty`` is the vacancy adapters'
+    own copy of it, kept equal by ``VacancySourceAdapter.record_stated_empty``.
+    A source that only knows the older of the two - a stub in a test, an adapter
+    written before this counter moved down to the base class - still counts.
+    """
+    return max(
+        int(getattr(adapter, "stated_empty", 0) or 0),
+        int(getattr(getattr(adapter, "fetch_outcome", None), "stated_empty", 0) or 0),
+    )
 
 
 def _record_extraction(unit: _Unit, campaign_id: str) -> float | None:
@@ -1243,11 +1297,9 @@ async def _run_page(unit: _Unit, page: int, books: _Bookkeeping) -> ItemOutcome:
     measure()
     step.attempted = attempts_after - attempts_before
     step.parsed = successes_after - successes_before
-    # ``fetch_outcome`` is reset by the adapter at the start of every ``run()``,
-    # so this counts only the answers this page received (NFR-403).
-    step.stated_empty = int(
-        getattr(getattr(unit.adapter, "fetch_outcome", None), "stated_empty", 0) or 0
-    )
+    # Reset by the adapter at the start of every ``run()``, so this counts only
+    # the answers this page received (NFR-403).
+    step.stated_empty = _stated_empty(unit.adapter)
     step.normalised = len(records)
     _link_board_company(unit, records)
     written = await _write_records(unit, records, books)
@@ -2465,7 +2517,7 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
         return
     state = outcome.state()
     status = _STATE_STATUS.get(state, "failed")
-    message = _state_message(outcome)
+    message = _state_message(outcome, holds=unit.holds)
     if state not in NON_FAILURE_STATES and state != "failed" and message:
         # A source that fetched and produced nothing has not raised, so nothing
         # has counted an error for it yet - unlike ``failed``, whose error the

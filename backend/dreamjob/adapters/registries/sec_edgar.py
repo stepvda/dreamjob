@@ -137,6 +137,13 @@ class SECEdgarAdapter(RegistryAdapter):
             hit = index.get(_fold(str(candidate)))
             if hit:
                 return hit
+        if index:
+            # EDGAR's own ticker/name index answered and holds no registrant of
+            # this name: the company is not an SEC filer, which is the ordinary
+            # answer for every company that is not listed in the United States
+            # (FR-181).  An index that could not be read is empty and claims
+            # nothing.
+            self.record_stated_empty()
         return None
 
     async def ticker_index(self, *, egress: Any) -> dict[str, str]:
@@ -144,18 +151,41 @@ class SECEdgarAdapter(RegistryAdapter):
         if type(self)._ticker_index is not None:
             return type(self)._ticker_index
         payload = await self._json(TICKERS_URL, egress=egress)
+        if not isinstance(payload, dict):
+            # An index built from a failed fetch is empty, and an empty index
+            # makes every company look like a non-registrant - cached on the
+            # class, for the life of the process.  Not caching it is what keeps
+            # one EDGAR outage from being reported as 25 clean misses (FR-181).
+            log.info("[%s] the ticker index could not be read; not caching it", self.key)
+            return {}
         index: dict[str, str] = {}
-        if isinstance(payload, dict):
-            for entry in payload.values():
-                if not isinstance(entry, dict):
-                    continue
-                cik = str(entry.get("cik_str") or "").zfill(10)
-                if not cik.strip("0"):
-                    continue
-                if entry.get("ticker"):
-                    index[_fold(str(entry["ticker"]))] = cik
-                if entry.get("title"):
-                    index[_fold(str(entry["title"]))] = cik
+        rows = tickers = titles = 0
+        for entry in payload.values():
+            if not isinstance(entry, dict):
+                continue
+            rows += 1
+            cik = str(entry.get("cik_str") or "").zfill(10)
+            if not cik.strip("0"):
+                continue
+            if entry.get("ticker"):
+                index[_fold(str(entry["ticker"]))] = cik
+                tickers += 1
+            if entry.get("title"):
+                index[_fold(str(entry["title"]))] = cik
+                titles += 1
+        if rows and not (tickers and titles):
+            # Rows arrived and one of the two fields this index is keyed on
+            # produced nothing: EDGAR renamed a field.  The half that still
+            # parses would make the index look usable, and every lookup against
+            # the missing half would then read as "not an SEC filer" - a
+            # breakage reported as a clean miss, for the life of the process.
+            # An index we cannot fully read is no index (FR-181, NFR-403).
+            log.info(
+                "[%s] the ticker index parsed %s row(s) into %s ticker(s) and %s name(s); "
+                "its shape has changed, so it is not being used or cached",
+                self.key, rows, tickers, titles,
+            )
+            return {}
         type(self)._ticker_index = index
         return index
 

@@ -228,7 +228,7 @@ class EuresAdapter(VacancySourceAdapter):
                 # separates "nothing was published" from "the parser broke",
                 # which the plan item's status then reports honestly (NFR-403).
                 if self._stated_total(payload) == 0:
-                    self.fetch_outcome.stated_empty += 1
+                    self.record_stated_empty()
                 break
             summaries.extend(page_items)
             records.append(

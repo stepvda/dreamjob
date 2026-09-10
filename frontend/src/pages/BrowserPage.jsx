@@ -193,33 +193,55 @@ function LaunchInstructions({ query, os, onOs }) {
             </div>
           </div>
 
-          <div className="row row-wrap small" style={{ margin: '12px 0' }}>
-            <span className="muted">
-              Dedicated profile
-              <HelpTip title="Dedicated profile">
-                Automation uses its own profile directory, so your everyday browser, its history
-                and its logins are untouched. It also makes the automation window visibly separate
-                from the one you browse with.
-              </HelpTip>
-            </span>
-            <span className="mono">{data.profile_dir}</span>
-          </div>
-
           <ol className="help-steps">
             {(data.steps || []).map((step) => (
               <li key={step.n}>
                 <strong>{step.title}.</strong> {step.detail}
                 {step.commands?.length > 0 && (
-                  <div className="col" style={{ gap: 8, marginTop: 10 }}>
+                  <div className="col" style={{ gap: 10, marginTop: 10 }}>
+                    {/* The one per-machine part of every command below, and the
+                        part that used to run off the right-hand edge of the
+                        box. Shown first and separately copyable, so nothing a
+                        person cannot retype from memory depends on the wrap. */}
+                    <div>
+                      <div className="cmd-caption">
+                        <strong>Profile directory</strong>
+                        <HelpTip title="Dedicated profile">
+                          Automation uses its own profile directory, so your everyday browser, its
+                          history and its logins are untouched. It also makes the automation window
+                          visibly separate from the one you browse with.
+                        </HelpTip>
+                        <span>appears in every command below</span>
+                      </div>
+                      <div className="cmd cmd-profile">
+                        <code>{data.profile_dir}</code>
+                        {/* Every Copy button on this card reads the same word.
+                            The visible label stays short; the accessible name
+                            says which one, because a screen reader announces the
+                            button without the caption above it. */}
+                        <button
+                          className="btn btn-sm"
+                          aria-label="Copy the profile directory"
+                          onClick={() => copy('profile', data.profile_dir)}
+                        >
+                          {copied === 'profile' ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+
                     {step.commands.map((c) => (
                       <div key={c.key}>
-                        <div className="row row-wrap small" style={{ marginBottom: 4 }}>
+                        <div className="cmd-caption">
                           <strong>{c.display_name}</strong>
                           <Badge tone={c.family === 'firefox' ? 'accent' : 'info'}>{c.family}</Badge>
                         </div>
                         <div className="cmd">
                           <code>{c.command}</code>
-                          <button className="btn btn-sm" onClick={() => copy(c.key, c.command)}>
+                          <button
+                            className="btn btn-sm"
+                            aria-label={`Copy the ${c.display_name} command`}
+                            onClick={() => copy(c.key, c.command)}
+                          >
                             {copied === c.key ? 'Copied' : 'Copy'}
                           </button>
                         </div>
@@ -230,6 +252,14 @@ function LaunchInstructions({ query, os, onOs }) {
                         )}
                       </div>
                     ))}
+
+                    <p className="small muted" style={{ margin: 0 }}>
+                      Run the line whole. A Chromium browser started without its{' '}
+                      <span className="mono">--user-data-dir</span> refuses the debugging port and
+                      opens an ordinary window instead — and the only sign of that here is
+                      &lsquo;No browser attached&rsquo;.
+                    </p>
+
                     {copied === 'failed' && (
                       <span className="small muted">
                         The clipboard is not available here — select the command and copy it by

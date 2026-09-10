@@ -124,7 +124,12 @@ def test_a_source_that_states_a_total_of_zero_is_read_not_broken():
     outcome = collection.ItemOutcome(requests=1, pages=1, stated_empty=1)
     assert outcome.state() == "no_matches"
     assert collection._STATE_STATUS[outcome.state()] == "done"
-    assert "no vacancy for this query" in (collection._state_message(outcome) or "")
+    # The noun follows the source: a board holds vacancies, a register holds
+    # records, and the message says which rather than assuming the caller's.
+    assert "no record for this query" in (collection._state_message(outcome) or "")
+    assert "no vacancy for this query" in (
+        collection._state_message(outcome, holds="vacancy") or ""
+    )
 
 
 def test_a_source_that_fetched_and_parsed_nothing_is_still_a_failure():

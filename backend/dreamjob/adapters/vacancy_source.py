@@ -966,6 +966,17 @@ class VacancySourceAdapter(SourceAdapter):
         outcome.ok += 1
         return result
 
+    def record_stated_empty(self, count: int = 1) -> None:
+        """Also onto this run's :class:`FetchOutcome`, which :meth:`settle` reads.
+
+        The counter the collection worker reads lives on the base adapter, so
+        every source family can carry it; ``FetchOutcome`` keeps its own copy
+        because ``settle`` compares it with the answered-request count.  Bumping
+        both here is what stops the two from ever drifting apart.
+        """
+        super().record_stated_empty(count)
+        self.fetch_outcome.stated_empty += max(0, int(count))
+
     def settle(self, records: list[RawRecord], *, nothing_to_fetch: str = "") -> list[RawRecord]:
         """Close a ``fetch()`` by reporting what actually happened.
 

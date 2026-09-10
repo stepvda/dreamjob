@@ -72,6 +72,48 @@ def registry_secret(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class RegistryWall(RuntimeError):
+    """The register answered, and what it served was a wall rather than an answer.
+
+    A CAPTCHA interstitial comes back with HTTP 200, so nothing below the
+    adapter can see it: the egress layer records no refusal and the plan item
+    would settle as "fetched a page and extracted no record - the source layout
+    has probably changed".  Raised instead, it settles as a failure that says
+    what actually happened, and - the point of FR-181 - it can never be counted
+    as the register stating that it holds nothing.
+    """
+
+
+def stated_none(body: Any, *, listing: str, total: str = "") -> bool:
+    """Did this JSON body *state* that the source holds nothing (FR-181)?
+
+    Read positively, the way ``EuresAdapter._stated_total`` reads
+    ``numberRecords`` and ``KBOAdapter._states_no_result`` reads the register's
+    own "no result" line.  The negative read - "the list of hits came back
+    empty, so there are none" - cannot tell a clean miss from a register that
+    renamed the field the hits arrive in, and an adapter that answers "read
+    successfully, nothing to collect" to a renamed field can no longer report
+    its own breakage, which is the whole of NFR-403.
+
+    So: when the body carries the source's own count of what it found, that
+    count is the answer and nothing else is consulted - a stated three hits
+    with an unreadable hit list is a breakage, not an absence.  When there is
+    no count, the listing must at least still *be* there, and be a list, before
+    its emptiness is allowed to mean anything.
+    """
+    if not isinstance(body, dict):
+        # An outage, a non-2xx and a body that is not a JSON object arrive here
+        # alike.  None of them is the source saying anything.
+        return False
+    if total:
+        counted = body.get(total)
+        if isinstance(counted, bool) or not isinstance(counted, int):
+            return False
+        return counted == 0
+    rows = body.get(listing)
+    return isinstance(rows, list) and not rows
+
+
 @dataclass
 class SubsidiaryLink:
     """FR-246: a parent/child relation the registry exposes."""

@@ -31,6 +31,7 @@ from dreamjob.adapters.registries.common import (
     RegistryResult,
     SubsidiaryLink,
     identity_record,
+    stated_none,
 )
 
 log = logging.getLogger(__name__)
@@ -143,11 +144,21 @@ class OpenCorporatesAdapter(RegistryAdapter):
         if jurisdiction:
             url += f"&jurisdiction_code={jurisdiction.lower()}"
         payload = await self._json(url, egress=egress)
-        companies = ((payload or {}).get("results") or {}).get("companies") or []
-        for entry in companies:
+        if not isinstance(payload, dict):
+            # An outage, a non-2xx and an unparseable body all arrive as
+            # ``None``; none of them is an answer (FR-181, NFR-403).
+            return None
+        results = payload.get("results")
+        for entry in (results or {}).get("companies") or []:
             record = (entry or {}).get("company")
             if isinstance(record, dict) and record.get("inactive") is not True:
                 return record
+        if stated_none(results, listing="companies", total="total_count"):
+            # ``total_count`` is the directory's own count of what it found.
+            # Zero is it saying it holds no company under this name; anything
+            # else - including a ``results`` envelope that is no longer there -
+            # is not an answer and must stay a breakage (FR-181, NFR-403).
+            self.record_stated_empty()
         return None
 
     def to_identity(self, record: dict, company: dict) -> dict[str, Any]:
