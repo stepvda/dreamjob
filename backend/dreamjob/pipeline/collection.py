@@ -1669,10 +1669,68 @@ async def collection_worker(ctx: JobContext) -> None:
         detail={**stats.to_dict(), "outcome": outcome},
     )
     prune_raw_documents(campaign_id)
+    # Collection used to end here, leaving the vacancies it had just written
+    # one un-pressed button away from being of any use.  Synthesis is what
+    # turns them into the ranked list, so it follows the run that produced
+    # them (FR-261).
+    synthesis = await _synthesise_collected(ctx, campaign, outcome)
     # Last: the counters and the bar are exact at rest, whatever cadence they
     # were written on while the run was in flight.
     books.flush()
-    ctx.save_checkpoint(completed=completed, stats=stats.to_dict(), finished_at=utcnow())
+    ctx.save_checkpoint(
+        completed=completed,
+        stats=stats.to_dict(),
+        synthesis=synthesis,
+        finished_at=utcnow(),
+    )
+
+
+async def _synthesise_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict | None:
+    """Normalise what this run collected into opportunities (FR-261).
+
+    Three things this deliberately does not do.  It does not run when the run
+    collected nothing, because there is nothing to normalise and an empty pass
+    only muddies the audit trail.  It does not fail the collection when it
+    falls over: the records are written and the run was good, so the failure is
+    recorded against the campaign and the job still ends ``done``.  And it does
+    not keep the opportunity ids, which run to tens of thousands on a large
+    campaign and would bloat both the job row and the audit event.
+    """
+    if outcome not in ("completed", "partial"):
+        return None
+    synthesise = _load("dreamjob.pipeline.opportunities", "synthesise_campaign")
+    if synthesise is None:
+        return None
+
+    campaign_id = campaign["id"]
+    try:
+        # Synthesis is synchronous and, on a campaign that collected 40k
+        # vacancies, slow; it belongs off this job's loop so the run stays
+        # cancellable while it works (NFR-102).
+        report = await asyncio.to_thread(synthesise, campaign)
+    except JobCancelled:
+        raise
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        log.warning("Synthesis after collection failed for campaign %s: %s", campaign_id, reason)
+        repo.record_audit(
+            "campaign.synthesis_failed",
+            job_seeker_id=ctx.job_seeker_id,
+            entity_type="campaign",
+            entity_id=campaign_id,
+            detail={"error": reason},
+        )
+        return {"error": reason}
+
+    summary = {k: v for k, v in report.as_dict().items() if k != "opportunity_ids"}
+    repo.record_audit(
+        "campaign.synthesis_finished",
+        job_seeker_id=ctx.job_seeker_id,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        detail=summary,
+    )
+    return summary
 
 
 def prune_raw_documents(campaign_id: str | None = None, limit: int = RAW_DOCUMENT_SWEEP_LIMIT) -> int:

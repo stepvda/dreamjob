@@ -667,6 +667,11 @@ export default function OpportunitiesPage() {
   const [dragId, setDragId] = useState(null)
   const [overId, setOverId] = useState(null)
 
+  // Which campaign the first-run screen should build from. The list filter
+  // defaults to "every campaign", and synthesis is per-campaign, so without
+  // this the one button that unblocks an empty screen had nothing to aim at.
+  const [buildFrom, setBuildFrom] = useState('')
+
   // Typing in the search box should not fire a request per keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(filters.q), 350)
@@ -853,11 +858,19 @@ export default function OpportunitiesPage() {
     }
   }
 
-  async function synthesise() {
+  async function synthesise(target) {
+    const id = target || campaignId || buildFrom
+    if (!id) return
     setBusy(true)
     setActionError(null)
     try {
-      await api.post('/opportunities/synthesise', { campaign_id: campaignId, background: true })
+      await api.post('/opportunities/synthesise', { campaign_id: id, background: true })
+      // Point the list at what is being built, so the result lands on screen
+      // instead of behind the campaign filter the seeker never changed.
+      if (id !== campaignId) {
+        setCampaignId(id)
+        setOffset(0)
+      }
       setNotice('Building the list from what this campaign collected. Reload in a moment.')
     } catch (e) {
       setActionError(e)
@@ -1173,9 +1186,34 @@ export default function OpportunitiesPage() {
               pathname="/opportunities"
               action={
                 campaignId ? (
-                  <button className="btn btn-primary" disabled={busy} onClick={synthesise}>
+                  <button className="btn btn-primary" disabled={busy} onClick={() => synthesise()}>
                     Build the list from this campaign
                   </button>
+                ) : (campaigns.data || []).length > 0 ? (
+                  // No campaign is selected, which is the default. Rather than
+                  // send the seeker off to another screen to find out that the
+                  // button lives here, let them pick the campaign right here.
+                  <div className="row row-wrap" style={{ gap: 10, alignItems: 'center' }}>
+                    <select
+                      value={buildFrom}
+                      disabled={busy}
+                      onChange={(e) => setBuildFrom(e.target.value)}
+                    >
+                      <option value="">Choose a campaign…</option>
+                      {(campaigns.data || []).map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name} · {c.status}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="btn btn-primary"
+                      disabled={busy || !buildFrom}
+                      onClick={() => synthesise(buildFrom)}
+                    >
+                      Build the list from this campaign
+                    </button>
+                  </div>
                 ) : (
                   <Link className="btn btn-primary" to="/campaigns">
                     Open campaigns

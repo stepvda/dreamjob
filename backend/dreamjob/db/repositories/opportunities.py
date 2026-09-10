@@ -488,8 +488,13 @@ def clear_manual_order(
 # ---------------------------------------------------------------------------
 
 
-def campaign_vacancies(campaign_id: str, limit: int = 5000) -> list[dict]:
-    """Vacancies this campaign's plan items actually produced (FR-166)."""
+def campaign_vacancies(campaign_id: str) -> list[dict]:
+    """Vacancies this campaign's plan items actually produced (FR-166).
+
+    Every one of them: a campaign that collected 40k vacancies means to rank
+    40k, and a cap here silently threw away most of a long collection before
+    the seeker ever saw it.
+    """
     return query_all(
         """
         SELECT DISTINCT v.* FROM vacancy v
@@ -497,9 +502,8 @@ def campaign_vacancies(campaign_id: str, limit: int = 5000) -> list[dict]:
         JOIN source_plan_item s ON s.id = p.source_plan_item_id
         WHERE s.campaign_id = ?
         ORDER BY COALESCE(v.posted_at, v.collected_at) DESC
-        LIMIT ?
         """,
-        (campaign_id, limit),
+        (campaign_id,),
     )
 
 
