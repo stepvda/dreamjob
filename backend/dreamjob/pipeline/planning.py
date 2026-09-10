@@ -130,6 +130,21 @@ _KEYWORD_KEYS = (
 )
 _SKILL_KEYS = ("skills", "technologies", "tools", "core_competencies", "competencies")
 
+#: Inside a *structured* entry, the fields that name the thing itself.  Same
+#: reasoning as ``_PLACE_KEYS`` further down: a dream-job target role is stored
+#: as ``{title, seniority, priority, rationale, source, quote}``, and flattening
+#: every string in it turned the provenance into search terms - LinkedIn was
+#: searched for "inferred", for the whole sentence explaining why the role was
+#: chosen, and for the entry id "career_trajectory:1", while the real titles sat
+#: at positions 8 to 21 and were never reached.
+_TERM_KEYS = (
+    "title", "titles", "example_titles", "family", "families",
+    "name", "role", "roles", "label", "term", "text",
+)
+
+#: ``career_trajectory:1``, ``core_competencies:2`` - an entry's own id.
+_ENTRY_ID_RE = re.compile(r"^[a-z][a-z0-9_]*:\d+$", re.IGNORECASE)
+
 
 # ---------------------------------------------------------------------------
 # Plan model
@@ -196,12 +211,22 @@ def _walk(node: Any, keys: tuple[str, ...], out: list[str]) -> None:
 
 
 def _flatten_strings(node: Any, out: list[str]) -> None:
+    """Collect the strings that *name* something, ignoring what justifies it.
+
+    A structured entry says what it is in one of :data:`_TERM_KEYS` and spends
+    the rest of its fields on provenance - the rationale, the quote it was
+    inferred from, the word "inferred", its own id.  Those are worth storing and
+    worthless to search with, so an entry that names itself is read through its
+    naming fields only.  A plain mapping names nothing, so it is walked whole,
+    exactly as before.
+    """
     if isinstance(node, str):
         text = node.strip()
         if text:
             out.append(text)
     elif isinstance(node, dict):
-        for value in node.values():
+        named = [v for k, v in node.items() if str(k).lower() in _TERM_KEYS]
+        for value in named or list(node.values()):
             _flatten_strings(value, out)
     elif isinstance(node, list):
         for value in node:
@@ -292,7 +317,25 @@ def campaign_keywords(
             "adjacent_competencies", "domains",
         ):
             _flatten_strings(from_json(source.get(column), None), found)
-    return _unique(found, 25)
+    return _unique([t for t in found if _is_search_term(t)], 25)
+
+
+def _is_search_term(text: str) -> bool:
+    """Is this worth typing into a search box?
+
+    Free-text directives and competency entries hold prose as well as names, and
+    prose does not search: a board asked for "Design and build software
+    hands-on, using careful object-oriented design" matches nothing, and the
+    request is spent either way.  Kept deliberately blunt - length, sentence
+    shape, and the id pattern - so it rejects what is obviously not a term and
+    leaves every real title alone.
+    """
+    text = (text or "").strip()
+    if not text or len(text) > 60 or len(text.split()) > 6:
+        return False
+    if _ENTRY_ID_RE.match(text):
+        return False
+    return not text.endswith(".")
 
 
 def campaign_skills(composite: dict | None) -> list[str]:

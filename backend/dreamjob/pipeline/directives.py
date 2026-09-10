@@ -1043,6 +1043,38 @@ def _texts(node: Any, depth: int = 0) -> list[str]:
     return []
 
 
+#: Inside a structured entry, the fields that hold a role *name*.  The rest of
+#: a dream-job target role is provenance - ``rationale``, ``quote``, ``source``
+#: ("inferred"), the entry's own ``id`` - and flattening all of it into the
+#: proposed titles is how a directive set came to carry "inferred" and
+#: "career_trajectory:1" as target titles, which then became LinkedIn searches.
+_ROLE_NAME_KEYS: tuple[str, ...] = ("title", "role", "name", "example_titles")
+
+
+def _role_names(node: Any) -> list[str]:
+    """Role names out of either shape ``target_roles`` is stored in.
+
+    A bare list of titles (``["Head of Data"]``) is already names.  A list of
+    structured entries names each role in one of :data:`_ROLE_NAME_KEYS` and
+    justifies it in the rest, so only the naming fields are read.  An entry that
+    names itself in no recognised field is read whole, which is what every entry
+    used to be: returning nothing for an unfamiliar shape would be worse than
+    returning what it says.
+    """
+    if node is None:
+        return []
+    if isinstance(node, str):
+        return [node] if node.strip() else []
+    if isinstance(node, Mapping):
+        return _labelled_strings(node, _ROLE_NAME_KEYS) or _texts(node)
+    if isinstance(node, Sequence) and not isinstance(node, bytes):
+        out: list[str] = []
+        for value in node:
+            out.extend(_role_names(value))
+        return out
+    return []
+
+
 def _block(row: Mapping[str, Any] | None, column: str) -> Any:
     if not row:
         return None
@@ -1124,10 +1156,17 @@ def propose_directives(
     unresolved: list[str] = []
 
     # --- titles and function family (FR-142) -------------------------------
-    roles = [
-        *_texts(_block(dream_job_model, "target_roles"))[:6],
-        *_texts(_block(composite_profile, "career_trajectory"))[:4],
-    ]
+    # A target role names itself in one field and justifies itself in the rest.
+    roles = _role_names(_block(dream_job_model, "target_roles"))[:6]
+    # career_trajectory is biography - ``{id, text}`` where the text is a
+    # sentence about a job held, not the name of one.  Only a phrase the title
+    # catalogue actually recognises is mined from it; the rest is prose, and
+    # prose proposed as a target title searches for nothing.
+    roles += [
+        text
+        for text in _texts(_block(composite_profile, "career_trajectory"))[:12]
+        if lookup_title(text)
+    ][:4]
     titles: list[str] = []
     for role in roles:
         entry = lookup_title(role)
