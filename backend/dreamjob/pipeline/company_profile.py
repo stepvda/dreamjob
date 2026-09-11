@@ -45,6 +45,7 @@ from dreamjob.pipeline.enrichment import load_prompt
 log = logging.getLogger(__name__)
 
 PROMPT_NAME = "company_profile"
+DETAIL_PROMPT_NAME = "company_detail"
 LLM_TASK = "extract.company"
 
 #: NFR-402: fields below this confidence are flagged in the profile view.
@@ -459,7 +460,49 @@ def _synthesise(
     if not isinstance(data, dict):
         log.warning("Company synthesis returned %s, not an object", type(data).__name__)
         return {}, False
+
+    # The fields that sit late in the schema are the ones a truncated answer
+    # loses: the departmental map, the people, the references, the stack and the
+    # values.  They are asked for again on their own, where the answer fits, and
+    # merged onto the identity fields the first answer already produced.
+    detail = _synthesise_detail(llm, company, crawl, untrusted)
+    for key, value in (detail or {}).items():
+        if not data.get(key):
+            data[key] = value
     return data, True
+
+
+def _synthesise_detail(
+    llm: Any, company: dict, crawl: crawler.CrawlResult, untrusted: dict[str, str]
+) -> dict[str, Any]:
+    """The second, shorter synthesis: structure, people, stack, values (FR-223).
+
+    Failure is not a failure of the profile: it returns nothing and the identity
+    fields stand on their own.
+    """
+    try:
+        template = load_prompt(DETAIL_PROMPT_NAME)
+        system, user = template.render(
+            language="English",
+            company_name=company.get("name") or crawl.domain,
+            domain=company.get("domain") or crawl.domain,
+        )
+        result = llm.complete_json(
+            LLM_TASK,
+            system=system,
+            user=user,
+            untrusted=untrusted,
+            prefer_strong=False,
+            max_tokens=6000,
+            entity_type="company",
+            entity_id=company["id"],
+            prompt_template=template.name,
+            prompt_version=template.version,
+        )
+    except (BudgetExhausted, LLMError) as exc:
+        log.info("Company detail synthesis unavailable for %s: %s", company.get("name"), exc)
+        return {}
+    return result if isinstance(result, dict) else {}
 
 
 def _job_ad_block(company_id: str) -> str:

@@ -800,6 +800,7 @@ class EgressClient:
         use_cache: bool = True,
         access_method: str = "http",
         max_retries: int = 3,
+        respect_robots: bool | None = None,
         **kwargs: object,
     ) -> FetchResult:
         """Fetch ``url`` once - however many callers ask for it at once.
@@ -812,7 +813,8 @@ class EgressClient:
         if not (use_cache and method.upper() == "GET"):
             return await self._fetch_live(
                 url, key=None, conditional=None, method=method,
-                access_method=access_method, max_retries=max_retries, **kwargs,
+                access_method=access_method, max_retries=max_retries,
+                respect_robots=respect_robots, **kwargs,
             )
 
         key = self._cache_key(url, kwargs.get("headers"))
@@ -848,6 +850,7 @@ class EgressClient:
         # Expired but still holding the body and a validator: ask whether it
         # changed instead of downloading it again.
         conditional = entry if (entry is not None and entry.revalidatable) else None
+        # A cached GET is an ordinary crawl request, so the robots gate applies.
         return await self._fetch_live(
             url, key=key, conditional=conditional, method="GET",
             access_method=access_method, max_retries=max_retries, **kwargs,
@@ -862,11 +865,17 @@ class EgressClient:
         method: str,
         access_method: str,
         max_retries: int,
+        respect_robots: bool | None = None,
         **kwargs: object,
     ) -> FetchResult:
         client = self._client_or_raise()
         domain = domain_of(url)
-        if not await self.allowed(url):
+        # A caller may waive the robots gate for a request that is not a crawl:
+        # probing whether a host exists reads nothing of the site, and gating it
+        # on robots.txt rejected live sites whose robots file was merely
+        # unreachable - which lost real company domains.
+        robots_ok = self.respect_robots if respect_robots is None else respect_robots
+        if robots_ok and not await self.allowed(url):
             self.stats["blocked"] += 1
             reason = self._robots_failures.get(domain)
             if reason:

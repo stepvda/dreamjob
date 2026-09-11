@@ -207,7 +207,16 @@ async def resolve_company(
     for host in candidates(company, vacancy_urls):
         url = f"https://{host}"
         try:
-            result = await egress.fetch(url, use_cache=True, access_method="domain_probe")
+            # A probe is not a crawl: it asks whether the host is there, reads
+            # nothing of the site, and must not be refused because a robots file
+            # was momentarily unreachable - which is what lost real domains.
+            result = await egress.fetch(
+                url,
+                use_cache=False,
+                access_method="domain_probe",
+                respect_robots=False,
+                max_retries=1,
+            )
         except Exception:  # noqa: BLE001 - an unreachable candidate is just wrong
             continue
         if result.ok:
