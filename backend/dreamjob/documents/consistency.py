@@ -105,6 +105,53 @@ _SENTENCE_START = re.compile(r"(?:^|[.!?:;\n]\s*)$")
 #: Domains that are the job seeker's own tooling, not leaked material.
 _NEUTRAL_DOMAINS = {"linkedin.com", "www.linkedin.com", "github.com", "gitlab.com"}
 
+#: Generic vocabulary that a tailored CV capitalises because it is a heading or
+#: a skill phrase, not because it names an employer.  A run made only of these
+#: words ("Enterprise Architecture Expertise", "Hands-on Technical Leadership")
+#: is prose, and treating it as a name failed 46 of 70 otherwise-factual
+#: packages on the words *Expertise* and *Experience* (E2E_1500, section 8.8).
+#: This is the "prose stop-list" that finding asked for; it deliberately contains
+#: no word that could be part of a real organisation name.
+_PROSE_WORDS = {
+    # English
+    "and", "or", "the", "a", "an", "for", "with", "of", "in", "to", "on",
+    "expertise", "experience", "experienced", "skills", "skill", "knowledge",
+    "management", "leadership", "development", "engineering", "architecture",
+    "design", "cloud", "cloud-native", "data", "data-driven", "product",
+    "agile", "security", "software", "technical", "technology", "senior",
+    "principal", "strategy", "strategic", "delivery", "operations", "systems",
+    "solutions", "platform", "digital", "full-stack", "fullstack", "frontend",
+    "front-end", "backend", "back-end", "devops", "testing", "quality",
+    "hands-on", "end-to-end", "cross-functional", "stakeholder", "english",
+    "german", "french", "dutch", "years", "professional", "business",
+    "enterprise", "engineer", "leader", "lead", "manager", "specialist",
+    "consultant", "analyst", "developer", "architect", "officer", "director",
+    "head", "chief", "partner", "associate", "graduate", "internship",
+    "trainee", "driven", "focused", "oriented", "passionate", "motivated",
+    "results", "proven", "strong", "extensive", "deep", "broad", "collaboration",
+    "communication", "problem", "solving", "analytical", "creative",
+    "innovative", "modern", "scalable", "distributed", "real-time", "machine",
+    "learning", "artificial", "intelligence", "web", "mobile", "api", "apis",
+    "microservices", "database", "analytics", "infrastructure", "automation",
+    "integration", "transformation", "optimisation", "optimization",
+    "implementation", "monitoring", "governance", "compliance", "risk",
+    "customer", "client", "user", "service", "project", "portfolio",
+    "roadmap", "vision", "growth", "performance", "efficiency",
+    # Dutch
+    "en", "van", "voor", "met", "ervaring", "vaardigheden", "kennis",
+    "leiderschap", "ontwikkeling", "softwareontwikkeling", "architectuur",
+    "beheer", "veiligheid", "technisch", "technische", "productontwikkeling",
+    "pijplijn", "gegevens", "data-gedreven", "talen",
+    # French
+    "et", "de", "des", "du", "pour", "avec", "expérience", "compétences",
+    "connaissances", "gestion", "développement", "ingénierie", "architecture",
+    "sécurité", "technique", "gestionnaire", "données", "produit", "langues",
+    # German
+    "und", "der", "die", "das", "für", "mit", "erfahrung", "kenntnisse",
+    "kompetenzen", "führung", "entwicklung", "technik", "architektur",
+    "sicherheit", "daten", "produkt", "sprachen", "jahre", "jahren",
+}
+
 
 # ---------------------------------------------------------------------------
 # Findings and report
@@ -862,7 +909,10 @@ def unsupported_tokens(
             continue
         if matches_any(phrase, facts.employers) or facts.has_text(phrase):
             continue
-        if all(word in facts.words or word in allowed_words for word in key.split()):
+        if all(
+            word in facts.words or word in allowed_words or word in _PROSE_WORDS
+            for word in key.split()
+        ):
             continue
         out.append(phrase)
     return out

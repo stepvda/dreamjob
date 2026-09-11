@@ -1309,6 +1309,30 @@ def generate_plan(
     # ordered by recency and capped, so filtering it afterwards would only ever
     # see the most-recently-touched companies anywhere in the world; reading it
     # scoped is what makes the cap mean "the 200 in-scope companies".
+    # FR-143/FR-164: draw the universe from the registry when it is staged.
+    # Until this ran, the only companies a campaign could consider were the
+    # ones a previous scrape had happened to find - which excludes every
+    # company that has never advertised, the whole population a speculative
+    # opening is drawn from. It is a no-op when nothing is staged, and it only
+    # promotes the in-scope slice, so a two-million-row register becomes a few
+    # hundred company rows rather than two million.
+    try:
+        from dreamjob.pipeline import kbo_bulk  # noqa: PLC0415
+
+        seeded = kbo_bulk.select_for_directives(
+            directives,
+            limit=min(int(caps.get("max_companies") or 60), 200),
+            country=(countries or ["BE"])[0],
+        )
+        if seeded.get("materialised"):
+            log.info(
+                "Registry seed contributed %d companies for divisions %s",
+                seeded["materialised"],
+                seeded.get("divisions") or "(all)",
+            )
+    except Exception:  # noqa: BLE001 - a registry is a source, not a dependency
+        log.exception("Registry seed selection failed; planning from the knowledge base alone")
+
     if countries:
         inputs["companies_in_scope"] = repo.companies_in_scope(countries=countries)
     companies = _collection_targets(inputs, directives, countries)

@@ -611,12 +611,23 @@ class JobRunner:
         )
 
     async def resume_orphans(self) -> int:
-        """On startup, mark jobs left 'running' by a crash as resumable (NFR-401)."""
+        """On startup, requeue jobs a crash left unfinished (NFR-401).
+
+        Two populations are recoverable.  A job whose worker was killed outright
+        is still written 'running' or 'paused', and is marked resumable.  A job
+        whose worker raised *because* the process was going down is written
+        'failed' with a last_error that says so (``interrupted by restart;
+        resumable``); leaving those alone is what left a campaign holding 48,269
+        unscored opportunities after the ranking passes were cut short.
+        """
         return await asyncio.to_thread(self._resume_orphans)
 
     @staticmethod
     def _resume_orphans() -> int:
-        rows = query_all("SELECT id FROM job_run WHERE status IN ('running', 'paused')")
+        rows = query_all(
+            "SELECT id FROM job_run WHERE status IN ('running', 'paused') "
+            "   OR (status = 'failed' AND last_error LIKE '%resumable%')"
+        )
         for row in rows:
             update_row(
                 "job_run",
@@ -624,6 +635,30 @@ class JobRunner:
                 {"status": "pending", "last_error": "interrupted by restart; resumable"},
             )
         return len(rows)
+
+    async def dispatch_recoverable(self) -> int:
+        """Start the jobs ``resume_orphans`` just requeued (NFR-401).
+
+        Marking a job resumable without starting it is a promise the product
+        never kept: nothing else scans for ``pending`` rows, so an interrupted
+        campaign stayed interrupted until a person pressed Resume.  Only jobs
+        carrying the resumable marker are dispatched, so a deliberately created
+        but unstarted job is never picked up by the boot path.
+        """
+        rows = query_all(
+            "SELECT id, kind FROM job_run "
+            "WHERE status = 'pending' AND last_error LIKE '%resumable%'"
+        )
+        started = 0
+        for row in rows:
+            if row["kind"] not in self._workers or self.is_running(row["id"]):
+                continue
+            try:
+                await self.start(row["id"])
+                started += 1
+            except Exception:  # noqa: BLE001 - one unrecoverable row must not block boot
+                log.exception("Could not resume interrupted job %s", row["id"])
+        return started
 
 
 runner = JobRunner()

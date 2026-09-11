@@ -95,6 +95,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         orphans = await runner.resume_orphans()
         if orphans:
             log.info("Marked %d interrupted jobs as resumable", orphans)
+            resumed = await runner.dispatch_recoverable()
+            if resumed:
+                log.info("Resumed %d interrupted job(s)", resumed)
     except Exception:  # noqa: BLE001
         log.exception("Could not reconcile interrupted jobs")
 

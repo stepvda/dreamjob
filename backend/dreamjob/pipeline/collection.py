@@ -1753,25 +1753,50 @@ async def _rank_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict
     if outcome not in ("completed", "partial"):
         return None
 
-    report: dict[str, Any] = {"synthesis": await _pass(ctx, campaign, "synthesis", _synthesise)}
-    if "error" in report["synthesis"]:
+    # NFR-401: each pass records its own completion in the checkpoint.  A run
+    # that dies between synthesis and scoring then resumes at the pass it had
+    # not finished, instead of rebuilding tens of thousands of opportunity rows
+    # or - the failure this replaces - the campaign reading "completed" with
+    # every row unscored because nothing ever ran the passes.
+    completed_passes: set[str] = {
+        str(name) for name in (ctx.checkpoint.get("rank_passes") or [])
+    }
+    report: dict[str, Any] = dict(ctx.checkpoint.get("rank_report") or {})
+
+    async def once(name: str, fn: Any, *, async_pass: bool = False) -> dict:
+        """Run one pass unless its predecessor already recorded it done."""
+        if name in completed_passes:
+            previous = report.get(name)
+            return previous if isinstance(previous, dict) else {}
+        result = await (
+            _pass_async(ctx, campaign, name, fn)
+            if async_pass
+            else _pass(ctx, campaign, name, fn)
+        )
+        report[name] = result
+        completed_passes.add(name)
+        ctx.save_checkpoint(rank_passes=sorted(completed_passes), rank_report=report)
+        return result
+
+    synthesis = await once("synthesis", _synthesise)
+    if "error" in synthesis:
         return report
     # FR-149: a spontaneous-application campaign plans no job board and no ATS,
     # so synthesis alone can only ever hand it an empty list.  The track that
     # gives such a campaign its opportunities is the speculative one.
     if _is_spontaneous(campaign):
-        report["speculative"] = await _pass(ctx, campaign, "speculative", _speculate)
+        await once("speculative", _speculate)
     # FR-264 before FR-281: the compensation sub-score reads the stored
     # estimate rather than recomputing it, so scoring first would score every
     # unpriced opportunity against a range nothing had filled in.
-    report["compensation"] = await _pass(ctx, campaign, "compensation", _price)
+    await once("compensation", _price)
     # Company enrichment, before scoring: the employer kind decides what the
     # product may do with an employer, and company attractiveness reads the
     # website profile, the signals and the filings.  Every one of those passes
     # already existed and none ran automatically, so a campaign left every
     # employer a bare name with "employer type not verified" on every row.
-    report["enrichment"] = await _pass_async(ctx, campaign, "enrichment", _enrich)
-    report["scoring"] = await _pass(ctx, campaign, "scoring", _score)
+    await once("enrichment", _enrich, async_pass=True)
+    await once("scoring", _score)
 
     repo.record_audit(
         "campaign.ranked",
@@ -1780,6 +1805,9 @@ async def _rank_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict
         entity_id=campaign["id"],
         detail=report,
     )
+    # The terminal marker: a resumed worker that sees this knows the chain is
+    # whole and does not replay a pass over an already-ranked corpus.
+    ctx.save_checkpoint(ranked=True)
     return report
 
 

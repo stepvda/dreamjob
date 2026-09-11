@@ -129,6 +129,14 @@ class SourceAdapter(ABC):
     legal_notes: str = ""
     requires_ack: bool = False
 
+    #: A source whose payload is machine-readable (a JSON board, an RSS feed)
+    #: can answer "I hold nothing" cleanly.  When it does, the parser was never
+    #: given anything to extract, so the empty result is positive evidence of
+    #: emptiness rather than a failed extraction (NFR-403).  Adapters that set
+    #: this must return a well-formed payload; a layout change that makes the
+    #: payload unreadable raises in ``parse`` and still counts as breakage.
+    empty_parse_is_stated: bool = False
+
     def __init__(self, egress: EgressClient | None = None):
         self.egress = egress
         self._extraction_attempts = 0
@@ -228,7 +236,16 @@ class SourceAdapter(ABC):
                 log.exception("[%s] parse failed for %s", self.key, raw.url)
                 self.record_extraction(1, 0)
                 continue
-            self.record_extraction(len(parsed_items) or 1, len(parsed_items))
+            if parsed_items:
+                self.record_extraction(len(parsed_items), len(parsed_items))
+            elif self.empty_parse_is_stated:
+                # A well-formed board that lists nothing: the employer has no
+                # open roles.  This is positive evidence that the source holds
+                # nothing, not a parse failure, so it must not be charged to the
+                # extraction rate that NFR-403 reads for breakage.
+                self.record_stated_empty()
+            else:
+                self.record_extraction(1, 0)
             for parsed in parsed_items:
                 try:
                     rec = self.normalise(parsed, raw)

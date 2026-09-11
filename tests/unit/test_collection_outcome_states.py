@@ -256,6 +256,23 @@ class _Empty(_Base):
 
 
 @register_adapter
+class _EmptyStated(_Base):
+    """A machine-readable board that answered 200 with an empty list.
+
+    The payload is well-formed; it simply names no opening.  That is the
+    employer having no open roles, not a changed layout.
+    """
+
+    key = "outcome.empty_stated"
+    display_name = "Outcome Empty Stated"
+    source_type = SourceType.ATS
+    empty_parse_is_stated = True
+
+    def parse(self, raw: RawRecord) -> list[dict]:
+        return []
+
+
+@register_adapter
 class _Crash(_Base):
     """An adapter that raises after a good answer: our defect, and it stays loud."""
 
@@ -542,6 +559,45 @@ def test_fetching_nothing_is_still_told_from_finding_nothing(db, answers):
     assert silent["outcome_state"] != empty["outcome_state"], (
         "two different answers, two different labels"
     )
+
+
+def test_an_empty_machine_readable_board_is_no_matches_not_breakage(db, answers):
+    """231 ATS rows read as breakage for boards whose only problem was no roles.
+
+    They answered 200 with a well-formed empty list (``{"jobs": []}``, an RSS
+    channel with no ``<item>``).  That is the source stating emptiness, so it is
+    ``no_matches`` - and it must not be charged as an extraction attempt, which
+    is what dragged four working adapters below NFR-403's 0.5 threshold.
+    """
+    answers(200)
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("outcome.empty_stated")
+    _plan_item(campaign_id, "outcome.empty_stated", {"slug": "emptyco"})
+
+    _run(campaign_id, seeker)
+
+    item = _items(campaign_id)["outcome.empty_stated"]
+    assert item["status"] == "done"
+    assert item["outcome_state"] == "no_matches"
+    assert item["error_count"] == 0
+    assert _outcome(item)["stated_empty"] == 1
+    assert _outcome(item)["extraction_rate"] is None, "not an extraction failure"
+
+
+def test_an_empty_unstructured_board_is_still_breakage(db, answers):
+    """The fix is opt-in: a scrape that parses to nothing is still NFR-403 data."""
+    answers(200)
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("outcome.empty")
+    _plan_item(campaign_id, "outcome.empty", {"queries": ["data"]})
+
+    _run(campaign_id, seeker)
+
+    item = _items(campaign_id)["outcome.empty"]
+    assert item["outcome_state"] == "extracted_nothing"
+    assert item["error_count"] == 1
 
 
 def test_the_page_budget_is_capped_and_is_not_an_error(db, answers):

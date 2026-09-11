@@ -58,6 +58,13 @@ class ATSAdapter(VacancySourceAdapter):
     llm_fallback = False            # the payload is already structured
     base_confidence = 0.92
 
+    #: A board that parses to an empty list has said "no open roles", not "my
+    #: layout changed".  These endpoints are JSON or RSS and their empty answers
+    #: are well-formed (``{"jobs": []}``, an RSS channel with no ``<item>``), so
+    #: charging 231 of them as extraction failures only made working adapters
+    #: look broken to NFR-403 (Collection_Outcome_States.md section 6.1).
+    empty_parse_is_stated = True
+
     #: Value written to ``company.ats_vendor`` and matched against it.
     vendor: str = ""
 

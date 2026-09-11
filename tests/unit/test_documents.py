@@ -444,6 +444,29 @@ def test_judge_allows_the_company_and_role_the_application_is_for() -> None:
     )
 
 
+def test_judge_does_not_read_a_skill_headline_as_an_invented_name() -> None:
+    """E2E_1500 section 8.8: 46 of 70 packages failed on CV headline prose.
+
+    The judge escalated maximal runs of capitalised words - "Enterprise
+    Architecture Expertise", "Data-Driven Product Experience" - because words
+    like *Expertise* are not in the profile.  A real employer name still fails.
+    """
+    from dreamjob.documents.consistency import profile_facts, unsupported_tokens
+
+    facts = profile_facts(_inputs(seed()))
+    for headline in (
+        "Enterprise Architecture Expertise",
+        "Data-Driven Product Experience",
+        "Software Engineer & Technical Leader",
+        "German and English",
+        "Jahren Erfahrung",
+    ):
+        assert unsupported_tokens(headline, facts) == [], headline
+    assert "Globex International" in unsupported_tokens(
+        "Werkte bij Globex International.", facts
+    )
+
+
 def test_judge_escalation_honours_german_noun_capitalisation() -> None:
     """FR-322: in German, a capitalised word is a noun, not a name.
 
