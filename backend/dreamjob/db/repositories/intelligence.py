@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from dreamjob.db.connection import (
+    delete_then_insert,
     execute,
     from_json,
     insert_row,
@@ -106,26 +107,28 @@ def list_gap_analyses(job_seeker_id: str, limit: int = 20) -> list[dict]:
 def replace_stepping_stones(
     job_seeker_id: str, campaign_id: str | None, paths: list[dict[str, Any]]
 ) -> list[str]:
-    """Write the proposed paths for one campaign, replacing the previous set."""
-    execute(
+    """Write the proposed paths for one campaign, replacing the previous set.
+
+    The delete and the inserts run in one transaction: a failure partway through
+    used to leave the campaign with some of the old routes gone and only some of
+    the new ones written.
+    """
+    now = utcnow()
+    rows = [
+        {
+            **path,
+            "job_seeker_id": job_seeker_id,
+            "campaign_id": campaign_id,
+            "created_at": now,
+        }
+        for path in paths
+    ]
+    return delete_then_insert(
+        "stepping_stone_path",
+        rows,
         "DELETE FROM stepping_stone_path WHERE job_seeker_id = ? AND IFNULL(campaign_id, '') = ?",
         (job_seeker_id, campaign_id or ""),
     )
-    now = utcnow()
-    ids: list[str] = []
-    for path in paths:
-        ids.append(
-            insert_row(
-                "stepping_stone_path",
-                {
-                    **path,
-                    "job_seeker_id": job_seeker_id,
-                    "campaign_id": campaign_id,
-                    "created_at": now,
-                },
-            )
-        )
-    return ids
 
 
 def list_stepping_stones(job_seeker_id: str, campaign_id: str | None = None) -> list[dict]:

@@ -958,9 +958,14 @@ async def rerun(campaign_id: str, job_seeker_id: str, **options: Any) -> dict[st
     well collection ran (FR-221..226, NFR-603).
     """
     force = bool(options.get("force", False))
-    companies = campaign_companies(
-        campaign_id, limit=int(options.get("limit") or 25), include_fresh=force
-    )
+    limit = int(options.get("limit") or 25)
+    named = options.get("company_ids")
+    if named:
+        # The scheduled sweep enriches the shared knowledge base, which belongs
+        # to no campaign, so it names the companies directly.
+        companies = [str(c) for c in named if c][:limit]
+    else:
+        companies = campaign_companies(campaign_id, limit=limit, include_fresh=force)
     if not companies:
         return {
             "companies": 0,

@@ -248,70 +248,39 @@ def reply_row(job_seeker_id: str, reply_id: str) -> dict | None:
 
 def journey_counts(job_seeker_id: str) -> dict[str, Any]:
     """Counts behind the workflow map, in one round trip."""
-    def scalar(sql: str, params: tuple) -> int:
-        row = query_one(sql, params)
-        return int(row["n"]) if row else 0
-
-    return {
-        "companies": scalar(
-            """
-            SELECT COUNT(DISTINCT o.company_id) AS n FROM opportunity o
-            WHERE o.job_seeker_id = ? AND o.company_id IS NOT NULL
-            """,
-            (job_seeker_id,),
-        ),
-        "opportunities": scalar(
-            "SELECT COUNT(*) AS n FROM opportunity WHERE job_seeker_id = ?",
-            (job_seeker_id,),
-        ),
-        "scored": scalar(
-            "SELECT COUNT(*) AS n FROM opportunity WHERE job_seeker_id = ? AND score IS NOT NULL",
-            (job_seeker_id,),
-        ),
-        "speculative": scalar(
-            "SELECT COUNT(*) AS n FROM opportunity WHERE job_seeker_id = ? AND kind = 'speculative'",
-            (job_seeker_id,),
-        ),
-        "packages": scalar(
-            "SELECT COUNT(*) AS n FROM application_package WHERE job_seeker_id = ?",
-            (job_seeker_id,),
-        ),
-        "approved": scalar(
-            "SELECT COUNT(*) AS n FROM application_package WHERE job_seeker_id = ? AND status = 'approved'",
-            (job_seeker_id,),
-        ),
-        "sent": scalar(
-            "SELECT COUNT(*) AS n FROM dispatch WHERE job_seeker_id = ? AND sent_at IS NOT NULL",
-            (job_seeker_id,),
-        ),
-        "replies": scalar(
-            "SELECT COUNT(*) AS n FROM incoming_reply WHERE job_seeker_id = ?",
-            (job_seeker_id,),
-        ),
-        "cards": scalar(
-            "SELECT COUNT(*) AS n FROM pipeline_card WHERE job_seeker_id = ?",
-            (job_seeker_id,),
-        ),
-        "interviews": scalar(
-            "SELECT COUNT(*) AS n FROM pipeline_card WHERE job_seeker_id = ? AND stage IN ('interview','offer')",
-            (job_seeker_id,),
-        ),
-        "contacts": scalar(
-            """
-            SELECT COUNT(DISTINCT p.contact_id) AS n FROM application_package p
-            WHERE p.job_seeker_id = ? AND p.contact_id IS NOT NULL
-            """,
-            (job_seeker_id,),
-        ),
-        "watchlist": scalar(
-            "SELECT COUNT(*) AS n FROM watchlist_entry WHERE job_seeker_id = ? AND active = 1",
-            (job_seeker_id,),
-        ),
-        "open_advice": scalar(
-            "SELECT COUNT(*) AS n FROM redirection_advice WHERE job_seeker_id = ? AND status = 'open'",
-            (job_seeker_id,),
-        ),
-    }
+    row = query_one(
+        """
+        SELECT
+          (SELECT COUNT(DISTINCT company_id) FROM opportunity
+              WHERE job_seeker_id = :s AND company_id IS NOT NULL) AS companies,
+          (SELECT COUNT(*) FROM opportunity WHERE job_seeker_id = :s) AS opportunities,
+          (SELECT COUNT(*) FROM opportunity
+              WHERE job_seeker_id = :s AND score IS NOT NULL) AS scored,
+          (SELECT COUNT(*) FROM opportunity
+              WHERE job_seeker_id = :s AND kind = 'speculative') AS speculative,
+          (SELECT COUNT(*) FROM application_package WHERE job_seeker_id = :s) AS packages,
+          (SELECT COUNT(*) FROM application_package
+              WHERE job_seeker_id = :s AND status = 'approved') AS approved,
+          (SELECT COUNT(*) FROM dispatch
+              WHERE job_seeker_id = :s AND sent_at IS NOT NULL) AS sent,
+          (SELECT COUNT(*) FROM incoming_reply WHERE job_seeker_id = :s) AS replies,
+          (SELECT COUNT(*) FROM pipeline_card WHERE job_seeker_id = :s) AS cards,
+          (SELECT COUNT(*) FROM pipeline_card
+              WHERE job_seeker_id = :s AND stage IN ('interview', 'offer')) AS interviews,
+          (SELECT COUNT(DISTINCT contact_id) FROM application_package
+              WHERE job_seeker_id = :s AND contact_id IS NOT NULL) AS contacts,
+          (SELECT COUNT(*) FROM watchlist_entry
+              WHERE job_seeker_id = :s AND active = 1) AS watchlist,
+          (SELECT COUNT(*) FROM redirection_advice
+              WHERE job_seeker_id = :s AND status = 'open') AS open_advice
+        """,
+        {"s": job_seeker_id},
+    ) or {}
+    keys = (
+        "companies", "opportunities", "scored", "speculative", "packages", "approved",
+        "sent", "replies", "cards", "interviews", "contacts", "watchlist", "open_advice",
+    )
+    return {key: int(row.get(key) or 0) for key in keys}
 
 
 def journey_state(job_seeker_id: str) -> dict[str, Any]:

@@ -464,7 +464,7 @@ def build_composite(
         {
             "persona_id": persona_id or version.get("persona_id"),
             "profile_version_id": version["id"],
-            "version": repo.next_composite_version(job_seeker_id),
+            # The version is allocated inside the insert (see insert_composite).
             "narrative": blocks.get("narrative"),
             "career_trajectory": blocks.get("career_trajectory"),
             "core_competencies": blocks.get("core_competencies"),

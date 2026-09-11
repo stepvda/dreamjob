@@ -19,7 +19,7 @@ from typing import Any
 from dreamjob.db.connection import (
     execute,
     from_json,
-    insert_row,
+    insert_row_versioned,
     query_all,
     query_one,
     update_row,
@@ -61,16 +61,19 @@ def next_version(job_seeker_id: str, name: str) -> int:
 
 
 def create(job_seeker_id: str, payload: DirectiveSetPayload) -> str:
-    """Store a new directive set, versioned within its name (FR-148)."""
+    """Store a new directive set, versioned within its name (FR-148).
+
+    The version is allocated in the insert's own transaction, so two saves
+    racing on the same name cannot take the same number.
+    """
     values = to_columns(payload)
-    values.update(
-        {
-            "job_seeker_id": job_seeker_id,
-            "version": next_version(job_seeker_id, payload.name),
-            "created_at": utcnow(),
-        }
+    values.update({"job_seeker_id": job_seeker_id, "created_at": utcnow()})
+    return insert_row_versioned(
+        "directive_set",
+        values,
+        "SELECT MAX(version) FROM directive_set WHERE job_seeker_id = ? AND name = ?",
+        (job_seeker_id, payload.name),
     )
-    return insert_row("directive_set", values)
 
 
 def get(directive_set_id: str, job_seeker_id: str) -> dict[str, Any] | None:

@@ -297,12 +297,39 @@ def select_opportunity(
 def select_many(
     job_seeker_id: str, opportunity_ids: list[str], *, status: str = "selected"
 ) -> int:
-    """Select a whole filtered page in one transaction (FR-324 "select all")."""
-    return sum(
-        1
-        for opportunity_id in dict.fromkeys(opportunity_ids)
-        if select_opportunity(job_seeker_id, opportunity_id, status=status)
-    )
+    """Select a whole filtered page in one transaction (FR-324 "select all").
+
+    The per-row path opened a transaction per opportunity, so "select all" over
+    a page was hundreds of commits and a crash halfway left half a page
+    selected.  Ownership is checked in the same transaction, so a stale id in
+    the list cannot create a selection row for somebody else's opportunity.
+    """
+    now = utcnow()
+    flag = 0 if status == "skipped" else 1
+    selected = 0
+    with write_tx() as conn:
+        for opportunity_id in dict.fromkeys(opportunity_ids):
+            owned = conn.execute(
+                "SELECT 1 FROM opportunity WHERE id = ? AND job_seeker_id = ?",
+                (opportunity_id, job_seeker_id),
+            ).fetchone()
+            if not owned:
+                continue
+            conn.execute(
+                "INSERT INTO apply_selection "
+                "(id, job_seeker_id, opportunity_id, status, note, selected_at, updated_at) "
+                "VALUES (?, ?, ?, ?, NULL, ?, ?) "
+                "ON CONFLICT(job_seeker_id, opportunity_id) DO UPDATE SET "
+                "  status = excluded.status, updated_at = excluded.updated_at",
+                (new_id(), job_seeker_id, opportunity_id, status, now, now),
+            )
+            conn.execute(
+                "UPDATE opportunity SET selected = ?, updated_at = ? "
+                "WHERE id = ? AND job_seeker_id = ?",
+                (flag, now, opportunity_id, job_seeker_id),
+            )
+            selected += 1
+    return selected
 
 
 def deselect_opportunity(job_seeker_id: str, opportunity_id: str) -> int:

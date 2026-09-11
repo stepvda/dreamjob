@@ -177,14 +177,24 @@ async def enrich_companies(
     if campaign_id is None and job_seeker_id:
         campaign_id = _campaign_for_companies(job_seeker_id, ids)
     if campaign_id is None or job_seeker_id is None:
-        # Only the passes that need no campaign can run.
+        # The scheduled sweep runs over the shared knowledge base (FR-344), which
+        # belongs to no campaign.  Domains, profiles and reviews are all company
+        # facts and run here too: leaving them out is why the sweep only ever
+        # resolved employer kinds and 94% of companies stayed a bare name.
         report = EnrichmentReport(campaign_id=None, companies=len(ids))
+        report.domains = await _guarded("domains", _fill_domains(ids), report)
         report.employer_kind = await _guarded(
             "employer_kind",
             employer_resolver.resolve_many(len(ids), company_ids=ids),
             report,
         )
+        report.profiles = await _guarded(
+            "profiles",
+            company_profile.rerun(None, None, limit=len(ids), company_ids=ids),  # type: ignore[arg-type]
+            report,
+        )
         report.signals = await _guarded("signals", _refresh_signals(ids), report)
+        report.reviews = await _guarded("reviews", _refresh_reviews(ids), report)
         return report
     return await enrich_campaign(campaign_id, job_seeker_id, limit=len(ids), company_ids=ids)
 
@@ -195,10 +205,26 @@ async def enrich_companies(
 
 
 async def _fill_domains(company_ids: list[str]) -> dict:
-    """Find the websites of the companies about to be profiled (FR-221)."""
-    from dreamjob.pipeline import domain_resolver  # noqa: PLC0415
+    """Find the websites of the companies about to be profiled (FR-221).
 
-    return await domain_resolver.backfill(len(company_ids), company_ids=company_ids)
+    The full resolver, not the URL-only backfill: it derives candidates from the
+    vacancy text as well, which is where most domains are actually found (a
+    posting names the employer's site far more often than the collected URL
+    does).  The backfill found almost nothing here, so the profile pass had no
+    site to crawl and 90% of companies stayed a bare name.
+    """
+    from dreamjob.pipeline import company_domains  # noqa: PLC0415
+
+    if not company_ids:
+        return {}
+    report = await company_domains.resolve_domains(
+        len(company_ids), company_ids=company_ids, concurrency=8
+    )
+    data = report.as_dict()
+    # The pass's own corpus snapshot is for the CLI report, not for the job
+    # audit; dropping it keeps the stored report small.
+    data.pop("corpus", None)
+    return data
 
 
 async def _guarded(name: str, awaitable: Any, report: EnrichmentReport) -> dict:

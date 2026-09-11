@@ -1113,6 +1113,7 @@ async def resolve_domains(
     refresh: bool = False,
     stale_days: int = RESOLUTION_MAX_AGE_DAYS,
     egress: EgressClient | None = None,
+    company_ids: list[str] | None = None,
 ) -> DomainPassReport:
     """Give as many domainless companies a domain as can be had honestly.
 
@@ -1137,6 +1138,7 @@ async def resolve_domains(
         limit,
         include_resolved=refresh,
         resolved_before=_stale_before(stale_days) if refresh and stale_days > 0 else None,
+        company_ids=company_ids,
     )
     if not work:
         report.finished_at = utcnow()

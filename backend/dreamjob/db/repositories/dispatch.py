@@ -36,6 +36,7 @@ from dreamjob.db.connection import (
     update_row,
     upsert_row,
     utcnow,
+    write_tx,
 )
 
 #: Columns a caller may set on a dispatch.  Anything else is dropped rather
@@ -248,12 +249,23 @@ def create_oauth_state(
 
 
 def take_oauth_state(state: str, *, now: str | None = None) -> dict | None:
-    """Consume a state token.  Single use: the row is deleted as it is read."""
-    row = query_one("SELECT * FROM mail_oauth_state WHERE state = ?", (state,))
-    execute("DELETE FROM mail_oauth_state WHERE state = ?", (state,))
-    if row is None or row["expires_at"] <= (now or utcnow()):
+    """Consume a state token.  Single use: the row is deleted as it is read.
+
+    The read and the delete are one transaction.  As two, a replayed callback
+    could read the row before the first request deleted it and both would be
+    accepted - the state is exactly what stops a replayed redirect.
+    """
+    with write_tx() as conn:
+        row = conn.execute(
+            "SELECT * FROM mail_oauth_state WHERE state = ?", (state,)
+        ).fetchone()
+        conn.execute("DELETE FROM mail_oauth_state WHERE state = ?", (state,))
+    if row is None:
         return None
-    return row
+    consumed = dict(row)
+    if consumed["expires_at"] <= (now or utcnow()):
+        return None
+    return consumed
 
 
 def purge_expired_oauth_states(now: str | None = None) -> int:

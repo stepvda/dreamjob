@@ -33,13 +33,15 @@ def companies_without_domain(
     *,
     include_resolved: bool = False,
     resolved_before: str | None = None,
+    company_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Companies with vacancies and no domain, biggest vacancy count first.
 
     ``country`` is the company's own when it has one and otherwise the first
     country any of its vacancies names, resolved in SQL so the pass does not
     issue a follow-up query per company; the pipeline decides what to do when
-    both are empty.
+    both are empty.  ``company_ids`` narrows it to a known set, which is how the
+    enrichment pass resolves the companies it is about to profile.
     """
     freshness = ""
     params: list[Any] = []
@@ -51,34 +53,44 @@ def companies_without_domain(
             "  WHERE r.company_id = co.id AND r.resolved_at >= ?)"
         )
         params.append(resolved_before)
+    if company_ids:
+        chunk = [str(c) for c in company_ids][:900]
+        marks = ",".join("?" for _ in chunk)
+        freshness += f" AND co.id IN ({marks})"
+        params.extend(chunk)
     params.append(max(1, int(limit)))
     return query_all(
         f"""
-        SELECT co.id                AS company_id,
-               co.name              AS company_name,
-               co.careers_url       AS careers_url,
-               co.ats_vendor        AS ats_vendor,
-               co.ats_slug          AS ats_slug,
-               co.legal_id          AS legal_id,
-               co.vat_number        AS vat_number,
-               COALESCE(NULLIF(TRIM(co.country), ''),
-                        (SELECT vv.country FROM vacancy vv
-                          WHERE vv.company_id = co.id
-                            AND COALESCE(TRIM(vv.country), '') != ''
-                          LIMIT 1))  AS company_country,
-               CASE WHEN COALESCE(TRIM(co.country), '') != '' THEN 'company'
-                    WHEN (SELECT vv.country FROM vacancy vv
-                           WHERE vv.company_id = co.id
-                             AND COALESCE(TRIM(vv.country), '') != ''
-                           LIMIT 1) IS NOT NULL THEN 'vacancy'
-                    ELSE '' END      AS country_source,
+        SELECT c.id            AS company_id,
+               c.name          AS company_name,
+               c.careers_url   AS careers_url,
+               c.ats_vendor    AS ats_vendor,
+               c.ats_slug      AS ats_slug,
+               c.legal_id      AS legal_id,
+               c.vat_number    AS vat_number,
+               c.company_country AS company_country,
+               CASE WHEN c.company_own != '' THEN 'company'
+                    WHEN c.company_country != '' THEN 'vacancy'
+                    ELSE '' END AS country_source,
                COUNT(DISTINCT v.id) AS vacancy_count,
                MAX(COALESCE(v.posted_at, v.collected_at)) AS latest_vacancy_at
-          FROM company co
-          JOIN vacancy v ON v.company_id = co.id
-         WHERE COALESCE(TRIM(co.domain), '') = ''
-           AND COALESCE(TRIM(co.name), '') != ''{freshness}
-         GROUP BY co.id
+          FROM (
+              SELECT co.id, co.name, co.careers_url, co.ats_vendor, co.ats_slug,
+                     co.legal_id, co.vat_number,
+                     COALESCE(TRIM(co.country), '') AS company_own,
+                     -- The vacancy-country fallback is resolved once here, not
+                     -- twice in the projection and again in the CASE.
+                     COALESCE(NULLIF(TRIM(co.country), ''),
+                              (SELECT vv.country FROM vacancy vv
+                                WHERE vv.company_id = co.id
+                                  AND COALESCE(TRIM(vv.country), '') != ''
+                                LIMIT 1)) AS company_country
+                FROM company co
+               WHERE COALESCE(TRIM(co.domain), '') = ''
+                 AND COALESCE(TRIM(co.name), '') != ''{freshness}
+          ) c
+          JOIN vacancy v ON v.company_id = c.id
+         GROUP BY c.id
          ORDER BY vacancy_count DESC, latest_vacancy_at DESC
          LIMIT ?
         """,

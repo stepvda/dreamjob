@@ -24,6 +24,7 @@ from dreamjob.db.connection import (
     execute,
     from_json,
     insert_row,
+    insert_row_versioned,
     query_all,
     query_one,
     to_json,
@@ -229,9 +230,13 @@ def next_composite_version(job_seeker_id: str) -> int:
 
 
 def insert_composite(job_seeker_id: str, values: dict) -> str:
-    return insert_row(
+    # The version is allocated in the insert's own transaction: reading MAX and
+    # inserting separately could collide on UNIQUE(job_seeker_id, version).
+    return insert_row_versioned(
         "composite_profile",
         {"job_seeker_id": job_seeker_id, "created_at": utcnow(), **values},
+        "SELECT MAX(version) FROM composite_profile WHERE job_seeker_id = ?",
+        (job_seeker_id,),
     )
 
 
@@ -288,9 +293,11 @@ def next_dream_version(job_seeker_id: str) -> int:
 
 
 def insert_dream_model(job_seeker_id: str, values: dict) -> str:
-    return insert_row(
+    return insert_row_versioned(
         "dream_job_model",
         {"job_seeker_id": job_seeker_id, "created_at": utcnow(), **values},
+        "SELECT MAX(version) FROM dream_job_model WHERE job_seeker_id = ?",
+        (job_seeker_id,),
     )
 
 

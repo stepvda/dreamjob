@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 import urllib.robotparser
@@ -484,7 +485,14 @@ class EgressClient:
         return hashlib.sha256(normalise_url(url).encode()).hexdigest()
 
     @classmethod
-    def _cache_key(cls, url: str, headers: object = None) -> str:
+    def _cache_key(
+        cls,
+        url: str,
+        headers: object = None,
+        *,
+        method: str = "GET",
+        body: object = None,
+    ) -> str:
         """The cache and single-flight key for one *representation* of a URL.
 
         A key on the URL alone answers a request for the PDF with the JSON body
@@ -494,17 +502,30 @@ class EgressClient:
         Coalescing would make that concurrent as well as cached, so the
         representation belongs in the key.
 
+        A POST is keyed on its body too.  The EUREs search is a POST to one
+        route with a different body per query; keying those on the URL alone
+        would answer one search with another's results, and not caching them at
+        all re-ran every sweep (FR-342, plan item N7).
+
         Only an explicit ``Accept`` counts, so every caller that sends none -
         which is nearly all of them - keeps the key it already had.
         """
+        parts = [normalise_url(url)]
         accept = ""
         if isinstance(headers, dict):
             accept = next(
                 (str(v) for k, v in headers.items() if str(k).lower() == "accept"), ""
             ).strip()
-        if not accept or accept == "*/*":
-            return cls._url_hash(url)
-        return hashlib.sha256(f"{normalise_url(url)}\n{accept}".encode()).hexdigest()
+        if accept and accept != "*/*":
+            parts.append(accept)
+        if (method or "GET").upper() != "GET":
+            parts.append((method or "GET").upper())
+            if body is not None:
+                try:
+                    parts.append(json.dumps(body, sort_keys=True, separators=(",", ":")))
+                except (TypeError, ValueError):
+                    parts.append(str(body))
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
     def _cache_entry(self, key: str) -> _CacheEntry | None:
         row = query_one("SELECT * FROM http_cache WHERE url_hash = ?", (key,))
@@ -673,7 +694,12 @@ class EgressClient:
         log.debug("Remembering HTTP %s for %s for %ss", status, url, ttl)
 
     def negative_ttl(self, status: int) -> int:
-        """How long a failure is believed.  0 means "ask again next time"."""
+        """How long a failure is believed.  0 means "ask again next time".
+
+        401/403 are deliberately not cached: a refusal is often a transient bot
+        block that a later pass gets past, and believing it for hours would skip
+        a site that has become readable (test_egress_cache).
+        """
         if status in GONE_STATUSES:
             return max(0, int(self.negative_cache_ttl))
         if status == 429 or 500 <= status < 600:
@@ -815,14 +841,20 @@ class EgressClient:
         fans out (FR-182).  Concurrent GETs of one URL share one response; the
         second caller costs no request, no rate-limit slot and no bytes.
         """
-        if not (use_cache and method.upper() == "GET"):
+        # A GET, and a read-like POST (a search endpoint), are both cacheable;
+        # the key carries the body so two searches are two representations.
+        method_upper = (method or "GET").upper()
+        if not (use_cache and method_upper in ("GET", "POST")):
             return await self._fetch_live(
                 url, key=None, conditional=None, method=method,
                 access_method=access_method, max_retries=max_retries,
                 respect_robots=respect_robots, **kwargs,
             )
 
-        key = self._cache_key(url, kwargs.get("headers"))
+        body = kwargs.get("json")
+        if body is None:
+            body = kwargs.get("data") if kwargs.get("data") is not None else kwargs.get("content")
+        key = self._cache_key(url, kwargs.get("headers"), method=method_upper, body=body)
         pending = self._inflight.get(key)
         if pending is not None:
             self.savings["coalesced"] += 1
@@ -833,8 +865,8 @@ class EgressClient:
         self._inflight[key] = future
         try:
             result = await self._fetch_cached(
-                url, key, access_method=access_method, max_retries=max_retries,
-                respect_robots=respect_robots, **kwargs
+                url, key, method=method_upper, access_method=access_method,
+                max_retries=max_retries, respect_robots=respect_robots, **kwargs
             )
         except BaseException as exc:
             future.set_exception(exc)
@@ -846,7 +878,14 @@ class EgressClient:
             self._inflight.pop(key, None)
 
     async def _fetch_cached(
-        self, url: str, key: str, *, access_method: str, max_retries: int, **kwargs: object
+        self,
+        url: str,
+        key: str,
+        *,
+        method: str = "GET",
+        access_method: str,
+        max_retries: int,
+        **kwargs: object,
     ) -> FetchResult:
         entry = self._cache_entry(key)
         if entry and entry.fresh:
@@ -854,11 +893,12 @@ class EgressClient:
             if served is not None:
                 return served
         # Expired but still holding the body and a validator: ask whether it
-        # changed instead of downloading it again.
+        # changed instead of downloading it again.  A POST has no validators to
+        # revalidate with, so it simply runs again.
         conditional = entry if (entry is not None and entry.revalidatable) else None
-        # A cached GET is an ordinary crawl request, so the robots gate applies.
+        # A cached read is an ordinary crawl request, so the robots gate applies.
         return await self._fetch_live(
-            url, key=key, conditional=conditional, method="GET",
+            url, key=key, conditional=conditional, method=method,
             access_method=access_method, max_retries=max_retries, **kwargs,
         )
 

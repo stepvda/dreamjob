@@ -462,6 +462,65 @@ def insert_row(table: str, values: dict, db_path: Path | None = None) -> str:
     return values["id"]
 
 
+def insert_row_versioned(
+    table: str,
+    values: dict,
+    version_sql: str,
+    version_params: tuple | dict = (),
+    *,
+    version_column: str = "version",
+    db_path: Path | None = None,
+) -> str:
+    """Insert a row whose version is allocated inside the insert transaction.
+
+    A ``MAX(version) + 1`` read followed by a *separate* insert can see the same
+    maximum twice and collide on the table's ``UNIQUE`` version key.  The
+    single-writer gate makes that unlikely, not impossible - the two statements
+    were two transactions.  Reading and inserting on one connection removes it.
+    Returns the id.
+    """
+    values = dict(values)
+    values.setdefault("id", new_id())
+    payload = {k: (to_json(v) if isinstance(v, (dict, list)) else v) for k, v in values.items()}
+    payload.pop(version_column, None)
+    with db_logging.writing(table, "INSERT", values["id"]), write_tx(db_path) as conn:
+        row = conn.execute(version_sql, version_params).fetchone()
+        payload[version_column] = int((row[0] if row else 0) or 0) + 1
+        cols = ", ".join(payload)
+        marks = ", ".join(f":{k}" for k in payload)
+        conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", payload)
+    return values["id"]
+
+
+def delete_then_insert(
+    table: str,
+    rows: list[dict],
+    delete_sql: str,
+    delete_params: tuple | dict = (),
+    db_path: Path | None = None,
+) -> list[str]:
+    """Replace a set: one DELETE and every INSERT in a single transaction.
+
+    "This list is now this" was a delete followed by one insert per row, each
+    its own transaction - a failure in the middle left the set partly replaced.
+    """
+    ids: list[str] = []
+    with write_tx(db_path) as conn:
+        conn.execute(delete_sql, delete_params)
+        for values in rows:
+            payload_values = dict(values)
+            payload_values.setdefault("id", new_id())
+            payload = {
+                k: (to_json(v) if isinstance(v, (dict, list)) else v)
+                for k, v in payload_values.items()
+            }
+            cols = ", ".join(payload)
+            marks = ", ".join(f":{k}" for k in payload)
+            conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", payload)
+            ids.append(payload_values["id"])
+    return ids
+
+
 def upsert_row(
     table: str, values: dict, conflict_cols: list[str], db_path: Path | None = None
 ) -> None:
