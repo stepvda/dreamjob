@@ -183,6 +183,7 @@ export function ValidationBadge({ result }) {
 export function JobProgress({ job, report, onPause, onResume, onCancel }) {
   if (!job) return null
   const running = job.status === 'running'
+  const queued = job.status === 'pending'
   const terminal = ['done', 'failed', 'cancelled'].includes(job.status)
   // For a finished job the bar reflects what actually happened, not the
   // original plan. The planned total is often a generous ceiling (e.g. "12
@@ -194,9 +195,11 @@ export function JobProgress({ job, report, onPause, onResume, onCancel }) {
       : job.progress_total
         ? Math.round((job.progress_done / job.progress_total) * 100)
         : null
-    : job.progress_total
-      ? Math.round((job.progress_done / job.progress_total) * 100)
-      : null
+    : queued
+      ? null
+      : job.progress_total
+        ? Math.round((job.progress_done / job.progress_total) * 100)
+        : null
   // Live counters: the explicit prop wins, otherwise read the lightweight copy
   // the worker keeps in the checkpoint while it runs. Absent entirely, nothing
   // extra is rendered.
@@ -228,19 +231,23 @@ export function JobProgress({ job, report, onPause, onResume, onCancel }) {
       </div>
       <div className="progress-track">
         <div
-          className={`progress-fill${pct == null && running ? ' indeterminate' : ''}`}
+          className={`progress-fill${pct == null && (running || queued) ? ' indeterminate' : ''}`}
           style={pct == null ? undefined : { width: `${pct}%` }}
         />
       </div>
       <div className="row small muted" style={{ marginTop: 6 }}>
         <span>
-          {terminal
-            ? job.status === 'done'
-              ? 'Complete'
-              : `${job.progress_done ?? 0} of ${job.progress_total || '?'} attempted`
-            : `${job.progress_done ?? 0}${job.progress_total ? ` / ${job.progress_total}` : ''}`}
+          {queued
+            ? 'Queued — waiting for a free worker slot'
+            : terminal
+              ? job.status === 'done'
+                ? 'Complete'
+                : `${job.progress_done ?? 0} of ${job.progress_total || '?'} attempted`
+              : `${job.progress_done ?? 0}${job.progress_total ? ` / ${job.progress_total}` : ''}`}
         </span>
-        {job.estimated_seconds != null && <span>· {formatDuration(job.estimated_seconds)} estimated</span>}
+        {!queued && job.estimated_seconds != null && (
+          <span>· {formatDuration(job.estimated_seconds)} estimated</span>
+        )}
         {job.error_count > 0 && <span className="badge badge-warn">{job.error_count} errors</span>}
         <div className="spacer" />
         {job.last_error && <span title={job.last_error}>{shorten(job.last_error)}</span>}

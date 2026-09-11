@@ -147,6 +147,7 @@ function ContactList() {
         job_id: started.job_id,
         job: null,
         done: false,
+        reused: started.reused === true,
         startedAt: Date.now(),
         scope,
         limit,
@@ -257,6 +258,11 @@ function ContactList() {
         {batchError && <ErrorBox error={batchError} onRetry={() => setBatchError(null)} />}
         {batch && (
           <div style={{ marginTop: 12 }}>
+            {batch.reused && !batch.done && (
+              <p className="small muted" style={{ margin: '0 0 8px' }}>
+                Continuing the run already in progress.
+              </p>
+            )}
             <JobProgress
               report={batch.job?.checkpoint?.report}
               job={

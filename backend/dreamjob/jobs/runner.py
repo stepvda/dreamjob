@@ -100,6 +100,14 @@ _LOOP_PROBE_INTERVAL_SECONDS = 0.25
 #: that starves the serving loop.
 TERMINAL_CAMPAIGN_STATES = frozenset({"completed", "finished", "failed", "cancelled"})
 
+#: The ``last_error`` a queued job carries so a restart can find it.
+#:
+#: The pool is in memory, so a job ``start()``ed while every slot is busy sits
+#: ``pending`` in a queue that a restart throws away.  Writing this marker
+#: before the submit makes the queue durable: ``dispatch_recoverable`` selects
+#: on it, and ``_run`` clears it the moment the job actually starts.
+QUEUED_ERROR_MARKER = "queued; resumable"
+
 
 class JobCancelled(Exception):
     """Raised inside a worker when the user cancels the job."""
@@ -359,6 +367,16 @@ class JobRunner:
         if fn is None:
             raise KeyError(f"No worker registered for job kind {row['kind']!r}")
 
+        # The pool is in memory (see the module docstring): if every slot is
+        # busy, this job waits in a queue a restart discards.  Mark the row as
+        # queued-and-resumable *before* the submit so that boot can find it
+        # again.  Only a ``pending`` row is marked; a terminal row (a job that
+        # finished between the read above and here) must not be reopened.
+        if row["status"] == "pending":
+            await asyncio.to_thread(
+                update_row, "job_run", job_id, {"last_error": QUEUED_ERROR_MARKER}
+            )
+
         control = JobControl()
         self._controls[job_id] = control
         ctx = JobContext(
@@ -438,7 +456,11 @@ class JobRunner:
 
     async def _run(self, ctx: JobContext, fn: Worker) -> None:
         started = time.monotonic()
-        update_row("job_run", ctx.job_id, {"status": "running", "started_at": utcnow()})
+        update_row(
+            "job_run",
+            ctx.job_id,
+            {"status": "running", "started_at": utcnow(), "last_error": None},
+        )
         try:
             result = fn(ctx)
             if hasattr(result, "__aiter__"):
@@ -679,8 +701,10 @@ class JobRunner:
         Marking a job resumable without starting it is a promise the product
         never kept: nothing else scans for ``pending`` rows, so an interrupted
         campaign stayed interrupted until a person pressed Resume.  Only jobs
-        carrying the resumable marker are dispatched, so a deliberately created
-        but unstarted job is never picked up by the boot path.
+        carrying the resumable marker are dispatched.  ``start`` writes that
+        marker when it queues a job, so a job that was started and then lost
+        with the in-memory queue is recovered; a job that was created and never
+        ``start()``ed has no marker and is still not picked up by the boot path.
         """
         rows = query_all(
             "SELECT id, kind FROM job_run "

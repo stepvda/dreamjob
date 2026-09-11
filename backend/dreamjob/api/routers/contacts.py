@@ -31,7 +31,7 @@ from dreamjob.api.deps import (
 from dreamjob.db.connection import from_json, to_json, update_row
 from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as repo
-from dreamjob.jobs.runner import runner
+from dreamjob.jobs.runner import QUEUED_ERROR_MARKER, runner
 from dreamjob.pipeline import apply_contacts as scale_pipeline
 from dreamjob.pipeline import contact_email_backfill as backfill
 from dreamjob.pipeline import contacts as pipeline
@@ -378,6 +378,25 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
     checkpoint, so a run interrupted by a restart resumes with the same limits
     (NFR-401).
     """
+    # Repeated clicks must not fill every pool slot with the same sweep: if a
+    # job of this kind is already running, or queued behind a full pool, for
+    # this seeker and scope, hand that one back instead of starting a second.
+    existing = repo.find_reusable_contact_job(
+        scale_pipeline.DISCOVERY_JOB_KIND,
+        seeker.id,
+        body.scope,
+        queued_marker=QUEUED_ERROR_MARKER,
+    )
+    if existing is not None:
+        return {
+            "job_id": existing["id"],
+            "kind": scale_pipeline.DISCOVERY_JOB_KIND,
+            "campaign_id": body.campaign_id,
+            "scope": body.scope,
+            "limit": body.limit,
+            "reused": True,
+        }
+
     options = body.model_dump()
     options.pop("campaign_id", None)
     # ``shortlist`` counts vacancies; ``all`` counts companies.  Once the pool
@@ -402,6 +421,7 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
         "campaign_id": body.campaign_id,
         "scope": body.scope,
         "limit": body.limit,
+        "reused": False,
     }
 
 
@@ -677,6 +697,22 @@ async def start_emails_backfill(body: BackfillRequest, seeker: Seeker) -> dict[s
     """
     if body.scope == "all" and not seeker.is_admin:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
+    # One sweep per scope: a running, or genuinely queued, job is handed back
+    # rather than a second identical one competing for the same pool slots.
+    existing = repo.find_reusable_contact_job(
+        backfill.BACKFILL_JOB_KIND,
+        seeker.id,
+        body.scope,
+        queued_marker=QUEUED_ERROR_MARKER,
+    )
+    if existing is not None:
+        return {
+            "job_id": existing["id"],
+            "kind": backfill.BACKFILL_JOB_KIND,
+            "scope": body.scope,
+            "limit": body.limit,
+            "reused": True,
+        }
     options = body.model_dump()
     job_id = runner.create(
         backfill.BACKFILL_JOB_KIND,
@@ -691,6 +727,7 @@ async def start_emails_backfill(body: BackfillRequest, seeker: Seeker) -> dict[s
         "kind": backfill.BACKFILL_JOB_KIND,
         "scope": body.scope,
         "limit": body.limit,
+        "reused": False,
     }
 
 

@@ -115,7 +115,12 @@ function EmailBackfillPanel({ onContactsChanged }) {
         crawl_site: crawlSite,
         use_lookup_service: false,
       })
-      setBatch({ job_id: started.job_id, job: null, done: false })
+      setBatch({
+        job_id: started.job_id,
+        job: null,
+        done: false,
+        reused: started.reused === true,
+      })
     } catch (e) {
       setError(e)
     }
@@ -259,6 +264,11 @@ function EmailBackfillPanel({ onContactsChanged }) {
 
       {batch && (
         <div style={{ marginTop: 12 }}>
+          {batch.reused && !batch.done && (
+            <p className="small muted" style={{ margin: '0 0 8px' }}>
+              Continuing the run already in progress.
+            </p>
+          )}
           <JobProgress
             report={batch.job?.checkpoint?.report}
             job={

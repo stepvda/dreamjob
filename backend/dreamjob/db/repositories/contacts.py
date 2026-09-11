@@ -689,6 +689,39 @@ def list_objections(limit: int = 500) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Contact jobs (FR-185, FR-301, FR-303)
+# ---------------------------------------------------------------------------
+
+
+def find_reusable_contact_job(
+    kind: str, job_seeker_id: str, scope: str, *, queued_marker: str
+) -> dict | None:
+    """The running or genuinely-queued contacts job for this seeker and scope.
+
+    A job counts when it is ``running``, or ``pending`` carrying the runner's
+    queued marker - ``jobs/runner.py`` writes that marker when it hands a job
+    to the in-memory pool, so a queued job can be found again and reused rather
+    than duplicated.  A bare ``pending`` row (no marker) is deliberately *not*
+    reused: it is a job the old behaviour stranded, and the caller should start
+    a fresh one instead.  The scope lives in the checkpoint options, which is
+    JSON, so it is compared here after decoding rather than in SQL.
+    """
+    rows = query_all(
+        "SELECT id, checkpoint FROM job_run "
+        "WHERE kind = ? AND job_seeker_id = ? "
+        "  AND (status = 'running' OR (status = 'pending' AND last_error = ?)) "
+        "ORDER BY created_at DESC",
+        (kind, job_seeker_id, queued_marker),
+    )
+    for row in rows:
+        checkpoint = from_json(row.get("checkpoint"), {}) or {}
+        options = checkpoint.get("options") or {}
+        if options.get("scope") == scope:
+            return row
+    return None
+
+
+# ---------------------------------------------------------------------------
 # NFR-303 retention
 # ---------------------------------------------------------------------------
 
