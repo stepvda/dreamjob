@@ -139,7 +139,10 @@ export function documentName(pkg, kind, extension) {
  * so nothing about the existing behaviour changes.
  */
 export function PdfViewer({ packageId, kind, label = 'document', height = 620 }) {
-  const [open, setOpen] = useState(false)
+  // Open by default: the point of the panel is to let a reviewer read the
+  // document, and a document behind a button is one they have to go looking
+  // for. The toggle is there to fold it away once read, not to reveal it.
+  const [open, setOpen] = useState(true)
   if (!packageId || !kind) return null
   const url = `/api/applications/${packageId}/documents/${kind}`
   return (
@@ -151,6 +154,9 @@ export function PdfViewer({ packageId, kind, label = 'document', height = 620 })
         <a className="btn btn-sm btn-ghost" href={url} target="_blank" rel="noreferrer">
           Open in a new tab
         </a>
+        <span className="small muted">
+          Rendered here from the generated PDF; nothing is downloaded.
+        </span>
       </div>
       {open && (
         <iframe
