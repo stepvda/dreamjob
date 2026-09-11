@@ -837,11 +837,22 @@ def reachability_inputs(job_seeker_id: str, company_id: str | None) -> dict[str,
     }
 
 
-def contacts_for_company(company_id: str) -> list[dict]:
-    return query_all(
-        "SELECT * FROM contact WHERE company_id = ? AND objected = 0 ORDER BY confidence DESC",
-        (company_id,),
-    )
+def contacts_for_company(company_id: str, job_seeker_id: str | None = None) -> list[dict]:
+    """Non-objected contacts at a company, scoped to the seeker's own campaigns.
+
+    A browser-collected contact belongs to the campaign that collected it
+    (NFR-303); the opportunity screen must not hand one seeker another's.
+    """
+    sql = "SELECT * FROM contact WHERE company_id = ? AND objected = 0"
+    params: list[Any] = [company_id]
+    if job_seeker_id:
+        sql += (
+            " AND (shareable = 1 OR owning_campaign_id IS NULL"
+            " OR owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?))"
+        )
+        params.append(job_seeker_id)
+    sql += " ORDER BY confidence DESC"
+    return query_all(sql, tuple(params))
 
 
 def introduction_paths(job_seeker_id: str, opportunity_id: str) -> list[dict]:

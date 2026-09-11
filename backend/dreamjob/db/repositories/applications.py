@@ -561,7 +561,9 @@ def generation_inputs(job_seeker_id: str, opportunity_id: str) -> dict[str, Any]
         "financial_analysis": financial_analysis(opportunity.get("company_id")),
         "hiring_signals": hiring_signals(opportunity.get("company_id")),
         "competitors": competitors(opportunity.get("company_id")),
-        "contacts": contacts_for_company(opportunity.get("company_id")),
+        "contacts": contacts_for_company(
+            opportunity.get("company_id"), job_seeker_id=job_seeker_id
+        ),
         "introduction_paths": introduction_paths(job_seeker_id, opportunity_id),
         "do_not_disclose": disclosure_paths(job_seeker_id),
         "company_snapshot_at": (company_row or {}).get("refreshed_at")

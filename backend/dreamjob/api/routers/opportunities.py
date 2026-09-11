@@ -558,8 +558,11 @@ def get_opportunity(seeker: Seeker, opportunity_id: str) -> dict:
     """One opportunity with its sub-scores, fit meter, contacts and links (FR-283)."""
     opportunity = _opportunity_or_404(opportunity_id, seeker.id)
     presented = _present(opportunity, seeker.locale)
-    presented["contacts"] = repo.contacts_for_company(opportunity.get("company_id")) \
-        if opportunity.get("company_id") else []
+    presented["contacts"] = (
+        repo.contacts_for_company(opportunity.get("company_id"), seeker.id)
+        if opportunity.get("company_id")
+        else []
+    )
     presented["introduction_paths"] = repo.introduction_paths(seeker.id, opportunity_id)
     presented["advisory"] = scoring.ADVISORY_NOTE
     return presented

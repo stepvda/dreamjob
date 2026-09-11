@@ -257,7 +257,9 @@ async def discover_company_contacts(
         "company_id": company_id,
         "outcome": outcome.as_dict(),
         "contacts": repo.contacts_for_company(
-            company_id, include_blocked=bool(seeker.is_admin)
+            company_id,
+            include_blocked=bool(seeker.is_admin),
+            job_seeker_id=None if seeker.is_admin else seeker.id,
         ),
     }
 
@@ -364,7 +366,7 @@ def contacts_for_company(
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
         return repo.contacts_for_company(company_id, include_blocked=True)
     return repo.usable_contacts_for_company(
-        company_id, campaign_id=campaign_id, require_email=False
+        company_id, campaign_id=campaign_id, job_seeker_id=seeker.id, require_email=False
     )
 
 

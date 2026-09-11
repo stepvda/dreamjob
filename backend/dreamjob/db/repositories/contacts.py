@@ -165,24 +165,44 @@ def contact_owned_by(job_seeker_id: str, contact_id: str) -> bool:
     return row is not None
 
 
-def contacts_for_company(company_id: str, *, include_blocked: bool = False) -> list[dict]:
-    """Every stored contact of one company, newest first."""
+def contacts_for_company(
+    company_id: str, *, include_blocked: bool = False, job_seeker_id: str | None = None
+) -> list[dict]:
+    """Every stored contact of one company, newest first.
+
+    ``job_seeker_id`` narrows campaign-scoped rows to the seeker's own
+    campaigns.  Browser-collected contacts are private to the campaign that
+    collected them (NFR-303); without this, a seeker with one opportunity at a
+    company could read every other seeker's collected names and addresses.
+    """
     table = "contact" if include_blocked else "usable_contact"
-    return query_all(
-        f"SELECT * FROM {table} WHERE company_id = ? ORDER BY confidence DESC, collected_at DESC",
-        (company_id,),
-    )
+    sql = f"SELECT * FROM {table} WHERE company_id = ?"
+    params: list[Any] = [company_id]
+    if job_seeker_id:
+        sql += (
+            " AND (shareable = 1 OR owning_campaign_id IS NULL"
+            " OR owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?))"
+        )
+        params.append(job_seeker_id)
+    sql += " ORDER BY confidence DESC, collected_at DESC"
+    return query_all(sql, tuple(params))
 
 
 def usable_contacts_for_company(
-    company_id: str, *, campaign_id: str | None = None, require_email: bool = True
+    company_id: str,
+    *,
+    campaign_id: str | None = None,
+    job_seeker_id: str | None = None,
+    require_email: bool = True,
 ) -> list[dict]:
     """The query the generation slice must use (NFR-302, NFR-303, FR-304).
 
     Reads the ``usable_contact`` view, so an objection blocks the address for
     every job seeker and an ``invalid`` verdict is never handed out - neither
     rule depends on the caller remembering it.  ``campaign_id`` additionally
-    hides campaign-scoped rows belonging to somebody else's campaign.
+    hides campaign-scoped rows belonging to somebody else's campaign, and
+    ``job_seeker_id`` does the same for callers that know the seeker but not the
+    campaign.
     """
     sql = "SELECT * FROM usable_contact WHERE company_id = ?"
     params: list[Any] = [company_id]
@@ -192,6 +212,11 @@ def usable_contacts_for_company(
     if campaign_id:
         sql += " OR owning_campaign_id = ?"
         params.append(campaign_id)
+    elif job_seeker_id:
+        sql += (
+            " OR owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?)"
+        )
+        params.append(job_seeker_id)
     sql += ")"
     sql += " ORDER BY confidence DESC, collected_at DESC"
     return query_all(sql, tuple(params))

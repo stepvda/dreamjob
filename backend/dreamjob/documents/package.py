@@ -34,6 +34,7 @@ from typing import Any
 from dreamjob.config import get_settings
 from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import applications as repo
+from dreamjob.db.repositories import contacts as contact_repo
 from dreamjob.documents import briefing as briefing_module
 from dreamjob.documents import consistency as consistency_module
 from dreamjob.documents import intro_email
@@ -152,6 +153,11 @@ def generate(
         options.language or opportunity.get("language") or seeker.get("locale")
     )
     if options.contact_id:
+        # The id comes from the request; without this check it could name a
+        # contact another seeker collected privately (NFR-303).  Verified here
+        # rather than at each route so every generation path is covered.
+        if not contact_repo.contact_owned_by(job_seeker_id, options.contact_id):
+            raise GenerationError("That contact belongs to another job seeker")
         contact = repo.get_contact(options.contact_id)
     else:
         contact = None
@@ -416,6 +422,10 @@ def edit(job_seeker_id: str, package_id: str, changes: dict[str, Any]) -> dict[s
         return None
     if package["status"] == "sent":
         raise GenerationError("A sent package can no longer be edited")
+    if allowed.get("contact_id") and not contact_repo.contact_owned_by(
+        job_seeker_id, allowed["contact_id"]
+    ):
+        raise GenerationError("That contact belongs to another job seeker")
 
     allowed["status"] = "draft"
     allowed["approved_at"] = None
