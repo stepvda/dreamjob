@@ -1141,9 +1141,11 @@ async def ensure_apply_contacts(
     ``scope='all'`` widens the pool to every company in the knowledge base,
     including companies with no vacancy and no opportunity: ``limit`` counts
     *companies to visit*, the work list is
-    :func:`apply.all_companies_for_contact`, and the pass visits every selected
-    company without stopping early on vacancy coverage.  ``max_companies`` caps
-    the work list either way.
+    :func:`apply.all_companies_for_contact` - every company that does not yet
+    have a usable contact, previously-unreachable ones included - and the pass
+    visits every selected company without stopping early on vacancy coverage.
+    ``refresh`` includes companies that already have a contact, so they are
+    re-checked; ``max_companies`` caps the work list either way.
 
     ``order`` is ``vacancies`` by default because ``limit`` is: a target
     counted in vacancies is filled fastest by walking the companies that carry
@@ -1182,8 +1184,7 @@ async def ensure_apply_contacts(
             repo.all_companies_for_contact,
             ceiling,
             job_seeker_id=job_seeker_id,
-            include_resolved=refresh,
-            resolved_before=_stale_before(RESOLUTION_MAX_AGE_DAYS) if refresh else None,
+            include_covered=refresh,
             order=order,
         )
         # ``requested`` reports how many companies the sweep set out to visit,

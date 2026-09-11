@@ -483,38 +483,47 @@ def companies_needing_contact(
     return query_all(sql, tuple(params))
 
 
-#: How ``all_companies_for_contact`` orders the whole company table.  ``name``
-#: is the default because the pool is not ranked by anything: it is a sweep, and
-#: a stable alphabetical order is the one a person can follow.
+#: How ``all_companies_for_contact`` orders the whole company table.  The
+#: default ``vacancies`` is the same currency the sweep counts in: never-attempted
+#: companies first, then the never-contacted ones with the most vacancies, so one
+#: site crawl covers as many postings as possible.  ``name`` stays as a stable
+#: alphabetical view of the same pool.
 _ALL_COMPANY_ORDERINGS: dict[str, str] = {
     "name": "COALESCE(co.name, '') COLLATE NOCASE ASC",
-    "vacancies": "vacancy_count DESC, has_contact ASC, backs_opportunity DESC,"
-                 " COALESCE(co.name, '') COLLATE NOCASE ASC",
+    "vacancies": "has_contact ASC, (r.resolved_at IS NULL) DESC, vacancy_count DESC,"
+                 " latest_vacancy_at DESC, COALESCE(co.name, '') COLLATE NOCASE ASC",
     "recency": "backs_opportunity DESC, has_contact ASC, latest_vacancy_at DESC,"
                " COALESCE(co.name, '') COLLATE NOCASE ASC",
 }
 
 
 def all_companies_for_contact(
-    limit: int = 500,
+    limit: int,
     *,
     job_seeker_id: str | None = None,
-    include_resolved: bool = False,
-    resolved_before: str | None = None,
-    order: str = "name",
+    include_covered: bool = False,
+    order: str = "vacancies",
 ) -> list[dict[str, Any]]:
-    """Every company in the knowledge base, for the ``scope='all'`` sweep (FR-301).
+    """Every company with no usable contact, for the ``scope='all'`` sweep (FR-301).
 
     :func:`companies_needing_contact` answers "which employers could carry a
     contact for a vacancy"; this answers the wider question the Contacts screen
-    can ask - "which employers exist at all" - and therefore selects from
+    can ask - "which employers still need a contact" - and therefore selects from
     ``company`` with no requirement that a vacancy or an opportunity exists.
     ``vacancy_count`` may be 0, which is exactly the row the narrower work list
     cannot produce and the sweep must still visit: a company the corpus has
-    heard of but never seen hire.
+    heard of but never seen hire, and one that is worth a retry precisely because
+    nobody is writing to it yet.
 
-    The row shape, the ``_HAS_USABLE_CONTACT`` reuse and the
-    :data:`_VERDICT_PREDATES_THE_DOMAIN` skip are deliberately identical to
+    Selection is on the *contact*, not on the resolution row: a company with no
+    usable contact is always eligible, so a verdict of "unreachable" - including
+    the ATS-vendor domains the FR-301 ladder can never resolve - is retried
+    rather than filtered out.  ``include_covered=True`` is the refresh: it also
+    returns companies that already have somebody to write to, so a caller can
+    re-check them.  ``limit`` is therefore the only ceiling besides
+    ``max_companies`` in the caller.
+
+    The row shape and ``_HAS_USABLE_CONTACT`` reuse are deliberately identical to
     :func:`companies_needing_contact`, so the ladder receives the same company
     dict from either work list.
     """
@@ -526,15 +535,9 @@ def all_companies_for_contact(
     seeker_rank = "MAX(CASE WHEN o.id IS NOT NULL THEN 1 ELSE 0 END)" if job_seeker_id else "0"
     params: list[Any] = [job_seeker_id] if job_seeker_id else []
 
-    freshness = ""
-    if not include_resolved:
-        freshness = f" AND (r.company_id IS NULL OR {_VERDICT_PREDATES_THE_DOMAIN})"
-    elif resolved_before:
-        freshness = (
-            " AND (r.company_id IS NULL OR r.resolved_at < ?"
-            f" OR {_VERDICT_PREDATES_THE_DOMAIN})"
-        )
-        params.append(resolved_before)
+    # No resolution-freshness predicate: a company without a contact is always
+    # worth another walk, however recently the ladder last said so.
+    covered = "" if include_covered else f" AND NOT EXISTS ({_HAS_USABLE_CONTACT})"
 
     sql = f"""
         SELECT co.id                        AS company_id,
@@ -553,9 +556,9 @@ def all_companies_for_contact(
           FROM company co
           LEFT JOIN apply_contact_resolution r ON r.company_id = co.id
           {seeker_join}
-         WHERE co.name IS NOT NULL AND co.name != ''{freshness}
+         WHERE co.name IS NOT NULL AND co.name != ''{covered}
          GROUP BY co.id
-         ORDER BY {_ALL_COMPANY_ORDERINGS.get(order, _ALL_COMPANY_ORDERINGS["name"])}
+         ORDER BY {_ALL_COMPANY_ORDERINGS.get(order, _ALL_COMPANY_ORDERINGS["vacancies"])}
          LIMIT ?
     """
     params.append(limit)

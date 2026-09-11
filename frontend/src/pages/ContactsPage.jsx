@@ -214,7 +214,7 @@ function ContactList() {
               <HelpTip title="How many to find">
                 {scope === 'shortlist'
                   ? 'The pass stops once this many vacancies on your shortlist have somebody to write to.'
-                  : 'The pass visits this many companies across the whole database, best-covered vacancies first.'}
+                  : 'The pass visits this many companies that have no contact yet, best-covered vacancies first.'}
               </HelpTip>
             </label>
             <input
@@ -253,7 +253,7 @@ function ContactList() {
         <p className="small muted" style={{ margin: '8px 0 0' }}>
           {scope === 'shortlist'
             ? `Looking for up to ${target || DISCOVERY_LIMIT} vacancies with a reachable contact on your shortlist.`
-            : `Visiting up to ${target || DISCOVERY_LIMIT} companies across the whole database, best-covered vacancies first.`}
+            : `Visiting up to ${target || DISCOVERY_LIMIT} companies without a contact yet, best-covered vacancies first.`}
         </p>
         {batchError && <ErrorBox error={batchError} onRetry={() => setBatchError(null)} />}
         {batch && (

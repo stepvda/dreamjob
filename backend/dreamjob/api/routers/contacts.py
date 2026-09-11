@@ -386,6 +386,8 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
         seeker.id,
         body.scope,
         queued_marker=QUEUED_ERROR_MARKER,
+        limit=body.limit,
+        max_companies=body.max_companies,
     )
     if existing is not None:
         return {
@@ -704,6 +706,8 @@ async def start_emails_backfill(body: BackfillRequest, seeker: Seeker) -> dict[s
         seeker.id,
         body.scope,
         queued_marker=QUEUED_ERROR_MARKER,
+        limit=body.limit,
+        max_companies=body.max_companies,
     )
     if existing is not None:
         return {

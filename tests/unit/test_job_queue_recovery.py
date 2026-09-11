@@ -304,6 +304,68 @@ def test_discover_endpoint_reuses_a_running_or_queued_job(
         assert other.json()["reused"] is False
         assert other.json()["job_id"] != first_body["job_id"]
 
+        # A larger request in the same scope must not be absorbed by the running
+        # narrow one: it starts a job of its own (FR-185, NFR-502).
+        bigger = client.post("/api/contacts/discover", json={"scope": "all", "limit": 8})
+        assert bigger.status_code == 202, bigger.text
+        assert bigger.json()["reused"] is False
+        assert bigger.json()["job_id"] != first_body["job_id"]
+
+
+def test_find_reusable_contact_job_matches_the_requested_size() -> None:
+    """``limit``/``max_companies`` are part of the dedupe key, with ``scope``.
+
+    The defect this pins: a running narrow sweep was handed back for a larger
+    request, so "all companies" never swept more than the first job's ``limit``.
+    """
+    from dreamjob.db.repositories import contacts as contact_repo
+    from dreamjob.pipeline import apply_contacts as pipeline
+
+    seeker_id = _seeker()
+    job_id = insert_row(
+        "job_run",
+        {
+            "job_seeker_id": seeker_id,
+            "kind": pipeline.DISCOVERY_JOB_KIND,
+            "status": "running",
+            "created_at": utcnow(),
+            "checkpoint": '{"options": {"scope": "all", "limit": 50, "max_companies": null}}',
+        },
+    )
+
+    reused = contact_repo.find_reusable_contact_job(
+        pipeline.DISCOVERY_JOB_KIND,
+        seeker_id,
+        "all",
+        queued_marker=QUEUED_ERROR_MARKER,
+        limit=50,
+        max_companies=None,
+    )
+    assert reused is not None and reused["id"] == job_id
+
+    assert (
+        contact_repo.find_reusable_contact_job(
+            pipeline.DISCOVERY_JOB_KIND,
+            seeker_id,
+            "all",
+            queued_marker=QUEUED_ERROR_MARKER,
+            limit=5000,
+            max_companies=None,
+        )
+        is None
+    )
+    assert (
+        contact_repo.find_reusable_contact_job(
+            pipeline.DISCOVERY_JOB_KIND,
+            seeker_id,
+            "all",
+            queued_marker=QUEUED_ERROR_MARKER,
+            limit=50,
+            max_companies=10,
+        )
+        is None
+    )
+
 
 def test_backfill_endpoint_reuses_a_running_or_queued_job(
     monkeypatch: pytest.MonkeyPatch,

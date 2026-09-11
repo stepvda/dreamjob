@@ -578,10 +578,52 @@ def test_all_companies_for_contact_marks_a_reachable_company() -> None:
         ids["company_id"], "hr@acme-data.example",
         method=patterns.METHOD_WEBSITE, validation="valid",
     )
-    rows = apply_repo.all_companies_for_contact(50, job_seeker_id=ids["seeker_id"])
+    rows = apply_repo.all_companies_for_contact(
+        50, job_seeker_id=ids["seeker_id"], include_covered=True
+    )
     by_id = {row["company_id"]: row for row in rows}
     assert by_id[ids["company_id"]]["has_contact"] == 1
     assert by_id[ids["company_id"]]["backs_opportunity"] == 1
+
+
+def test_all_companies_for_contact_excludes_a_company_with_a_usable_contact() -> None:
+    """``scope='all'`` means "no contact yet", not "no resolution row yet"."""
+    ids = _seed()
+    _add_contact(
+        ids["company_id"], "hr@acme-data.example",
+        method=patterns.METHOD_WEBSITE, validation="valid",
+    )
+    by_default = {row["company_id"] for row in apply_repo.all_companies_for_contact(50)}
+    assert ids["company_id"] not in by_default
+    assert ids["empty_company_id"] in by_default
+
+    refreshed = {
+        row["company_id"]: row
+        for row in apply_repo.all_companies_for_contact(50, include_covered=True)
+    }
+    assert refreshed[ids["company_id"]]["has_contact"] == 1
+
+
+def test_all_companies_for_contact_keeps_a_resolved_but_unreachable_company() -> None:
+    """A company can never resolve and must stay in the pool forever.
+
+    The ATS-vendor domains ``usable_employer_domain`` refuses carry exactly this
+    verdict; filtering on resolution freshness collapsed the pool to those
+    unreachable rows, so the selection has to be on the contact instead.
+    """
+    ids = _seed()
+    apply_repo.record_resolution(
+        ids["company_id"],
+        {
+            "status": "unreachable",
+            "domain": "acme-data.example",
+            "reason": "no address survived FR-304",
+        },
+    )
+    by_id = {row["company_id"]: row for row in apply_repo.all_companies_for_contact(50)}
+    assert ids["company_id"] in by_id
+    assert by_id[ids["company_id"]]["resolution_status"] == "unreachable"
+    assert by_id[ids["company_id"]]["has_contact"] == 0
 
 
 def test_scope_all_visits_every_company_without_early_stop(

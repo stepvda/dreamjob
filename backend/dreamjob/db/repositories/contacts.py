@@ -694,7 +694,13 @@ def list_objections(limit: int = 500) -> list[dict]:
 
 
 def find_reusable_contact_job(
-    kind: str, job_seeker_id: str, scope: str, *, queued_marker: str
+    kind: str,
+    job_seeker_id: str,
+    scope: str,
+    *,
+    queued_marker: str,
+    limit: int | None = None,
+    max_companies: int | None = None,
 ) -> dict | None:
     """The running or genuinely-queued contacts job for this seeker and scope.
 
@@ -703,8 +709,10 @@ def find_reusable_contact_job(
     to the in-memory pool, so a queued job can be found again and reused rather
     than duplicated.  A bare ``pending`` row (no marker) is deliberately *not*
     reused: it is a job the old behaviour stranded, and the caller should start
-    a fresh one instead.  The scope lives in the checkpoint options, which is
-    JSON, so it is compared here after decoding rather than in SQL.
+    a fresh one instead.  The scope and the size limits live in the checkpoint
+    options, which is JSON, so they are compared here after decoding rather than
+    in SQL: a running narrow job must not absorb a larger request, so a request
+    whose ``limit``/``max_companies`` differ starts its own job.
     """
     rows = query_all(
         "SELECT id, checkpoint FROM job_run "
@@ -716,7 +724,11 @@ def find_reusable_contact_job(
     for row in rows:
         checkpoint = from_json(row.get("checkpoint"), {}) or {}
         options = checkpoint.get("options") or {}
-        if options.get("scope") == scope:
+        if (
+            options.get("scope") == scope
+            and options.get("limit") == limit
+            and options.get("max_companies") == max_companies
+        ):
             return row
     return None
 
