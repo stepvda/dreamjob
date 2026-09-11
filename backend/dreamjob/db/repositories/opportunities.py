@@ -662,17 +662,31 @@ def campaign_opportunity_companies(campaign_id: str, limit: int = 100) -> list[s
 
 
 def campaign_company_ids(campaign_id: str) -> list[str]:
-    """Companies this campaign touched, directly or through a vacancy."""
+    """Companies this campaign touched, directly or through a vacancy.
+
+    ``INDEXED BY`` is deliberate.  Left to itself SQLite drives this from
+    ``provenance`` on ``entity_type = 'company'``, which matches ~150,000 of the
+    174,000 rows, then joins back to the plan item to apply the campaign filter
+    - 3,020,000 VM steps and 5.9 seconds, measured in ``logs/database.log``.
+    Forcing the walk to start at the campaign's plan items and reach provenance
+    through ``idx_prov_plan_item`` makes both legs covering index seeks and
+    halves it.  The indexes are created by migrations 144 and 143, so the hint
+    cannot outlive them.
+    """
     rows = query_all(
         """
-        SELECT DISTINCT p.entity_id AS id FROM provenance p
-        JOIN source_plan_item s ON s.id = p.source_plan_item_id
-        WHERE s.campaign_id = ? AND p.entity_type = 'company'
+        SELECT DISTINCT p.entity_id AS id
+          FROM source_plan_item s INDEXED BY idx_plan_campaign
+          JOIN provenance p INDEXED BY idx_prov_plan_item
+            ON p.source_plan_item_id = s.id AND p.entity_type = 'company'
+         WHERE s.campaign_id = ?
         UNION
-        SELECT DISTINCT v.company_id AS id FROM vacancy v
-        JOIN provenance p ON p.entity_type = 'vacancy' AND p.entity_id = v.id
-        JOIN source_plan_item s ON s.id = p.source_plan_item_id
-        WHERE s.campaign_id = ? AND v.company_id IS NOT NULL
+        SELECT DISTINCT v.company_id AS id
+          FROM source_plan_item s INDEXED BY idx_plan_campaign
+          JOIN provenance p INDEXED BY idx_prov_plan_item
+            ON p.source_plan_item_id = s.id AND p.entity_type = 'vacancy'
+          JOIN vacancy v ON v.id = p.entity_id
+         WHERE s.campaign_id = ? AND v.company_id IS NOT NULL
         """,
         (campaign_id, campaign_id),
     )
