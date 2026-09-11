@@ -814,19 +814,24 @@ export default function OpportunitiesPage() {
       if ('selected' in body || 'user_status' in body || 'pinned' in body) {
         setSelectionNonce((n) => n + 1)
       }
+      return true
     } catch (e) {
       setActionError(e)
+      return false
     }
   }
 
   async function reject() {
     if (!reason.trim()) return
     // FR-285 learns from the reason, so the API refuses an unexplained
-    // rejection - the reason travels in the same request as the status.
-    await patch(rejecting.id, {
+    // rejection - the reason travels in the same request as the status.  Only
+    // close and clear the dialog once it actually saved, or the user believes
+    // a rejection was recorded that never left the browser.
+    const saved = await patch(rejecting.id, {
       user_status: 'not_interested',
       not_interested_reason: reason.trim(),
     })
+    if (!saved) return
     setRejecting(null)
     setReason('')
   }

@@ -241,15 +241,36 @@ def targets_label(target: pacing_mod.Target, key: str) -> pacing_mod.Target:
     )
 
 
+def _cap_int(value: Any) -> int | None:
+    """A positive integer cap, or ``None`` when the plan stated none."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def plan_caps(items: list[dict]) -> dict[str, int]:
-    """FR-165 / FR-186 caps, taken from the plan and hard-limited by CR-406."""
-    max_profiles = DEFAULT_MAX_PROFILES
-    max_companies = DEFAULT_MAX_COMPANIES
+    """FR-165 / FR-186 caps, taken from the plan and hard-limited by CR-406.
+
+    A plan that asks for fewer profiles is honoured.  Taking ``max`` against the
+    defaults treated the plan as a floor: a campaign capped at 10 ran at 60, and
+    a non-numeric cap raised a ValueError instead of falling back.
+    """
+    planned_profiles: list[int] = []
+    planned_companies: list[int] = []
     for item in items:
         caps = item.get("caps") or {}
-        if isinstance(caps, dict):
-            max_profiles = max(max_profiles, int(caps.get("max_profiles") or 0))
-            max_companies = max(max_companies, int(caps.get("max_companies") or 0))
+        if not isinstance(caps, dict):
+            continue
+        profiles = _cap_int(caps.get("max_profiles"))
+        if profiles is not None:
+            planned_profiles.append(profiles)
+        companies = _cap_int(caps.get("max_companies"))
+        if companies is not None:
+            planned_companies.append(companies)
+    max_profiles = max(planned_profiles) if planned_profiles else DEFAULT_MAX_PROFILES
+    max_companies = max(planned_companies) if planned_companies else DEFAULT_MAX_COMPANIES
     return {
         "max_profiles": min(max_profiles, MAX_TARGETS_PER_RUN * 5),
         "max_companies": min(max_companies, MAX_TARGETS_PER_RUN * 5),

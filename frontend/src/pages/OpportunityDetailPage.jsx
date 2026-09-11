@@ -227,14 +227,21 @@ export default function OpportunityDetailPage() {
     try {
       const updated = await api.patch(`/opportunities/${id}`, body)
       setData((d) => ({ ...d, ...updated }))
+      return true
     } catch (e) {
       setActionError(e)
+      return false
     }
   }
 
   async function reject() {
     if (!reason.trim()) return
-    await patch({ user_status: 'not_interested', not_interested_reason: reason.trim() })
+    // Keep the dialog and the typed reason when the save failed.
+    const saved = await patch({
+      user_status: 'not_interested',
+      not_interested_reason: reason.trim(),
+    })
+    if (!saved) return
     setRejecting(false)
     setReason('')
   }

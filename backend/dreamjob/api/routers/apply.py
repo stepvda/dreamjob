@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from dreamjob.api.deps import CurrentSeeker, current_seeker
 from dreamjob.db.repositories import applications as packages_repo
 from dreamjob.db.repositories import apply as apply_repo
+from dreamjob.db.repositories import contacts as contact_repo
 from dreamjob.db.repositories import dispatch as dispatch_repo
 from dreamjob.db.repositories import opportunities as opportunities_repo
 from dreamjob.documents import package as package_module
@@ -226,6 +227,18 @@ def _owned_package(opportunity_id: str, seeker_id: str) -> dict[str, Any]:
             "run POST /api/apply/packages/generate first (FR-321)",
         )
     return package
+
+
+def _assert_contact_owned(seeker_id: str, contact_id: str | None) -> None:
+    """Reject a recipient that is not this seeker's or explicitly shared.
+
+    The id comes straight from the request; without this a known contact id
+    would make another seeker's private address the recipient (NFR-303).
+    """
+    if contact_id and not contact_repo.contact_owned_by(seeker_id, contact_id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "That contact belongs to another job seeker"
+        )
 
 
 def _resolve_ids(
@@ -546,6 +559,7 @@ async def generate_packages(
         selected_only=payload.selected_only,
         limit=payload.limit,
     )
+    _assert_contact_owned(seeker.id, payload.contact_id)
     options = _generation_options(payload)
 
     # The whole of FR-321, which is what the browser asks for, is what
@@ -809,6 +823,7 @@ def edit_email(
     cannot be changed after approval without being approved again.
     """
     package = _owned_package(opportunity_id, seeker.id)
+    _assert_contact_owned(seeker.id, payload.contact_id)
     changes: dict[str, Any] = {}
     if payload.subject is not None:
         changes["email_subject"] = payload.subject

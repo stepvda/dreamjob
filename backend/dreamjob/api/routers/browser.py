@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker, owned_or_404
@@ -21,6 +22,8 @@ from dreamjob.browser import pacing as pacing_mod
 from dreamjob.browser import session as session_mod
 from dreamjob.config import get_settings
 from dreamjob.db.repositories import browser as repo
+from dreamjob.db.repositories import companies as company_repo
+from dreamjob.db.repositories import opportunities as opp_repo
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.security import auth_service as auth
 
@@ -275,7 +278,7 @@ async def start_run(payload: StartRunRequest, seeker: Seeker) -> dict:
 
 
 @router.get("/runs")
-def list_runs(seeker: Seeker, limit: int = 20) -> list[dict]:
+def list_runs(seeker: Seeker, limit: int = Query(20, ge=1, le=200)) -> list[dict]:
     return repo.browser_jobs(seeker.id, limit=limit)
 
 
@@ -394,12 +397,28 @@ async def prefill_ats_form(payload: PrefillIn, seeker: Seeker) -> dict:
             ) from exc
         attachments[canonical] = str(resolved)
 
+    # The automation browser is signed in as the job seeker, so the prefill is
+    # pinned to the employer's own site or a known ATS.  A pasted link to
+    # anything else would have their name, email, letter and CV typed into it.
+    opportunity = opp_repo.get_opportunity(payload.opportunity_id, seeker.id)
+    allowed_hosts: list[str] = []
+    company = (
+        company_repo.get_company(opportunity["company_id"])
+        if opportunity and opportunity.get("company_id")
+        else None
+    )
+    if company:
+        allowed_hosts.append(company.get("domain") or "")
+        careers_host = urlsplit(company.get("careers_url") or "").hostname or ""
+        allowed_hosts.append(careers_host)
+
     report = await ats_form.prefill(
         payload.url,
         {k: v for k, v in values.items() if v},
         attachments=attachments,
         job_seeker_id=seeker.id,
         opportunity_id=payload.opportunity_id,
+        allowed_hosts=allowed_hosts,
     )
     if report.error:
         raise HTTPException(

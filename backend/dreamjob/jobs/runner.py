@@ -93,6 +93,13 @@ PROGRESS_WRITE_INTERVAL_SECONDS = 0.25
 LOOP_LAG_WARN_MS = 250.0
 _LOOP_PROBE_INTERVAL_SECONDS = 0.25
 
+#: Campaign states in which no job belonging to it can still have real work.
+#: A job left "running" against one of these is a zombie: the run finished (or
+#: was abandoned) while its worker was starved or killed, and re-queueing it at
+#: boot would replay a whole collection every restart - exactly the heavy work
+#: that starves the serving loop.
+TERMINAL_CAMPAIGN_STATES = frozenset({"completed", "finished", "failed", "cancelled"})
+
 
 class JobCancelled(Exception):
     """Raised inside a worker when the user cancels the job."""
@@ -633,16 +640,38 @@ class JobRunner:
     @staticmethod
     def _resume_orphans() -> int:
         rows = query_all(
-            "SELECT id FROM job_run WHERE status IN ('running', 'paused') "
-            "   OR (status = 'failed' AND last_error LIKE '%resumable%')"
+            "SELECT j.id AS id, c.status AS campaign_status "
+            "FROM job_run j LEFT JOIN campaign c ON c.id = j.campaign_id "
+            "WHERE j.status IN ('running', 'paused') "
+            "   OR (j.status = 'failed' AND j.last_error LIKE '%resumable%')"
         )
+        requeued = 0
         for row in rows:
+            campaign_status = row["campaign_status"]
+            if campaign_status in TERMINAL_CAMPAIGN_STATES:
+                # The run this job belonged to is over; a job still "running"
+                # against it is a zombie left by a starved or killed worker.
+                # Requeueing it would replay the collection at every boot.
+                update_row(
+                    "job_run",
+                    row["id"],
+                    {
+                        "status": "cancelled",
+                        "finished_at": utcnow(),
+                        "last_error": (
+                            f"campaign already {campaign_status}; "
+                            "stale job closed at startup"
+                        ),
+                    },
+                )
+                continue
             update_row(
                 "job_run",
                 row["id"],
                 {"status": "pending", "last_error": "interrupted by restart; resumable"},
             )
-        return len(rows)
+            requeued += 1
+        return requeued
 
     async def dispatch_recoverable(self) -> int:
         """Start the jobs ``resume_orphans`` just requeued (NFR-401).

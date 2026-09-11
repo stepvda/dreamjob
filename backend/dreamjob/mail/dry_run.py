@@ -399,6 +399,13 @@ def _prepare_only(
             "The factual-consistency check on this CV failed (FR-322); fix or regenerate it, "
             "or approve it with a recorded override, before sending."
         )
+    # NFR-206: the leak scan has no override, and a failure recorded after
+    # approval still blocks the assembly.
+    if package.get("leak_scan_status") == "fail":
+        raise SendRefused(
+            "The confidentiality check on this CV failed (NFR-206); regenerate it before "
+            "sending. This check cannot be overridden."
+        )
     # A previous *dry run* must not look like a send: only a dispatch that
     # actually left counts as "already dispatched", so the job seeker can
     # rebuild and re-inspect the same package as often as they like.

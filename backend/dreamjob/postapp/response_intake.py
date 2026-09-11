@@ -54,6 +54,15 @@ STAGE_FOR = {
     "rejection": "closed",
 }
 
+#: The board's own labels for the outcomes a person can enter by hand.  Without
+#: this the transition lookup was asked for "interview" while the state machine
+#: keys on "interview_invitation", so recording an interview invitation moved
+#: nothing and the digest never saw it either.
+BOARD_LABEL_FOR = {
+    "interview": "interview_invitation",
+    "info_request": "request_for_information",
+}
+
 
 def record_response(
     job_seeker_id: str,
@@ -148,7 +157,10 @@ def record_response(
             update_row(
                 "incoming_reply",
                 reply_id,
-                {"classification": stated_outcome, "classification_confidence": 1.0},
+                {
+                    "classification": BOARD_LABEL_FOR.get(stated_outcome, stated_outcome),
+                    "classification_confidence": 1.0,
+                },
             )
             log.info(
                 "Manual response %s: keeping stated outcome %r over classified %r",
@@ -156,14 +168,15 @@ def record_response(
             )
 
     stage = STAGE_FOR.get(effective or "")
+    board_label = BOARD_LABEL_FOR.get(effective or "", effective)
     if stage:
         try:
             # The same path a detected reply takes, so a hand-entered response
             # and a polled one move the board identically (FR-421).
             board.apply_reply(
                 job_seeker_id,
-                {**reply_row, "classification": effective},
-                classification=effective,
+                {**reply_row, "classification": board_label},
+                classification=board_label,
             )
         except Exception:  # noqa: BLE001
             log.exception("Could not move the board for reply %s", reply_id)

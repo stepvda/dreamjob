@@ -150,6 +150,21 @@ def get_contact(contact_id: str) -> dict | None:
     return query_one("SELECT * FROM contact WHERE id = ?", (contact_id,))
 
 
+def contact_owned_by(job_seeker_id: str, contact_id: str) -> bool:
+    """True when the contact is this seeker's own or explicitly shared.
+
+    A contact is campaign-scoped by default (NFR-303), so accepting an id from a
+    request without this check would let one seeker make another's private
+    address the recipient of their message.
+    """
+    row = query_one(
+        "SELECT 1 FROM contact c LEFT JOIN campaign camp ON camp.id = c.owning_campaign_id "
+        "WHERE c.id = ? AND (c.shareable = 1 OR camp.job_seeker_id = ?)",
+        (contact_id, job_seeker_id),
+    )
+    return row is not None
+
+
 def contacts_for_company(company_id: str, *, include_blocked: bool = False) -> list[dict]:
     """Every stored contact of one company, newest first."""
     table = "contact" if include_blocked else "usable_contact"

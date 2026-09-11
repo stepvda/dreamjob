@@ -204,7 +204,12 @@ def build_body(
     sig = signature(language, display_name, contact_lines)
     if sig and sig not in body:
         parts.append(sig)
-    parts.append("-- \n" + _wrap(objection_sentence(language, reply_address)))
+    # The assembled e-mail body already ends with the NFR-302 sentence, so an
+    # unconditional append put two differently-worded objection notices - and a
+    # second signature - on every message that went out.
+    objection = objection_sentence(language, reply_address)
+    if objection and objection not in (body or ""):
+        parts.append("-- \n" + _wrap(objection))
     return "\n\n".join(p for p in parts if p) + "\n"
 
 

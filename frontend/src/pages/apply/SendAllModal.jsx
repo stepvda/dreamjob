@@ -32,7 +32,12 @@ export default function SendAllModal({
   onClose,
   onConfirm,
 }) {
-  const dryRun = guard?.dry_run !== false
+  // "Dry run" must be stated, not assumed: when the guard request failed or had
+  // not loaded, `guard?.dry_run !== false` read as dry-run and the modal said
+  // "send nothing" while the confirm still dispatched for real.  Without the
+  // guard the safe default is to say what it would do and refuse to start.
+  const guardLoaded = Boolean(guard)
+  const dryRun = guard?.dry_run === true
   const cap = guard?.daily_cap || {}
   const overCap = cap.remaining != null && rows.length > cap.remaining
 
@@ -53,7 +58,7 @@ export default function SendAllModal({
             </button>
             <button
               className={dryRun ? 'btn btn-primary' : 'btn btn-danger'}
-              disabled={rows.length === 0 || busy}
+              disabled={rows.length === 0 || busy || !guardLoaded}
               onClick={onConfirm}
             >
               {busy ? (

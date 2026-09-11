@@ -31,6 +31,7 @@ queries rather than a re-crawl.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -297,13 +298,19 @@ async def _refresh_signals(company_ids: list[str]) -> dict:
     return {"signals": total, "companies_with_signals": with_signals}
 
 
-def _refresh_reviews(company_ids: list[str]) -> dict:
+async def _refresh_reviews(company_ids: list[str]) -> dict:
     """Record the aggregate rating each company publishes about itself (FR-265).
 
     Pure corpus work: the pages are already stored by the profile crawl, so this
     costs no request.  A company with no published rating is simply not recorded,
-    which the compensation block reports as "no employer rating".
+    which the compensation block reports as "no employer rating".  The loop is
+    synchronous database work, so it runs in a worker thread rather than on the
+    serving event loop.
     """
+    return await asyncio.to_thread(_reviews_sweep, company_ids)
+
+
+def _reviews_sweep(company_ids: list[str]) -> dict:
     from dreamjob.pipeline import employer_reviews  # noqa: PLC0415
 
     rated = 0

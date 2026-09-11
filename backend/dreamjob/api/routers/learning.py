@@ -60,7 +60,10 @@ def list_responses(
 
 
 @router.get("/responses/awaiting")
-def awaiting(limit: int = 200, seeker: CurrentSeeker = Depends(current_seeker)) -> list[dict]:
+def awaiting(
+    limit: int = Query(200, ge=1, le=1000),
+    seeker: CurrentSeeker = Depends(current_seeker),
+) -> list[dict]:
     """Applications with no response recorded — the picking list for entry."""
     return repo.sent_awaiting_response(seeker.id, limit=limit)
 

@@ -257,10 +257,15 @@ def _contact(sections: dict, seeker: dict, disclosure: Disclosure) -> CvContact:
 
 
 def _summary(sections: dict, inputs: dict, disclosure: Disclosure) -> str | None:
-    if not disclosure.blocked("summary"):
-        text = str(sections.get("summary") or "").strip()
-        if text:
-            return text[:MAX_SUMMARY_CHARS]
+    if disclosure.blocked("summary"):
+        # FR-106 is a decision about the summary, and the composite narrative is
+        # derived from the same profile: substituting it shipped the suppressed
+        # content anyway.  The narrative is still used when the summary is not
+        # blocked and the section is simply empty.
+        return None
+    text = str(sections.get("summary") or "").strip()
+    if text:
+        return text[:MAX_SUMMARY_CHARS]
     # The composite narrative is the job seeker's own, reviewed text (FR-125).
     narrative = (inputs.get("composite") or {}).get("narrative")
     return str(narrative).strip()[:MAX_SUMMARY_CHARS] if narrative else None

@@ -492,6 +492,7 @@ class EgressClient:
         *,
         method: str = "GET",
         body: object = None,
+        params: object = None,
     ) -> str:
         """The cache and single-flight key for one *representation* of a URL.
 
@@ -518,6 +519,14 @@ class EgressClient:
             ).strip()
         if accept and accept != "*/*":
             parts.append(accept)
+        if params:
+            # Query parameters select a different representation too.  Nothing
+            # cached passes them today, but a key that ignores them would answer
+            # one parameter set with another's body the moment something does.
+            try:
+                parts.append(json.dumps(params, sort_keys=True, separators=(",", ":")))
+            except (TypeError, ValueError):
+                parts.append(str(sorted(str(item) for item in params)))
         if (method or "GET").upper() != "GET":
             parts.append((method or "GET").upper())
             if body is not None:
@@ -854,7 +863,13 @@ class EgressClient:
         body = kwargs.get("json")
         if body is None:
             body = kwargs.get("data") if kwargs.get("data") is not None else kwargs.get("content")
-        key = self._cache_key(url, kwargs.get("headers"), method=method_upper, body=body)
+        key = self._cache_key(
+            url,
+            kwargs.get("headers"),
+            method=method_upper,
+            body=body,
+            params=kwargs.get("params"),
+        )
         pending = self._inflight.get(key)
         if pending is not None:
             self.savings["coalesced"] += 1

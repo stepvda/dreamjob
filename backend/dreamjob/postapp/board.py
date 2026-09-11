@@ -229,6 +229,17 @@ def transition(
             from_stage, to_stage, card_id,
         )
         return Transition(card_id, from_stage, from_stage, trigger, False, note=note, card=card)
+    if trigger != "user" and from_stage == "closed":
+        # A closed card is terminal.  A late reply classified as a rejection
+        # must not overwrite an outcome the seeker already recorded (or an
+        # acceptance), nor append a second transition to the history.
+        log.debug(
+            "Ignoring automatic %s on closed card %s", to_stage, card_id
+        )
+        return Transition(card_id, from_stage, from_stage, trigger, False, note=note, card=card)
+    if trigger != "user" and to_stage == from_stage:
+        # The same message classified twice must not emit a duplicate event.
+        return Transition(card_id, from_stage, from_stage, trigger, False, note=note, card=card)
 
     now = utcnow()
     stage_dates = dict(card.get("stage_dates") or {})

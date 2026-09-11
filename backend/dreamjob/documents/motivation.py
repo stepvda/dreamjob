@@ -629,16 +629,19 @@ def _llm_content(
     sections = Disclosure(set(inputs.get("do_not_disclose") or set())).redact(
         version.get("sections") or {}
     )
+    blocked = set(inputs.get("do_not_disclose") or set())
+    composite_keys = ["career_trajectory", "core_competencies", "achievements",
+                      "domains", "seniority", "constraints"]
+    if "summary" not in blocked:
+        # The narrative restates the summary; sending it while the summary is
+        # suppressed would put the blocked text in the prompt anyway.
+        composite_keys.insert(0, "narrative")
     profile_payload = {
         "summary": sections.get("summary"),
         "experience": sections.get("experience"),
         "education": sections.get("education"),
         "skills": [s.get("normalised_label") for s in inputs.get("skills") or []],
-        "composite": {
-            key: composite.get(key)
-            for key in ("narrative", "career_trajectory", "core_competencies",
-                        "achievements", "domains", "seniority", "constraints")
-        },
+        "composite": {key: composite.get(key) for key in composite_keys},
         "dream_job_model": {
             key: dream.get(key)
             for key in ("statement", "target_roles", "responsibilities",

@@ -575,19 +575,26 @@ def provenance_corpus(job_seeker_id: str, opportunity_id: str) -> dict[str, Any]
     NFR-206: anything in a generated CV or email that cannot be traced back to
     this set came from somewhere it should not have - another job seeker's
     profile, or scraped material about an unrelated company.
+
+    It is built from :func:`generation_inputs`, so the scan sees the *pinned*
+    profile version the documents were generated from.  Reading the latest
+    version instead meant a re-uploaded profile made the CV's own contact
+    details untraceable, which the scan then reported as a high leak - a
+    non-overridable block on a package that had done nothing wrong.
     """
-    opportunity = get_opportunity(opportunity_id, job_seeker_id)
-    company_id = (opportunity or {}).get("company_id")
+    inputs = generation_inputs(job_seeker_id, opportunity_id)
+    if inputs is None:
+        return {}
     return {
-        "seeker": seeker(job_seeker_id),
-        "profile_version": profile_version(job_seeker_id),
-        "composite": composite_profile(job_seeker_id),
-        "dream_job": dream_job_model(job_seeker_id),
-        "skills": profile_skills(job_seeker_id),
-        "evidence": evidence_items(job_seeker_id),
+        "seeker": inputs["seeker"],
+        "profile_version": inputs["profile_version"],
+        "composite": inputs["composite"],
+        "dream_job": inputs["dream_job"],
+        "skills": inputs["skills"],
+        "evidence": inputs["evidence"],
         "findings": accepted_findings(job_seeker_id),
-        "opportunity": opportunity,
-        "company": company(company_id),
-        "vacancy": vacancy((opportunity or {}).get("vacancy_id")),
-        "contacts": contacts_for_company(company_id),
+        "opportunity": inputs["opportunity"],
+        "company": inputs["company"],
+        "vacancy": inputs["vacancy"],
+        "contacts": inputs["contacts"],
     }

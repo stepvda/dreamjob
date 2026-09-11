@@ -506,6 +506,10 @@ def report(job_seeker_id: str, *, outcome: str = "reply", store: bool = True) ->
     """Compute the analysis and store it, without changing anything (FR-425)."""
     analysis = analyse(job_seeker_id, outcome=outcome)
     if store:
+        # Viewing the report must not un-apply what the seeker already adopted:
+        # ``applied`` is a decision, and rewriting it to 0 here silently reverted
+        # the learned defaults every time the screen was opened.
+        previous = repo.get_learning(job_seeker_id) or {}
         repo.save_learning(
             job_seeker_id,
             {
@@ -514,7 +518,7 @@ def report(job_seeker_id: str, *, outcome: str = "reply", store: bool = True) ->
                 "defaults": to_json(analysis.defaults),
                 "weight_adjustment": to_json(analysis.weight_adjustment),
                 "notes": "\n".join(analysis.caveats),
-                "applied": 0,
+                "applied": int(previous.get("applied") or 0),
             },
         )
     return analysis.as_dict()

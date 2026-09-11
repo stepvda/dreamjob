@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from dreamjob.adapters.vacancy_source import _parse_amount
 from dreamjob.browser import pacing as pacing_mod
 from dreamjob.browser.session import (
     SITES,
@@ -188,11 +189,11 @@ def parse_money(text: str) -> tuple[float | None, float | None, str | None]:
         raw = match.group("value")
         if not raw or not any(ch.isdigit() for ch in raw):
             continue
-        # "70,000" and "70.000" are thousands separators; "70,5" is not a range bound.
-        cleaned = raw.replace(".", "").replace(",", "")
-        try:
-            value = float(cleaned)
-        except ValueError:
+        # The same locale-aware reader the vacancy parser uses: "70,000" and
+        # "70.000" are thousands, but "15.5" and "70,5" are decimals.  Deleting
+        # both separators turned "€15.5" into 155 and stored it as a range bound.
+        value = _parse_amount(raw)
+        if value is None:
             continue
         if match.group("suffix"):
             value *= 1000

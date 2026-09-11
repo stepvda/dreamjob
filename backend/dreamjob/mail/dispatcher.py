@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -376,7 +377,45 @@ def set_follow_up_days(days: int) -> int:
     return days
 
 
+_PACKAGE_SEND_LOCKS: dict[str, threading.Lock] = {}
+_PACKAGE_SEND_LOCKS_GUARD = threading.Lock()
+
+
+def _package_send_lock(package_id: str) -> threading.Lock:
+    with _PACKAGE_SEND_LOCKS_GUARD:
+        return _PACKAGE_SEND_LOCKS.setdefault(package_id, threading.Lock())
+
+
 def send_package(
+    package_id: str,
+    job_seeker_id: str,
+    *,
+    approved_by: str,
+    backend_key: str | None = None,
+    now: datetime | None = None,
+    ignore_window: bool = False,
+    require_approval: bool = True,
+) -> dict:
+    """Send a package, one send at a time per package (RK-05).
+
+    The "already dispatched" check and the send are two statements, and the API
+    runs synchronous endpoints on a threadpool: two simultaneous Send clicks
+    both passed the guard and put the same cold e-mail on the wire twice.  The
+    lock serialises them so the second sees the first's dispatch row.
+    """
+    with _package_send_lock(package_id):
+        return _send_package_locked(
+            package_id,
+            job_seeker_id,
+            approved_by=approved_by,
+            backend_key=backend_key,
+            now=now,
+            ignore_window=ignore_window,
+            require_approval=require_approval,
+        )
+
+
+def _send_package_locked(
     package_id: str,
     job_seeker_id: str,
     *,
@@ -412,6 +451,14 @@ def send_package(
         raise SendRefused(
             "The factual-consistency check on this CV failed (FR-322); fix or regenerate it, "
             "or approve it with a recorded override, before sending."
+        )
+    # NFR-206 has no override: a leak scan that fails now - after the profile,
+    # company or contact data changed - must block here too, or the send paths
+    # would enforce it only at the moment of approval.
+    if package.get("leak_scan_status") == "fail":
+        raise SendRefused(
+            "The confidentiality check on this CV failed (NFR-206); regenerate it before "
+            "sending. This check cannot be overridden."
         )
 
     existing = repo.already_sent_to(

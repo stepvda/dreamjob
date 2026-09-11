@@ -618,6 +618,7 @@ function PrivacyPanel() {
   const due = useFetch(() => api.get('/contacts/retention/due').catch(() => []), [])
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
+  const [sweepError, setSweepError] = useState(null)
 
   const list = Array.isArray(objections.data) ? objections.data : objections.data?.items || []
   const expiring = Array.isArray(due.data) ? due.data : due.data?.items || []
@@ -635,8 +636,23 @@ function PrivacyPanel() {
   }
 
   async function sweep() {
-    await api.post('/contacts/retention/sweep', {})
-    due.reload()
+    // Irreversible deletion: ask first, and say so when it fails rather than
+    // leaving a stray click looking like it worked.
+    const confirmed = window.confirm(
+      'Permanently delete every browser-collected contact whose retention date has ' +
+        'passed? This cannot be undone.',
+    )
+    if (!confirmed) return
+    setBusy(true)
+    setSweepError(null)
+    try {
+      await api.post('/contacts/retention/sweep', {})
+      due.reload()
+    } catch (e) {
+      setSweepError(e)
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -685,10 +701,11 @@ function PrivacyPanel() {
             <Icon name="clock" />
             <h3>Retention</h3>
             <div className="spacer" />
-            <button className="btn btn-sm" onClick={sweep}>
+            <button className="btn btn-sm" onClick={sweep} disabled={busy}>
               <Icon name="trash" /> Delete what is due
             </button>
           </div>
+          {sweepError && <ErrorBox error={sweepError} onRetry={() => setSweepError(null)} />}
           <p className="small muted">
             Contacts collected through browser automation are kept only for the campaign
             that collected them, plus a grace period, and are never shared between job

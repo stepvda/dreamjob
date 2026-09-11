@@ -416,13 +416,28 @@ def _seniority_rank(value: Any) -> int | None:
     return None
 
 
+def _skill_tokens(text: str) -> frozenset[str]:
+    """A skill's tokens, so matching is by token and never by substring.
+
+    Keeping ``+``/``#``/``.`` means "c++", "c#" and "node.js" stay one token.
+    """
+    return frozenset(re.findall(r"[a-z0-9+#.]+", str(text or "").lower()))
+
+
 def _skill_overlap(required: list[str] | None, held: set[str]) -> float | None:
     labels = [str(s).strip().lower() for s in (required or []) if str(s).strip()]
     if not labels:
         return None
+    held_keys = {tokens for tokens in map(_skill_tokens, held) if tokens}
     hits = 0
     for label in labels:
-        if label in held or any(label in h or h in label for h in held):
+        key = _skill_tokens(label)
+        if not key:
+            continue
+        # Substring matching made "Java" satisfied by "JavaScript" and "SQL" by
+        # "NoSQL", inflating profile fit for neighbouring skills.  A token set
+        # is a subset of a held skill's tokens, or it is not a match.
+        if any(key <= tokens for tokens in held_keys):
             hits += 1
     return hits / len(labels)
 

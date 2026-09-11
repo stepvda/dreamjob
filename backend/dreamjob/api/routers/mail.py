@@ -17,6 +17,7 @@ Four surfaces:
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -197,10 +198,14 @@ def gmail_callback(
 def _callback_page(message: str, *, ok: bool) -> HTMLResponse:
     colour = "#1a7f37" if ok else "#b42318"
     title = "Mailbox connected" if ok else "Connection failed"
+    # The message can carry a provider error string straight from the query
+    # string, and this page is served on the API origin with the session cookie
+    # in scope - escaping is the whole defence against a crafted callback link.
+    safe_message = escape(str(message))
     body = (
         "<!doctype html><meta charset='utf-8'><title>Dream Job</title>"
         "<body style=\"font:16px/1.5 system-ui,sans-serif;margin:4rem auto;max-width:34rem\">"
-        f"<h1 style='color:{colour};font-size:1.3rem'>{title}</h1><p>{message}</p></body>"
+        f"<h1 style='color:{colour};font-size:1.3rem'>{title}</h1><p>{safe_message}</p></body>"
     )
     return HTMLResponse(body, status_code=200 if ok else 400)
 

@@ -325,13 +325,28 @@ class CampaignBudget:
     optional work (speculative openings for low-ranked companies first).
     """
 
-    def __init__(self, campaign_id: str | None, degrade_at: float = 0.85):
+    def __init__(
+        self,
+        campaign_id: str | None,
+        degrade_at: float = 0.85,
+        job_seeker_id: str | None = None,
+    ):
         self.campaign_id = campaign_id
+        # When set, the budget only reads and debits a campaign this seeker
+        # owns.  A campaign_id that arrives from a request would otherwise let
+        # one seeker spend another's tokens and attach calls to their campaign.
+        self.job_seeker_id = job_seeker_id
         self.degrade_at = degrade_at
 
     def _row(self) -> dict | None:
         if not self.campaign_id:
             return None
+        if self.job_seeker_id:
+            return query_one(
+                "SELECT token_budget, tokens_used, cost_eur FROM campaign "
+                "WHERE id = ? AND job_seeker_id = ?",
+                (self.campaign_id, self.job_seeker_id),
+            )
         return query_one(
             "SELECT token_budget, tokens_used, cost_eur FROM campaign WHERE id = ?",
             (self.campaign_id,),
@@ -373,11 +388,18 @@ class CampaignBudget:
         # actually enforced.
         total = usage.input_tokens + usage.output_tokens
         with write_tx() as conn:
-            conn.execute(
-                "UPDATE campaign SET tokens_used = tokens_used + ?, "
-                "cost_eur = cost_eur + ? WHERE id = ?",
-                (total, usage.cost_eur, self.campaign_id),
-            )
+            if self.job_seeker_id:
+                conn.execute(
+                    "UPDATE campaign SET tokens_used = tokens_used + ?, "
+                    "cost_eur = cost_eur + ? WHERE id = ? AND job_seeker_id = ?",
+                    (total, usage.cost_eur, self.campaign_id, self.job_seeker_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE campaign SET tokens_used = tokens_used + ?, "
+                    "cost_eur = cost_eur + ? WHERE id = ?",
+                    (total, usage.cost_eur, self.campaign_id),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +422,9 @@ class LLMClient:
         self.campaign_id = campaign_id
         self.job_seeker_id = job_seeker_id
         self.budget = budget or CampaignBudget(
-            campaign_id, degrade_at=float(admin_config().get("budget_degrade_at", 0.85))
+            campaign_id,
+            degrade_at=float(admin_config().get("budget_degrade_at", 0.85)),
+            job_seeker_id=job_seeker_id,
         )
         self.timeout = timeout
 
@@ -745,18 +769,23 @@ def parse_json(text: str, task: str = "") -> Any:
                 return json.loads(text[start : end + 1])
             except ValueError:
                 continue
-    # Final resort: the response was cut off mid-JSON.  A truncated answer is
-    # not an empty one - the company synthesis arrives with business_summary
-    # complete and the tail missing - so recover the entries that did arrive
-    # rather than discarding a usable answer because its end is missing.
+    # The response was cut off mid-JSON.  A truncated answer is not an empty
+    # one, but it must be *reported* as truncated: returning the salvaged
+    # entries silently made ``documents/_llm.complete_json``'s fallback dead
+    # code, so a task the reasoning model abandoned mid-object was applied as
+    # if it had finished.  The partial entries ride along on the exception for
+    # a caller that wants them.
     salvaged = salvage_truncated_json(text)
     if salvaged is not None:
         log.warning(
-            "Recovered a truncated JSON answer for task %s; keys present: %s",
+            "Truncated JSON answer for task %s; retrying on the fallback model",
             task or "?",
-            ", ".join(list(salvaged)[:8]) if isinstance(salvaged, dict) else "(list)",
         )
-        return salvaged
+        error = TruncatedResponse(
+            f"The model stopped mid-JSON for task {task!r}; the answer was incomplete"
+        )
+        error.partial = salvaged  # type: ignore[attr-defined]
+        raise error
     raise LLMError(f"Could not parse JSON from LLM response for task {task!r}: {text[:300]}")
 
 

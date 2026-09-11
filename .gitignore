@@ -43,3 +43,6 @@ token.json
 # write before it has written anything.
 logs/*
 !logs/.gitkeep
+
+# Kilo / Agent Manager local state (never committed)
+.kilo/

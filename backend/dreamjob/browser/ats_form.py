@@ -16,14 +16,46 @@ without a browser, and the part that types is trivial.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from dreamjob.browser import pacing as pacing_mod
 from dreamjob.browser.session import BrowserSession, BrowserUnavailable, safe_url
 from dreamjob.security.audit import record_audit
 
 log = logging.getLogger(__name__)
+
+#: Hosts that carry application forms for many employers.  A prefill URL must be
+#: one of these or the employer's own site: the automation browser is signed in
+#: as the job seeker, and a pasted link that is neither would have their name,
+#: email, cover letter and CV typed into whatever page answered.
+KNOWN_ATS_HOSTS = frozenset(
+    {
+        "greenhouse.io", "lever.co", "myworkdayjobs.com", "workday.com",
+        "personio.com", "personio.de", "teamtailor.com", "recruitee.com",
+        "ashbyhq.com", "smartrecruiters.com", "workable.com", "bamboohr.com",
+        "jobvite.com", "icims.com", "successfactors.com", "taleo.net",
+        "oraclecloud.com", "applytojob.com", "breezy.hr", "jazzhr.com",
+        "softgarden.io", "onlyfy.com", "join.com", "welcometothejungle.com",
+        "jobs.smartrecruiters.com", "hr.onepagecrm.com",
+    }
+)
+
+
+def host_allowed(url: str, extra_hosts: Iterable[str] = ()) -> bool:
+    """True when ``url`` is the employer's own site or a known ATS host."""
+    parts = urlsplit(url or "")
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").lower().strip(".")
+    if not host:
+        return False
+    allowed = set(KNOWN_ATS_HOSTS) | {
+        str(extra).lower().strip(".") for extra in extra_hosts if extra
+    }
+    return any(host == base or host.endswith("." + base) for base in allowed)
 
 #: Canonical fields Dream Job knows how to supply, and the words ATS vendors
 #: use for them.  Ordered: the first canonical field whose aliases match wins,
@@ -255,14 +287,23 @@ async def prefill(
     pacing: pacing_mod.Pacing | None = None,
     job_seeker_id: str | None = None,
     opportunity_id: str | None = None,
+    allowed_hosts: Iterable[str] | None = None,
 ) -> PrefillReport:
     """Open the ATS form, fill what can be filled, and pause for the user (FR-328).
 
     ``attachments`` maps a canonical file field (``resume``, ``cover_letter``)
     to a local path.  The session is left open and raised to the front: the
-    user reviews and submits.
+    user reviews and submits.  ``allowed_hosts`` pins the destination to the
+    employer's own site or a known ATS; a caller that passes none accepts any
+    URL, which only the tests do.
     """
     report = PrefillReport(url=safe_url(url))
+    if allowed_hosts is not None and not host_allowed(url, allowed_hosts):
+        report.error = (
+            "This page is neither the employer's own site nor a known applicant-tracking "
+            "site, so nothing was filled. Open the employer's application page and try again."
+        )
+        return report
     pacing = pacing or pacing_mod.Pacing.from_settings()
     own_session = session is None
     session = session or BrowserSession()

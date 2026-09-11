@@ -147,8 +147,24 @@ def retention_until(campaign_id: str | None, *, grace_days: int | None = None) -
     return (base + timedelta(days=grace)).isoformat(timespec="seconds")
 
 
-def contact_by_linkedin_url(url: str) -> dict | None:
+def contact_by_linkedin_url(url: str, campaign_id: str | None = None) -> dict | None:
+    """The contact with this profile URL, scoped to its owning campaign.
+
+    Scoping matters: the same person surfaces in more than one campaign, and an
+    unscoped lookup let the second campaign take ownership of the first's row -
+    moving ``owning_campaign_id``, ``shareable`` and the retention deadline.
+    """
+    if campaign_id:
+        return query_one(
+            "SELECT * FROM contact WHERE linkedin_url = ? AND owning_campaign_id = ? LIMIT 1",
+            (url, campaign_id),
+        )
     return query_one("SELECT * FROM contact WHERE linkedin_url = ? LIMIT 1", (url,))
+
+
+#: Fields that belong to the campaign that collected the row, never to a later
+#: pass that merely saw the same person again.
+_CONTACT_OWNERSHIP_FIELDS = ("owning_campaign_id", "shareable", "retention_until")
 
 
 def upsert_browser_contact(data: dict) -> tuple[str | None, bool]:
@@ -156,17 +172,20 @@ def upsert_browser_contact(data: dict) -> tuple[str | None, bool]:
 
     Identity is the LinkedIn profile URL, which is stable where an e-mail
     address is not yet known.  An objection blocks the record permanently
-    (NFR-302), and every row written here stays campaign-scoped (NFR-303).
+    (NFR-302), and every row written here stays campaign-scoped (NFR-303): a
+    refresh updates what was observed and never re-parents the row.
     """
     data = dict(data)
     data["access_method"] = ACCESS_METHOD
     url = data.get("linkedin_url")
-    existing = contact_by_linkedin_url(url) if url else None
+    existing = contact_by_linkedin_url(url, data.get("owning_campaign_id")) if url else None
     if existing and existing.get("objected"):
         log.info("Skipping %s: an objection is on file (NFR-302)", url)
         return existing["id"], False
     if existing:
         merged = {k: v for k, v in data.items() if v not in (None, "", [], {})}
+        for field_name in _CONTACT_OWNERSHIP_FIELDS:
+            merged.pop(field_name, None)
         merged["collected_at"] = utcnow()
         kb.update_shared("contact", existing["id"], merged)
         return existing["id"], False

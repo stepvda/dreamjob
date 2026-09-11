@@ -388,10 +388,15 @@ def profile_facts(inputs: dict[str, Any]) -> ProfileFacts:
             if row.get(key):
                 facts.skills.add(fold(row[key]))
 
+    composite_for_corpus = {k: v for k, v in composite.items() if k != "evidence_refs"}
+    if "summary" in set(inputs.get("do_not_disclose") or set()):
+        # The narrative restates the summary the seeker suppressed, so it must
+        # not reach the judge as "material that may be contained" either.
+        composite_for_corpus.pop("narrative", None)
     corpus_parts = [
         text_of(sections),
         text_of(inputs.get("skills")),
-        text_of({k: composite.get(k) for k in composite if k != "evidence_refs"}),
+        text_of(composite_for_corpus),
         text_of(inputs.get("evidence")),
         text_of(inputs.get("dream_job")),
         str(version.get("dream_job_statement") or ""),

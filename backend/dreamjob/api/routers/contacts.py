@@ -564,6 +564,14 @@ def add_objection(body: ObjectionRequest, seeker: Seeker) -> dict[str, Any]:
 
 @router.get("/objections")
 def list_objections(seeker: Seeker, limit: int = Query(default=200, ge=1, le=1000)) -> list[dict]:
+    """The objection list, to an administrator.
+
+    It is a cross-job-seeker list of addresses, profiles and reasons - the
+    shared block list only needs :func:`check_objection`'s yes/no, not the
+    identities in it.
+    """
+    if not seeker.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
     return repo.list_objections(limit)
 
 

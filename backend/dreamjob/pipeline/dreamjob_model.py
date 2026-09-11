@@ -290,7 +290,8 @@ def build_dream_job_model(
         job_seeker_id,
         {
             "persona_id": persona_id,
-            "version": repo.next_dream_version(job_seeker_id),
+            # The version is allocated inside insert_dream_model, in the same
+            # transaction as the insert; computing it here was a dead read.
             "statement": text,
             "confirmed_by_user": 0,
             **{block: blocks.get(block, []) for block in BLOCKS},
