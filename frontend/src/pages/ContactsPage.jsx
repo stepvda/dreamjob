@@ -193,12 +193,14 @@ function ContactList() {
           <div style={{ marginTop: 12 }}>
             <JobProgress
               job={
-                batch.job || {
-                  kind: 'Finding hiring contacts',
-                  status: 'running',
-                  progress_done: 0,
-                  progress_total: 1,
-                }
+                batch.job
+                  ? { ...batch.job, kind: 'Finding hiring contacts' }
+                  : {
+                      kind: 'Finding hiring contacts',
+                      status: 'running',
+                      progress_done: 0,
+                      progress_total: 1,
+                    }
               }
             />
             {batch.done && batch.job?.checkpoint?.report && (

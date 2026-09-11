@@ -609,4 +609,68 @@ def parse_json(text: str, task: str = "") -> Any:
                 return json.loads(text[start : end + 1])
             except ValueError:
                 continue
+    # Final resort: the response was cut off mid-JSON.  A truncated answer is
+    # not an empty one - the company synthesis arrives with business_summary
+    # complete and the tail missing - so recover the entries that did arrive
+    # rather than discarding a usable answer because its end is missing.
+    salvaged = salvage_truncated_json(text)
+    if salvaged is not None:
+        log.warning(
+            "Recovered a truncated JSON answer for task %s; keys present: %s",
+            task or "?",
+            ", ".join(list(salvaged)[:8]) if isinstance(salvaged, dict) else "(list)",
+        )
+        return salvaged
     raise LLMError(f"Could not parse JSON from LLM response for task {task!r}: {text[:300]}")
+
+
+def salvage_truncated_json(text: str) -> Any | None:
+    """Recover the complete entries of a JSON object the model did not finish.
+
+    Walks the text tracking string state and nesting depth, and cuts back to the
+    last top-level separator that leaves the document closeable.  Only complete
+    key/value pairs survive, so a half-written value is never guessed at - the
+    point is to keep the fields that arrived, not to invent the ones that did
+    not.
+    """
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if not starts:
+        return None
+    start = min(starts)
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+
+    depth = 0
+    in_string = False
+    escaped = False
+    last_safe = -1
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : index + 1])
+                except ValueError:
+                    return None
+        elif char == "," and depth == 1:
+            last_safe = index
+
+    if last_safe > start:
+        try:
+            return json.loads(text[start:last_safe] + closer)
+        except ValueError:
+            return None
+    return None

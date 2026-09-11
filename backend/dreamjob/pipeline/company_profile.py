@@ -519,6 +519,18 @@ def _assemble(
         put("ats_vendor", crawl.ats_vendor, 0.9, crawl.home_url)
         if crawl.ats_slug:
             put("ats_slug", crawl.ats_slug, 0.9, crawl.home_url)
+    # ``uq_company_ats_board`` makes (ats_vendor, ats_slug) unique, so recording
+    # a board that another company row already holds makes the whole profile
+    # write fail and roll back - which is why 10 of 15 profiles reported an
+    # error and stored no summary.  The board is already recorded against a
+    # company; this one simply does not claim it.
+    if "ats_slug" in values:
+        holder = kb_repo.company_id_for_board(
+            values.get("ats_vendor"), values["ats_slug"], exclude=company.get("id")
+        )
+        if holder:
+            values.pop("ats_vendor", None)
+            values.pop("ats_slug", None)
     if not company.get("domain") and crawl.domain:
         put("domain", crawl.domain, 0.95, crawl.home_url)
 

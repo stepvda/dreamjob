@@ -712,3 +712,23 @@ def update_shared(table: str, row_id: str, data: dict) -> None:
     values.pop("id", None)
     with write_tx() as conn:
         _update(conn, table, row_id, values)
+
+
+def company_id_for_board(
+    vendor: str | None, slug: str | None, *, exclude: str | None = None
+) -> str | None:
+    """The company already holding this ATS board, if any.
+
+    ``uq_company_ats_board`` makes (ats_vendor, ats_slug) unique.  A profile
+    write that claims a board another row holds fails the whole UPDATE and
+    rolls back, so every field in the same write is lost - which is how ten of
+    fifteen company profiles were failing and storing nothing.  The caller asks
+    this first and leaves the board where it is.
+    """
+    if not vendor or not slug:
+        return None
+    row = query_one(
+        "SELECT id FROM company WHERE ats_vendor = ? AND ats_slug = ? AND id <> ? LIMIT 1",
+        (vendor, slug, exclude or ""),
+    )
+    return str(row["id"]) if row else None

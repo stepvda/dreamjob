@@ -28,7 +28,7 @@ from dreamjob.api.deps import (
     current_seeker,
     owned_or_404,
 )
-from dreamjob.db.connection import to_json, update_row
+from dreamjob.db.connection import from_json, to_json, update_row
 from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as repo
 from dreamjob.jobs.runner import runner
@@ -293,8 +293,14 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
 
 @router.get("/discover/{job_id}")
 def discovery_status(job_id: str, seeker: Seeker) -> dict[str, Any]:
-    """Progress of a contacts pass started above, owned by this seeker (FR-344)."""
-    return owned_or_404("job_run", job_id, seeker.id)
+    """Progress of a contacts pass started above, owned by this seeker (FR-344).
+
+    The checkpoint is decoded here rather than in the screen: the pass stores
+    its coverage report there, and a JSON string is not something the interface
+    should have to parse.
+    """
+    row = owned_or_404("job_run", job_id, seeker.id)
+    return {**row, "checkpoint": from_json(row.get("checkpoint"), {}) or {}}
 
 
 @router.get("/coverage")
