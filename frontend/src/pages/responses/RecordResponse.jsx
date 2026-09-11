@@ -21,7 +21,7 @@ import { CHANNELS, OUTCOMES, SILENCE_DAYS, daysSince, todayISODate } from './voc
  * The entry form for one application. Every outcome is the same control with
  * the same weight — see the file header.
  */
-export function RecordForm({ target, onCancel, onRecorded }) {
+export function RecordForm({ target, onCancel, onRecorded, cancelLabel = 'Choose a different application' }) {
   const [channel, setChannel] = useState('email')
   const [outcome, setOutcome] = useState('')
   const [date, setDate] = useState(todayISODate())
@@ -65,7 +65,7 @@ export function RecordForm({ target, onCancel, onRecorded }) {
         {target.opportunity_kind && <KindBadge kind={target.opportunity_kind} />}
         <div className="spacer" />
         <button type="button" className="btn btn-sm btn-ghost" onClick={onCancel}>
-          Choose a different application
+          {cancelLabel}
         </button>
       </div>
 

@@ -22,26 +22,26 @@ export const PAGE_HELP = {
     purpose:
       'Three steps: set up your profile, let Dream Job search and rank the market for you, then choose who to write to. Everything in between runs on its own.',
     steps: [
-      'Create your profile — import your LinkedIn export or your CV, and write a few lines about the job you actually want. That is the only input the search needs.',
-      'Press "Find my opportunities". Dream Job works out what to search for, picks the sources that fit, collects from them and ranks everything it found. It runs in the background, so you can close the page.',
-      'Review and select. Open the ranked list, read why each role is there, and tick the ones worth pursuing.',
+      'Your profile — import your LinkedIn export or your CV, and write a few lines about the job you actually want. That is the only input the search needs.',
+      'Opportunities — press "Find my opportunities". Dream Job works out what to search for, picks the sources that fit, collects from them and ranks everything it found. It runs in the background, so you can close the page.',
+      'Choose among the opportunities. Open the ranked list, read why each role is there, and tick the ones worth pursuing.',
       'Apply. Dream Job writes a tailored CV, a briefing and a motivation document for each, and an email — all for you to read, edit and send.',
     ],
     tips: [
       'Nothing is ever sent on its own. Every message waits for you to approve it.',
       'The search is tunable: the directives, campaigns and sources behind it are under Advanced in the sidebar.',
       'A speculative opening is a role Dream Job thinks a company may need, not one it has advertised. They are labelled everywhere so an email never claims a vacancy exists.',
-      'The full fifteen-stage picture is still available under Advanced → Full journey map.',
+      'The full fifteen-stage picture is still available under Advanced → Where I am.',
     ],
   },
 
   '/overview': {
     title: 'Where I am',
     purpose:
-      'The whole process on one screen: what is done, what is running, what is blocked and what the next useful move is. Every stage links to the screen that advances it.',
+      'The detailed journey map behind Start here: the whole process on one screen, with what is done, what is running, what is blocked and what it produced. Every stage links to the screen that advances it.',
     steps: [
       'Read the map left to right. A green mark is finished, a pulsing one is running, a dotted one is waiting on an earlier stage.',
-      'Follow the suggested next action if you are not sure where to go.',
+      'For the one thing to do next, go back to Start here — this screen is the detail behind that guided path.',
       'A blocked stage tells you what it needs — start there instead.',
     ],
     tips: [
@@ -71,7 +71,7 @@ export const PAGE_HELP = {
   },
 
   '/insights': {
-    title: 'What works, and where to redirect',
+    title: 'What works',
     purpose:
       'Which kinds of job and company actually answer you. Rates are computed from your recorded outcomes and shown with the sample size behind them, so you can judge them rather than trust them.',
     steps: [

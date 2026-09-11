@@ -23,7 +23,7 @@ import { HelpTip } from '../../components/Help'
 import Icon from '../../components/Icon'
 import { KindBadge } from '../../components/ui'
 
-import { StateBadge, isSendable } from './shared'
+import { StateBadge, isSendable } from '../../components/package/shared'
 
 /** The server's filter keys, grouped into the questions they answer. */
 const GROUPS = [

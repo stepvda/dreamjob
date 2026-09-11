@@ -10,7 +10,7 @@ import Icon from '../../components/Icon'
 import { Badge, Empty, SectionCard, formatDuration } from '../../components/ui'
 
 import ReuseReport from './ReuseReport'
-import { ITEM_TONE, Stat, cost, num } from './shared'
+import { Advanced, ITEM_TONE, Stat, cost, num } from './shared'
 
 export default function PlanReview({ plan, notes, busy, running, onPatch, onGenerate, onRecheckReuse }) {
   const items = plan?.items ?? []
@@ -56,7 +56,7 @@ export default function PlanReview({ plan, notes, busy, running, onPatch, onGene
           <Stat
             icon="document"
             label="Pages"
-            tip={{ title: 'Estimated pages', body: 'Result pages to fetch per source, capped by the campaign ceilings. Editing a number below re-estimates that source’s duration and cost.' }}
+            tip={{ title: 'Estimated pages', body: 'Result pages to fetch per source, capped by the campaign ceilings. Editing a source’s cap under Advanced re-estimates its duration and cost.' }}
             value={num(totals.estimated_pages)}
           />
           <Stat icon="clock" label="Duration" value={formatDuration(totals.estimated_seconds)} />
@@ -198,21 +198,12 @@ function PlanItem({ item, busy, locked, onPatch }) {
 
       {item.rationale && <p className="small" style={{ margin: '8px 0 0' }}>{item.rationale}</p>}
 
+      {/* Volume, duration and cost stay in the open; the page cap that sets
+          them and the raw native query fold behind Advanced. */}
       <div className="row row-wrap" style={{ marginTop: 10 }}>
-        <label className="small muted" htmlFor={`pages-${item.id}`}>
-          Pages
-        </label>
-        <input
-          id={`pages-${item.id}`}
-          type="number"
-          min="0"
-          max="500"
-          value={pages}
-          disabled={busy || locked}
-          onChange={(e) => setPages(e.target.value)}
-          onBlur={commitPages}
-          style={{ width: 84 }}
-        />
+        <span className="small muted">
+          {num(item.estimated_pages)} {item.estimated_pages === 1 ? 'page' : 'pages'}
+        </span>
         <span className="small muted">· {formatDuration(item.estimated_seconds)}</span>
         <span className="small muted">· {cost(item.estimated_cost_eur)}</span>
         {item.records_collected > 0 && (
@@ -222,11 +213,33 @@ function PlanItem({ item, busy, locked, onPatch }) {
         {busy && <span className="spinner" />}
       </div>
 
-      <div className="small muted" style={{ marginTop: 10 }}>
-        <Icon name="search" /> Native query
-        <HelpTip term="native_query" />
-      </div>
-      <pre className="cmp-query">{JSON.stringify(item.native_query ?? {}, null, 2)}</pre>
+      <Advanced label="Advanced">
+        <div className="row row-wrap">
+          <label className="small muted" htmlFor={`pages-${item.id}`}>
+            Pages
+          </label>
+          <input
+            id={`pages-${item.id}`}
+            type="number"
+            min="0"
+            max="500"
+            value={pages}
+            disabled={busy || locked}
+            onChange={(e) => setPages(e.target.value)}
+            onBlur={commitPages}
+            style={{ width: 84 }}
+          />
+          <span className="small muted">
+            Editing the cap re-estimates this source&apos;s duration and cost.
+          </span>
+        </div>
+
+        <div className="small muted" style={{ marginTop: 10 }}>
+          <Icon name="search" /> Native query
+          <HelpTip term="native_query" />
+        </div>
+        <pre className="cmp-query">{JSON.stringify(item.native_query ?? {}, null, 2)}</pre>
+      </Advanced>
 
       {item.last_error && (
         <div className="small" style={{ marginTop: 6, color: 'var(--danger)' }}>

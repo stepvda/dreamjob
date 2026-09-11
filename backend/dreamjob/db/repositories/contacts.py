@@ -64,6 +64,7 @@ MINIMAL_COLUMNS = frozenset(
         "email_validation",
         "email_validation_detail",
         "email_validated_at",
+        "email_uncertain",
         "is_generic_mailbox",
         "linkedin_url",
         "source",
@@ -240,6 +241,310 @@ def known_addresses_on_domain(domain: str, limit: int = 200) -> list[dict]:
     )
 
 
+# ---------------------------------------------------------------------------
+# E-mail backfill for stored contacts that have none (FR-303, FR-304, NFR-303)
+# ---------------------------------------------------------------------------
+#
+# The Contacts screen can hold a person - a hiring manager read off a team page,
+# a name carried over from the company profile - long before it holds an
+# address.  These three statements are the work list, its size and the guarded
+# write the backfill pass needs.  The write is on ``contact`` rather than the
+# ``usable_contact`` view because ``set_contact_email`` has to *set* an address
+# on a row the view would hide (it has no e-mail, which is the whole point).
+
+#: Orders for the missing-e-mail work list.  ``recent`` mirrors the browse
+#: default; ``company`` groups one employer's nameless rows together so a single
+#: domain resolution and site crawl serves all of its people (FR-305).
+_MISSING_EMAIL_ORDERS: dict[str, str] = {
+    "recent": "COALESCE(c.collected_at, '') DESC, c.id",
+    "company": (
+        "COALESCE(co.name, '') COLLATE NOCASE ASC, "
+        "COALESCE(c.full_name, '') COLLATE NOCASE ASC, c.id"
+    ),
+}
+
+
+def _missing_email_clauses(
+    *, job_seeker_id: str | None, company_id: str | None
+) -> tuple[list[str], list[Any]]:
+    """The WHERE clause every missing-e-mail query shares (FR-344, NFR-303)."""
+    clauses = ["(c.email IS NULL OR c.email = '')", "c.objected = 0"]
+    params: list[Any] = []
+    if company_id:
+        clauses.append("c.company_id = ?")
+        params.append(company_id)
+    if job_seeker_id:
+        # NFR-303 / FR-344, exactly as ``browse_contacts`` applies it: a
+        # campaign-scoped row is visible to its own campaign only, shared rows
+        # to everybody.
+        clauses.append(
+            "(c.shareable = 1 OR c.owning_campaign_id IS NULL"
+            " OR c.owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?))"
+        )
+        params.append(job_seeker_id)
+    return clauses, params
+
+
+def contacts_missing_email(
+    limit: int = 500,
+    *,
+    job_seeker_id: str | None = None,
+    company_id: str | None = None,
+    order: str = "recent",
+) -> list[dict]:
+    """Stored contacts with no address yet, oldest selection first (FR-303).
+
+    Reads ``contact`` directly rather than ``usable_contact``: the view hides a
+    row precisely because it has no address, and this pass exists to fill that
+    gap.  The objection flag and the seeker scope are therefore applied here, as
+    they are in :func:`browse_contacts`.  The company fields travel with each
+    row so the pass never has to re-read a company per person.
+    """
+    clauses, params = _missing_email_clauses(
+        job_seeker_id=job_seeker_id, company_id=company_id
+    )
+    ordering = _MISSING_EMAIL_ORDERS.get(order, _MISSING_EMAIL_ORDERS["recent"])
+    sql = (
+        "SELECT c.*, co.name AS company_name, co.domain AS company_domain,"
+        " co.careers_url AS company_careers_url, co.country AS company_country"
+        " FROM contact c LEFT JOIN company co ON co.id = c.company_id"
+        f" WHERE {' AND '.join(clauses)} ORDER BY {ordering} LIMIT ?"
+    )
+    return query_all(sql, (*params, int(limit)))
+
+
+def contacts_missing_email_count(*, job_seeker_id: str | None = None) -> int:
+    """How many contacts the backfill pass could still give an address (FR-303)."""
+    clauses, params = _missing_email_clauses(job_seeker_id=job_seeker_id, company_id=None)
+    row = query_one(
+        f"SELECT COUNT(*) AS n FROM contact c WHERE {' AND '.join(clauses)}",
+        tuple(params),
+    )
+    return int((row or {}).get("n") or 0)
+
+
+def set_contact_email(
+    contact_id: str,
+    *,
+    email: str,
+    method: str,
+    validation_result: str,
+    validation_detail: dict | None = None,
+    confidence: float | None = None,
+) -> bool:
+    """Store a newly found address on a contact that still has none (FR-303/304).
+
+    The guard is in the statement, not in the caller: the row is updated only
+    while it is still empty and not objected.  A concurrent pass that filled it
+    first, or an NFR-302 objection that arrived in the meantime, therefore wins
+    and this call is a no-op - which is what makes the whole pass idempotent and
+    safe to resume.  Returns whether a row actually changed.
+
+    A composed address (``pattern_inference``) is a hypothesis until FR-304 says
+    ``valid``, so ``email_uncertain`` is set for every other verdict; a
+    published or stated address is never uncertain.
+    """
+    address = (email or "").strip().lower()
+    if not address:
+        return False
+    detail = validation_detail or {}
+    uncertain = 1 if method == "pattern_inference" and validation_result != "valid" else 0
+    values: dict[str, Any] = {
+        "email": address,
+        "email_source_method": method,
+        "email_validation": validation_result,
+        "email_validation_detail": to_json(detail) if detail else None,
+        "email_validated_at": utcnow(),
+        "is_generic_mailbox": 1 if detail.get("role") else 0,
+        "email_uncertain": uncertain,
+    }
+    if confidence is not None:
+        values["confidence"] = round(float(confidence), 3)
+    payload = dict(values)
+    payload["__id"] = contact_id
+    sets = ", ".join(f"{k}=:{k}" for k in values)
+    sql = (
+        f"UPDATE contact SET {sets} WHERE id=:__id"
+        " AND (email IS NULL OR email = '') AND objected = 0"
+    )
+    return execute(sql, payload) > 0
+
+
+# ---------------------------------------------------------------------------
+# Browsing the contact corpus (FR-301, FR-344, NFR-303, NFR-502)
+# ---------------------------------------------------------------------------
+
+#: Browsing orders.  ``recent`` is what the screen opens on; ``company`` groups
+#: the addresses of one employer together so a reviewer can see the set.
+_BROWSE_ORDERS: dict[str, str] = {
+    "recent": "COALESCE(c.collected_at, '') DESC, c.confidence DESC, c.id",
+    "name": "COALESCE(c.full_name, '') COLLATE NOCASE ASC, c.id",
+    "company": (
+        "COALESCE(co.name, '') COLLATE NOCASE ASC, "
+        "COALESCE(c.full_name, '') COLLATE NOCASE ASC, c.id"
+    ),
+}
+
+
+def _browse_filters(
+    *,
+    include_blocked: bool,
+    job_seeker_id: str | None,
+    q: str | None,
+    company_id: str | None,
+    validation: str | None,
+    method: str | None,
+    uncertain: int | None,
+) -> tuple[list[str], list[Any]]:
+    """The WHERE clauses every browse query shares, so list and facets agree."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if not include_blocked and job_seeker_id:
+        # NFR-303 / FR-344: a campaign-scoped row is visible to its own campaign
+        # only; shared rows are visible to everybody.  ``usable_contact`` has
+        # already removed objections (NFR-302) and invalid addresses (FR-304).
+        clauses.append(
+            "(c.shareable = 1 OR c.owning_campaign_id IS NULL"
+            " OR c.owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?))"
+        )
+        params.append(job_seeker_id)
+    if q:
+        like = f"%{q.strip()}%"
+        clauses.append(
+            "(c.full_name LIKE ? OR c.email LIKE ? OR COALESCE(co.name, '') LIKE ?)"
+        )
+        params += [like, like, like]
+    if company_id:
+        clauses.append("c.company_id = ?")
+        params.append(company_id)
+    if validation:
+        clauses.append("COALESCE(c.email_validation, 'unknown') = ?")
+        params.append(validation)
+    if method:
+        clauses.append("c.email_source_method = ?")
+        params.append(method)
+    if uncertain is not None:
+        clauses.append("c.email_uncertain = ?")
+        params.append(1 if int(uncertain) else 0)
+    return clauses, params
+
+
+def _browse_table(include_blocked: bool) -> str:
+    return "contact" if include_blocked else "usable_contact"
+
+
+def browse_contacts(
+    *,
+    q: str | None = None,
+    company_id: str | None = None,
+    validation: str | None = None,
+    method: str | None = None,
+    uncertain: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    order: str = "recent",
+    include_blocked: bool = False,
+    job_seeker_id: str | None = None,
+) -> tuple[list[dict], int]:
+    """One page of the contact corpus, filtered, with its total (FR-301, NFR-502).
+
+    ``include_blocked`` reads ``contact`` instead of the ``usable_contact``
+    view, so an administrator can see objected (NFR-302) and ``invalid``
+    (FR-304) rows; the router is where that is restricted to an administrator.
+    Every other read goes through the view, which is what makes the exclusion
+    impossible to forget.
+    """
+    table = _browse_table(include_blocked)
+    clauses, params = _browse_filters(
+        include_blocked=include_blocked,
+        job_seeker_id=job_seeker_id,
+        q=q,
+        company_id=company_id,
+        validation=validation,
+        method=method,
+        uncertain=uncertain,
+    )
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    base = f"FROM {table} c LEFT JOIN company co ON co.id = c.company_id{where}"
+    total_row = query_one(f"SELECT COUNT(*) AS n {base}", tuple(params))
+    total = int((total_row or {}).get("n") or 0)
+    ordering = _BROWSE_ORDERS.get(order, _BROWSE_ORDERS["recent"])
+    rows = query_all(
+        f"SELECT c.*, co.name AS company_name {base} ORDER BY {ordering} LIMIT ? OFFSET ?",
+        (*params, int(limit), int(offset)),
+    )
+    return rows, total
+
+
+def browse_facets(
+    *,
+    q: str | None = None,
+    company_id: str | None = None,
+    validation: str | None = None,
+    method: str | None = None,
+    uncertain: int | None = None,
+    include_blocked: bool = False,
+    job_seeker_id: str | None = None,
+) -> dict[str, Any]:
+    """Counts beside the browse list (FR-301).
+
+    Each dimension is counted over the same filters *minus its own*, so a
+    screen filtered to ``valid`` can still show how many risky and unknown
+    addresses the same query would offer.
+    """
+
+    def _where(**overrides: Any) -> tuple[str, list[Any]]:
+        values: dict[str, Any] = {
+            "include_blocked": include_blocked,
+            "job_seeker_id": job_seeker_id,
+            "q": q,
+            "company_id": company_id,
+            "validation": validation,
+            "method": method,
+            "uncertain": uncertain,
+        }
+        values.update(overrides)
+        clauses, params = _browse_filters(**values)
+        return ((" WHERE " + " AND ".join(clauses)) if clauses else ""), params
+
+    base_from = (
+        f"FROM {_browse_table(include_blocked)} c "
+        "LEFT JOIN company co ON co.id = c.company_id"
+    )
+
+    where, params = _where(validation=None)
+    by_validation = {
+        (row["bucket"] or "unknown"): int(row["n"])
+        for row in query_all(
+            "SELECT COALESCE(c.email_validation, 'unknown') AS bucket,"
+            f" COUNT(*) AS n {base_from}{where} GROUP BY bucket",
+            tuple(params),
+        )
+    }
+
+    where, params = _where(method=None)
+    by_method = {
+        (row["bucket"] or "unknown"): int(row["n"])
+        for row in query_all(
+            "SELECT COALESCE(c.email_source_method, 'unknown') AS bucket,"
+            f" COUNT(*) AS n {base_from}{where} GROUP BY bucket",
+            tuple(params),
+        )
+    }
+
+    where, params = _where(uncertain=None)
+    row = query_one(
+        f"SELECT SUM(CASE WHEN c.email_uncertain = 1 THEN 1 ELSE 0 END) AS n"
+        f" {base_from}{where}",
+        tuple(params),
+    )
+    return {
+        "by_validation": by_validation,
+        "by_method": by_method,
+        "uncertain": int((row or {}).get("n") or 0),
+    }
+
+
 def upsert_contact(values: dict) -> tuple[str, bool]:
     """Insert or refresh one contact, minimised to FR-306.  Returns ``(id, created)``.
 
@@ -252,6 +557,17 @@ def upsert_contact(values: dict) -> tuple[str, bool]:
     values.setdefault("collected_at", utcnow())
     if values.get("email"):
         values["email"] = str(values["email"]).strip().lower()
+
+    # FR-303/FR-304: an address composed by pattern inference is a hypothesis
+    # until a validation says otherwise.  A ``valid`` verdict clears the flag;
+    # every other verdict - or none yet - leaves it set, and an explicit 1 is
+    # respected.  An address that was published or stated rather than composed
+    # is never uncertain, so the column is left alone for another method.
+    if values.get("email_source_method") == "pattern_inference":
+        if values.get("email_validation") == "valid":
+            values["email_uncertain"] = 0
+        elif values.get("email_uncertain") != 1:
+            values["email_uncertain"] = 1
 
     existing: dict | None = None
     if values.get("email"):
@@ -282,6 +598,17 @@ def upsert_contact(values: dict) -> tuple[str, bool]:
 
 
 def set_validation(contact_id: str, result: str, detail: dict | None = None) -> None:
+    """Store the FR-304 verdict and keep FR-303 uncertainty in step.
+
+    A composed address stops being uncertain only when the verdict is
+    ``valid``; any other verdict - ``risky``, ``unknown`` or ``invalid`` -
+    leaves the flag set.  The method is read from the row rather than imported
+    from :mod:`dreamjob.pipeline.email_patterns`, which would be a circular
+    import; ``'pattern_inference'`` is the literal FR-303 label either way.
+    """
+    row = query_one("SELECT email_source_method FROM contact WHERE id = ?", (contact_id,))
+    method = (row or {}).get("email_source_method")
+    uncertain = 1 if method == "pattern_inference" and result != "valid" else 0
     update_row(
         "contact",
         contact_id,
@@ -289,6 +616,7 @@ def set_validation(contact_id: str, result: str, detail: dict | None = None) -> 
             "email_validation": result,
             "email_validation_detail": to_json(detail) if detail else None,
             "email_validated_at": utcnow(),
+            "email_uncertain": uncertain,
         },
     )
 

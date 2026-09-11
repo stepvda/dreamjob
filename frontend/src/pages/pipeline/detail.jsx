@@ -36,7 +36,14 @@ import {
   toDateInput,
 } from './shared'
 
-export default function CardDetail({ cardId, onClose, onChanged, onRehearse, onNegotiate }) {
+export default function CardDetail({
+  cardId,
+  onClose,
+  onChanged,
+  onRespond,
+  onRehearse,
+  onNegotiate,
+}) {
   const detail = useFetch(() => api.get(`/pipeline/cards/${cardId}`), [cardId])
   const [busy, setBusy] = useState(null)
   const [actionError, setActionError] = useState(null)
@@ -67,9 +74,9 @@ export default function CardDetail({ cardId, onClose, onChanged, onRehearse, onN
       onClose={onClose}
       actions={
         <>
-          <Link className="btn" to="/responses">
-            Record a response
-          </Link>
+          <button className="btn" disabled={!card} onClick={() => onRespond?.(card)}>
+            Record or correct a response
+          </button>
           <button className="btn btn-ghost" onClick={onClose}>
             Close
           </button>
@@ -141,6 +148,7 @@ export default function CardDetail({ cardId, onClose, onChanged, onRehearse, onN
             onDiscard={(draftId) =>
               run(`draft:${draftId}`, () => api.post(`/pipeline/drafts/${draftId}/discard`, {}))
             }
+            onRespond={() => onRespond?.(card)}
           />
 
           <div className="card" style={{ marginTop: 14 }}>

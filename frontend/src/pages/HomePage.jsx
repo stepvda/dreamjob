@@ -7,11 +7,12 @@
  * pipeline does between them running in the background and reporting itself
  * here.
  *
- * It is deliberately not the old "Where I am" map: that showed fifteen internal
- * stages and left the job seeker to work out which one they were meant to move.
- * This shows three, and the only decision on it is "start", "choose", "apply".
- * The detailed map still exists, one click away under Advanced, for anyone who
- * wants it.
+ * It is deliberately not the detailed journey map ("Where I am"): that shows the
+ * fifteen internal stages and leaves the job seeker to work out which one they
+ * are meant to move. This shows the three steps a person actually does — set up
+ * the profile, choose among the opportunities, apply — and the only decisions on
+ * it are "start", "choose", "apply". The map is the detail behind it, one click
+ * away under Advanced.
  */
 
 import { useEffect, useState } from 'react'
@@ -102,7 +103,7 @@ export default function HomePage() {
       {/* --- Step 1 ------------------------------------------------------- */}
       <Step
         n={1}
-        title="Create your profile"
+        title="Your profile"
         icon="profile"
         phase="phase-1"
         state={ready ? 'done' : 'current'}
@@ -170,7 +171,7 @@ export default function HomePage() {
       {/* --- Step 2 ------------------------------------------------------- */}
       <Step
         n={2}
-        title="Review and select"
+        title="Opportunities"
         icon="opportunities"
         phase="phase-3"
         state={hasOpportunities ? 'current' : 'locked'}
@@ -245,8 +246,8 @@ export default function HomePage() {
 
       <p className="small muted" style={{ marginTop: 18 }}>
         Want the controls behind all of this — directives, campaigns, sources, contacts,
-        mail setup? They are all still there.{' '}
-        <Link to="/overview">Open the full journey map</Link>.
+        mail setup? They are all still there under Advanced.{' '}
+        <Link to="/overview">Open Where I am</Link> for the detailed journey map.
       </p>
     </div>
   )

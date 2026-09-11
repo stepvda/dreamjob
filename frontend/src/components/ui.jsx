@@ -180,7 +180,7 @@ export function ValidationBadge({ result }) {
  * Every long-running operation shows progress, a time estimate and a cancel
  * control (NFR-502).
  */
-export function JobProgress({ job, onPause, onResume, onCancel }) {
+export function JobProgress({ job, report, onPause, onResume, onCancel }) {
   if (!job) return null
   const running = job.status === 'running'
   const terminal = ['done', 'failed', 'cancelled'].includes(job.status)
@@ -197,6 +197,10 @@ export function JobProgress({ job, onPause, onResume, onCancel }) {
     : job.progress_total
       ? Math.round((job.progress_done / job.progress_total) * 100)
       : null
+  // Live counters: the explicit prop wins, otherwise read the lightweight copy
+  // the worker keeps in the checkpoint while it runs. Absent entirely, nothing
+  // extra is rendered.
+  const liveLine = formatJobReport(report || job.checkpoint?.report)
 
   return (
     <div className="card">
@@ -241,8 +245,74 @@ export function JobProgress({ job, onPause, onResume, onCancel }) {
         <div className="spacer" />
         {job.last_error && <span title={job.last_error}>{shorten(job.last_error)}</span>}
       </div>
+      {liveLine && (
+        <div className="small muted" style={{ marginTop: 4 }}>
+          {liveLine}
+        </div>
+      )}
     </div>
   )
+}
+
+/**
+ * Turn a job's running counters into one compact line. Discovery and backfill
+ * use different counter names, so the shape is detected from the keys that are
+ * present; unknown keys are ignored and missing numbers count as 0.
+ */
+function formatJobReport(report) {
+  if (!report || typeof report !== 'object') return ''
+  const n = (value) => Number(value) || 0
+  const has = (key) => report[key] != null
+  const backfill =
+    has('considered') ||
+    has('updated') ||
+    has('uncertain') ||
+    has('already_had_email') ||
+    has('skipped_no_company') ||
+    has('skipped_no_domain') ||
+    has('skipped_unresolved') ||
+    has('skipped_invalid')
+  if (backfill) {
+    const parts = []
+    if (has('updated')) parts.push(`${n(report.updated)} contacts updated`)
+    if (has('uncertain')) parts.push(`${n(report.uncertain)} uncertain`)
+    const skipped = []
+    if (has('skipped_no_company')) skipped.push(`${n(report.skipped_no_company)} no company`)
+    if (has('skipped_no_domain')) skipped.push(`${n(report.skipped_no_domain)} no domain`)
+    if (has('skipped_unresolved')) skipped.push(`${n(report.skipped_unresolved)} unresolved`)
+    if (has('skipped_invalid')) skipped.push(`${n(report.skipped_invalid)} invalid`)
+    if (skipped.length) {
+      const total =
+        n(report.skipped_no_company) +
+        n(report.skipped_no_domain) +
+        n(report.skipped_unresolved) +
+        n(report.skipped_invalid)
+      parts.push(`${total} skipped (${skipped.join(', ')})`)
+    }
+    if (has('companies_visited')) parts.push(`${n(report.companies_visited)} companies visited`)
+    return parts.join(' · ')
+  }
+  const discovery =
+    has('companies_reachable') ||
+    has('companies_unreachable') ||
+    has('vacancies_covered') ||
+    has('companies_reused') ||
+    has('scope') ||
+    has('requested') ||
+    // `companies_visited` is shared with backfill, but backfill was already
+    // matched above, so reaching here with it means this is discovery.
+    has('companies_visited')
+  if (discovery) {
+    const parts = []
+    if (has('companies_visited')) parts.push(`${n(report.companies_visited)} companies visited`)
+    if (has('companies_reachable')) parts.push(`${n(report.companies_reachable)} reachable`)
+    if (has('companies_unreachable'))
+      parts.push(`${n(report.companies_unreachable)} with nothing found`)
+    if (has('companies_reused')) parts.push(`${n(report.companies_reused)} reused`)
+    if (has('vacancies_covered')) parts.push(`${n(report.vacancies_covered)} vacancies covered`)
+    return parts.join(' · ')
+  }
+  return ''
 }
 
 const STATUS_TONE = {

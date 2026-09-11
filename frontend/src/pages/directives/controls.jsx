@@ -52,6 +52,34 @@ export function Group({ icon, title, tip, summary, badge, defaultOpen = false, c
   )
 }
 
+/* --- Progressive disclosure: advanced controls ---------------------------- */
+
+/**
+ * A one-click disclosure that folds each group's rarely-used controls behind an
+ * "Advanced settings" toggle. It is collapsed by default so the essentials of a
+ * group are what you meet first, but nothing is removed: opening it restores
+ * every control exactly as it was (FR-141).
+ */
+export function Advanced({ label = 'Advanced settings', children }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div style={{ marginTop: 4, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+      <button
+        type="button"
+        className="btn btn-sm btn-ghost"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="dir-caret" aria-hidden>
+          {open ? '\u25be' : '\u25b8'}
+        </span>
+        {open ? `Hide ${label}` : `Show ${label}`}
+      </button>
+      {open && <div style={{ marginTop: 10 }}>{children}</div>}
+    </div>
+  )
+}
+
 /* --- Drop-down ------------------------------------------------------------ */
 
 /** A single-choice control over a vocabulary group (FR-141, NFR-501 labels). */

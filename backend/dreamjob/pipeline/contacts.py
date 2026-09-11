@@ -150,6 +150,7 @@ class ContactCandidate:
     rationale: str = ""
     validation: str | None = None
     validation_detail: dict[str, Any] = field(default_factory=dict)
+    email_uncertain: bool = False
     contact_id: str | None = None
     score: float = 0.0
     blocked: bool = False
@@ -187,6 +188,7 @@ class ContactCandidate:
             "email": self.email,
             "email_source_method": self.email_source_method,
             "email_validation": self.validation,
+            "email_uncertain": 1 if self.email_uncertain else 0,
             "is_generic_mailbox": self.is_generic_mailbox,
             "linkedin_url": self.linkedin_url,
             "source": self.source,
@@ -344,6 +346,7 @@ def candidates_from_stored(company_id: str, campaign_id: str | None) -> list[Con
                 confidence=float(row.get("confidence") or 0.5),
                 validation=row.get("email_validation"),
                 validation_detail=from_json(row.get("email_validation_detail"), {}) or {},
+                email_uncertain=bool(row.get("email_uncertain")),
                 rationale="Already in the knowledge base",
                 blocked=blocked,
             )
@@ -737,6 +740,11 @@ async def discover_for_opportunity(
                 candidate.confidence = min(candidate.confidence, 0.6)
                 candidate.validation = verdict.result
                 candidate.validation_detail = verdict.detail
+                if (
+                    address.method == patterns.METHOD_PATTERN
+                    and verdict.result != validation.VALID
+                ):
+                    candidate.email_uncertain = True
                 candidate.rationale += (
                     f"; address inferred from the {inference.pattern} convention"
                     if inference and inference.pattern

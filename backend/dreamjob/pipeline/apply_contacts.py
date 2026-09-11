@@ -84,6 +84,7 @@ import logging
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -631,6 +632,7 @@ async def gather_candidates(
     egress: EgressClient | None = None,
     crawl_site: bool = True,
     allow_generic: bool = True,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[discovery.ContactCandidate]:
     """Steps 1 and 3 to 5 of the FR-301 ladder, as ranked candidates."""
     company_id = company.get("company_id") or ""
@@ -664,7 +666,8 @@ async def gather_candidates(
     if crawl_site:
         try:
             harvested = await patterns.collect_from_site(
-                domain, careers_url=company.get("careers_url"), egress=egress, max_pages=8
+                domain, careers_url=company.get("careers_url"), egress=egress, max_pages=12,
+                diagnostics=diagnostics,
             )
         except Exception as exc:  # noqa: BLE001 - the site is optional evidence
             log.info("Could not read %s for addresses: %s", domain, exc)
@@ -687,6 +690,34 @@ async def gather_candidates(
                 rationale="Published on the company's own pages (FR-303 website)",
             )
         )
+
+    # 3b - the search index, when the site blocked us or published nothing new.
+    # A search engine has already crawled the pages an F5/Cloudflare challenge
+    # hides from us, so its results are the only way into those sites (FR-303).
+    if crawl_site and patterns.search_enabled():
+        try:
+            found = await patterns.search_for_contacts(
+                company.get("company_name") or "", domain, egress=egress
+            )
+        except patterns.SearchDisabled:
+            found = []
+        except Exception as exc:  # noqa: BLE001 - search is an optional source
+            log.info("Search source failed for %s: %s", domain, exc)
+            found = []
+        for address in found:
+            candidates.append(
+                discovery.ContactCandidate(
+                    full_name=address.full_name,
+                    role_title=None,
+                    tier=discovery.classify_role(address.context),
+                    source=address.source_url or patterns.METHOD_SEARCH,
+                    email=address.email,
+                    email_source_method=patterns.METHOD_SEARCH,
+                    is_generic_mailbox=validation.is_role_address(address.email),
+                    confidence=address.confidence,
+                    rationale="Found through the search index (FR-303 search)",
+                )
+            )
 
     # 4 - the domain's convention, learned from what was just seen (FR-303).
     observations = [
@@ -846,12 +877,20 @@ async def resolve_company(
     if domain and source == SOURCE_DERIVED:
         await asyncio.to_thread(repo.set_company_domain, outcome.company_id, domain)
 
+    diagnostics: dict[str, Any] = {}
     candidates = await gather_candidates(
         company, domain, published, egress=egress,
         crawl_site=crawl_site and bool(domain), allow_generic=allow_generic and bool(domain),
+        diagnostics=diagnostics,
     )
     if not candidates:
-        outcome.reason = note or "no address could be found for this company"
+        if diagnostics.get("challenge_pages"):
+            outcome.reason = (
+                f"{note or 'the domain resolved'}; the site answered with a bot-protection "
+                "challenge (F5/Cloudflare/Incapsula), so no page could be read for an address"
+            )
+        else:
+            outcome.reason = note or "no address could be found for this company"
         await asyncio.to_thread(repo.record_resolution, outcome.company_id, _resolution(outcome))
         return outcome
 
@@ -952,6 +991,9 @@ class ApplyContactsReport:
 
     job_seeker_id: str
     requested: int
+    #: ``shortlist`` counts vacancies; ``all`` counts companies.  Recorded so a
+    #: checkpoint decoded long after the run says which target it was given.
+    scope: str = "shortlist"
     already_covered: int = 0
     shortfall: int = 0
     companies_visited: int = 0
@@ -989,6 +1031,7 @@ class ApplyContactsReport:
         return {
             "job_seeker_id": self.job_seeker_id,
             "requested": self.requested,
+            "scope": self.scope,
             "already_covered": self.already_covered,
             "shortfall": self.shortfall,
             "companies_visited": self.companies_visited,
@@ -1009,6 +1052,26 @@ class ApplyContactsReport:
             # conventional careers mailbox is never counted as if somebody had
             # published it.
             "coverage": repo.coverage_by_method(),
+        }
+
+    def progress(self) -> dict[str, Any]:
+        """The counters a progress tick needs, without the corpus queries.
+
+        :meth:`as_dict` is the finished report and reads the repository twice
+        for figures that only make sense once the pass is over.  A tick fires
+        after every company, so it carries the cheap counters and nothing else.
+        """
+        return {
+            "scope": self.scope,
+            "requested": self.requested,
+            "companies_visited": self.companies_visited,
+            "companies_reachable": self.companies_reachable,
+            "companies_unreachable": self.companies_unreachable,
+            "companies_reused": self.companies_reused,
+            "vacancies_covered": self.vacancies_covered,
+            "by_method": dict(self.by_method),
+            "by_validation": dict(self.by_validation),
+            "unreachable_reasons": dict(self.unreachable_reasons.most_common(5)),
         }
 
 
@@ -1041,11 +1104,22 @@ def _stale_before(days: int) -> str:
     return (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
 
 
+def _notify(cb: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
+    """Hand a progress payload to the caller; progress must never fail a pass."""
+    if cb is None:
+        return
+    try:
+        cb(payload)
+    except Exception:  # noqa: BLE001 - progress must never fail a pass
+        log.debug("progress callback failed", exc_info=True)
+
+
 async def ensure_apply_contacts(
     job_seeker_id: str,
     limit: int = 500,
     *,
     campaign_id: str | None = None,
+    scope: str = "shortlist",
     max_companies: int | None = None,
     concurrency: int = 8,
     allow_smtp: bool = False,
@@ -1054,15 +1128,22 @@ async def ensure_apply_contacts(
     allow_generic: bool = True,
     refresh: bool = False,
     order: str = "vacancies",
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> ApplyContactsReport:
-    """Give at least ``limit`` vacancies something to apply to (FR-301, FR-303).
+    """Give the seeker something to apply to, at one of two scopes (FR-301, FR-303).
 
-    ``limit`` counts *vacancies*, not companies: the pass walks companies -
-    newest vacancy first, and companies that back one of this job seeker's
-    opportunities first - and stops as soon as ``limit`` vacancies have
-    somebody to write to.  Sixty companies can carry five hundred vacancies,
-    so counting companies would either stop far too early or crawl hundreds of
-    sites nobody needed.
+    ``scope='shortlist'`` (the default) is the original pass: ``limit`` counts
+    *vacancies*, the work list is :func:`apply.companies_needing_contact`, and
+    the pass stops as soon as ``limit`` vacancies have somebody to write to.
+    Sixty companies can carry five hundred vacancies, so counting companies
+    would either stop far too early or crawl hundreds of sites nobody needed.
+
+    ``scope='all'`` widens the pool to every company in the knowledge base,
+    including companies with no vacancy and no opportunity: ``limit`` counts
+    *companies to visit*, the work list is
+    :func:`apply.all_companies_for_contact`, and the pass visits every selected
+    company without stopping early on vacancy coverage.  ``max_companies`` caps
+    the work list either way.
 
     ``order`` is ``vacancies`` by default because ``limit`` is: a target
     counted in vacancies is filled fastest by walking the companies that carry
@@ -1071,46 +1152,83 @@ async def ensure_apply_contacts(
     same politeness budget (FR-305, CR-402).  ``recency`` is still there for a
     caller that wants the freshest corpus rather than the largest.
 
-    ``limit`` is a *target for the corpus*, not a quota for this call: the
-    vacancies already covered are subtracted first, so calling this twice does
-    not do the work twice, and calling it when the corpus is already there
-    fetches nothing at all.  ``already_covered`` and ``shortfall`` on the
-    report say which of the two happened.
+    In the ``shortlist`` scope, ``limit`` is a *target for the corpus*, not a
+    quota for this call: the vacancies already covered are subtracted first, so
+    calling this twice does not do the work twice, and calling it when the
+    corpus is already there fetches nothing at all.  ``already_covered`` and
+    ``shortfall`` on the report say which of the two happened; in the ``all``
+    scope ``requested`` is the number of companies selected instead.
 
     Companies are resolved concurrently; the shared :class:`EgressClient` is
     what keeps that polite, since its per-domain rate limit and robots.txt
     cache are per client, not per task (FR-182, FR-305).  Every company is
     a different domain, so the concurrency costs no single site anything.
     """
+    sweep_all = scope == "all"
     covered_now = await asyncio.to_thread(repo.vacancies_with_contact)
     report = ApplyContactsReport(
         job_seeker_id=job_seeker_id,
         requested=limit,
+        scope=scope,
         already_covered=int(covered_now["with_contact"]),
     )
-    report.shortfall = max(0, limit - report.already_covered)
-    if report.shortfall == 0:
-        log.info(
-            "Apply contacts: %d vacancies already have a contact; nothing to do",
-            report.already_covered,
+
+    if sweep_all:
+        # ``limit`` counts companies here, so there is no corpus shortfall to
+        # reach and no early return: the sweep visits every company the work
+        # list selects, whatever the vacancy coverage turns out to be.
+        ceiling = limit if max_companies is None else min(limit, max_companies)
+        work = await asyncio.to_thread(
+            repo.all_companies_for_contact,
+            ceiling,
+            job_seeker_id=job_seeker_id,
+            include_resolved=refresh,
+            resolved_before=_stale_before(RESOLUTION_MAX_AGE_DAYS) if refresh else None,
+            order=order,
         )
-        report.finished_at = utcnow()
-        return report
-    # Two companies looked at per vacancy still needed: about half of them turn
-    # out to be unreachable, and the reachable ones carry more than one vacancy
-    # each, so this is a generous ceiling rather than a tight estimate.
-    ceiling = max_companies if max_companies is not None else max(50, 2 * report.shortfall)
-    work = await asyncio.to_thread(
-        repo.companies_needing_contact,
-        ceiling,
-        job_seeker_id=job_seeker_id,
-        include_resolved=refresh,
-        resolved_before=_stale_before(RESOLUTION_MAX_AGE_DAYS) if refresh else None,
-        order=order,
-    )
+        # ``requested`` reports how many companies the sweep set out to visit,
+        # which is what a caller comparing it to ``companies_visited`` wants.
+        report.requested = len(work)
+        report.shortfall = 0
+    else:
+        report.shortfall = max(0, limit - report.already_covered)
+        if report.shortfall == 0:
+            log.info(
+                "Apply contacts: %d vacancies already have a contact; nothing to do",
+                report.already_covered,
+            )
+            report.finished_at = utcnow()
+            _notify(
+                on_progress,
+                {"phase": "done", "done": 1, "total": 1, "report": report.progress()},
+            )
+            return report
+        # Two companies looked at per vacancy still needed: about half of them
+        # turn out to be unreachable, and the reachable ones carry more than one
+        # vacancy each, so this is a generous ceiling rather than a tight
+        # estimate.
+        ceiling = max_companies if max_companies is not None else max(50, 2 * report.shortfall)
+        work = await asyncio.to_thread(
+            repo.companies_needing_contact,
+            ceiling,
+            job_seeker_id=job_seeker_id,
+            include_resolved=refresh,
+            resolved_before=_stale_before(RESOLUTION_MAX_AGE_DAYS) if refresh else None,
+            order=order,
+        )
+    total = len(work)
     if not work:
         report.finished_at = utcnow()
+        _notify(
+            on_progress,
+            {"phase": "done", "done": 1, "total": 1, "report": report.progress()},
+        )
         return report
+
+    _notify(
+        on_progress,
+        {"phase": "start", "done": 0, "total": total, "report": report.progress()},
+    )
 
     gate = asyncio.Semaphore(max(1, concurrency))
     done = asyncio.Event()
@@ -1151,7 +1269,16 @@ async def ensure_apply_contacts(
                 if outcome is None:
                     continue
                 report.absorb(outcome)
-                if report.vacancies_covered >= report.shortfall:
+                _notify(
+                    on_progress,
+                    {
+                        "phase": "company",
+                        "done": report.companies_visited,
+                        "total": total,
+                        "report": report.progress(),
+                    },
+                )
+                if not sweep_all and report.vacancies_covered >= report.shortfall:
                     done.set()
         finally:
             for task in tasks:
@@ -1160,9 +1287,9 @@ async def ensure_apply_contacts(
 
     report.finished_at = utcnow()
     log.info(
-        "Apply contacts: %d/%d vacancies newly covered across %d companies "
+        "Apply contacts (%s): %d/%d vacancies newly covered across %d companies "
         "(%d reachable, %d unreachable, %d reused); %d were covered before the pass",
-        report.vacancies_covered, report.shortfall, report.companies_visited,
+        scope, report.vacancies_covered, report.shortfall, report.companies_visited,
         report.companies_reachable, report.companies_unreachable, report.companies_reused,
         report.already_covered,
     )
@@ -1195,8 +1322,17 @@ async def contacts_discovery_worker(ctx: JobContext):
     options = dict((ctx.checkpoint or {}).get("options") or {})
     limit = int(options.pop("limit", 500) or 500)
     campaign_id = options.pop("campaign_id", None) or ctx.campaign_id
+
+    def on_progress(payload: dict[str, Any]) -> None:
+        total = payload.get("total")
+        if total:
+            ctx.progress(int(payload.get("done") or 0), int(total))
+        if payload.get("report"):
+            ctx.save_checkpoint(report=payload["report"])
+
     report = await ensure_apply_contacts(
-        ctx.job_seeker_id or "", limit, campaign_id=campaign_id, **options
+        ctx.job_seeker_id or "", limit, campaign_id=campaign_id,
+        on_progress=on_progress, **options,
     )
     payload = report.as_dict()
     ctx.save_checkpoint(report=payload)

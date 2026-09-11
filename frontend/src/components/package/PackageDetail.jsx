@@ -1,12 +1,18 @@
 /**
- * One application package, reviewed (FR-321..324, FR-329..331, NFR-206).
+ * One application package, reviewed and dispatched (FR-321..324, FR-329..331,
+ * NFR-206).
+ *
+ * This is the single detail pane both routes render. It is driven by the flat
+ * package preview the API returns and by callbacks the host screen supplies,
+ * so the Applications screen and the Apply Browser show the same five tabs,
+ * the same approval gate and the same send controls while each route keeps its
+ * own list, its own endpoints and its own data fetching.
  *
  * Five tabs, in the order a careful reader would take them: the email that is
  * actually sent, the CV that is actually attached, the two documents that are
  * not, and then the checks that decide whether any of it may go.
  *
- * This file owns the header, the tab bar and every call to the API; the panels
- * are presentation. Two constraints shape it more than anything else:
+ * Two constraints shape it more than anything else:
  *
  * * FR-321 makes the briefing and the motivation document job-seeker material.
  *   The API enforces it; this screen has to *say* it, because a reader who is
@@ -21,97 +27,116 @@
 
 import { useEffect, useState } from 'react'
 
-import { api } from '../../api/client'
-import { HelpTip } from '../../components/Help'
-import { Badge, ErrorBox, Field, KindBadge, Modal, Tabs, formatDate } from '../../components/ui'
+import { HelpTip } from '../Help'
+import Icon from '../Icon'
+import { Badge, ErrorBox, Field, KindBadge, Loading, Modal, Tabs, formatDate } from '../ui'
 
-import ChecksPanel from './ChecksPanel'
-import CvPanel from './CvPanel'
-import EmailPanel from './EmailPanel'
-import SeekerOnlyPanel from './SeekerOnlyPanel'
+import { ChecksPanel, CvPanel, EmailPanel, SeekerOnlyPanel } from './Panels'
+import { SendReport } from './Send'
 import {
   LANGUAGES,
   PACKAGE_STATUS_LABEL,
   PACKAGE_STATUS_TONE,
   canApprove,
-  documentName,
   hardBlockers,
   softBlockers,
-} from './shared'
+} from '../packageStatus'
 
-export default function PackageDetail({ pkg, templates, photo, onChanged, onApprove }) {
+export default function PackageDetail({
+  pkg,
+  row,
+  loading,
+  error,
+  templates,
+  photo,
+  busy,
+  advisories,
+  sendResult,
+  sendError,
+  onDismissSend,
+  onGenerate,
+  onSave,
+  onRegenerate,
+  onTemplate,
+  onRecheck,
+  onApprove,
+  onDiscard,
+  onSend,
+  onRefreshBriefing,
+  onDownload,
+  previewUrl,
+  onReload,
+}) {
   const [tab, setTab] = useState('email')
   const [subject, setSubject] = useState('')
   const [body, setBody] = useState('')
   const [instructions, setInstructions] = useState('')
-  const [busy, setBusy] = useState(null)
-  const [error, setError] = useState(null)
   const [discarding, setDiscarding] = useState(false)
   const [reason, setReason] = useState('')
 
   // A save or a regeneration replaces the package; the editor follows it.
   useEffect(() => {
-    setSubject(pkg.email_subject || '')
-    setBody(pkg.email_body || '')
-    setError(null)
-  }, [pkg.id, pkg.updated_at, pkg.email_subject, pkg.email_body])
+    setSubject(pkg?.email_subject || '')
+    setBody(pkg?.email_body || '')
+  }, [pkg?.id, pkg?.updated_at, pkg?.email_subject, pkg?.email_body])
+
+  // Nothing generated yet (or generated and since gone): the honest screen is
+  // an invitation to generate rather than five empty tabs.
+  if (!pkg) {
+    const title = row?.title || row?.opportunity_title || 'Untitled role'
+    const company = row?.company_name || row?.company?.name || 'Unknown company'
+    if (loading) {
+      return (
+        <div className="card">
+          <Header row={row} />
+          <Loading rows={6} />
+        </div>
+      )
+    }
+    if (error) {
+      return (
+        <div className="card">
+          <Header row={row} />
+          <ErrorBox error={error} onRetry={onReload} />
+        </div>
+      )
+    }
+    const fresh = !row?.package_id
+    return (
+      <div className="card phase-4 phase-edge">
+        <Header row={row} />
+        <div className="empty" style={{ padding: '32px 20px' }}>
+          <h3>{fresh ? 'Nothing has been generated for this one yet' : 'This job no longer has a live package'}</h3>
+          <p>
+            {fresh
+              ? `Generating produces four documents for ${company}: a CV tailored to ${title}, a briefing on the company, a motivation and fit document, and the email that carries the CV.`
+              : 'It was discarded, or generated again elsewhere. Generate it afresh to work on it.'}
+          </p>
+          <button className="btn btn-phase" disabled={busy === 'gen'} onClick={onGenerate}>
+            {busy === 'gen' ? <span className="spinner" /> : 'Generate the four documents'}
+          </button>
+          {fresh && !row?.contact_email && (
+            <p className="small muted" style={{ marginTop: 12 }}>
+              There is no contact for {company} yet. You can still generate — the email is written
+              to whoever is found later — but it cannot be sent until there is a validated address.
+            </p>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   const report = pkg.consistency_report || {}
   const findingCount = (report.findings?.length || 0) + (report.leaks?.length || 0)
   const editable = pkg.status !== 'sent' && pkg.status !== 'discarded'
   const hard = hardBlockers(pkg)
   const soft = softBlockers(pkg)
-
-  async function run(key, fn) {
-    setBusy(key)
-    setError(null)
-    try {
-      await fn()
-      onChanged()
-    } catch (e) {
-      setError(e)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const save = () =>
-    run('save', () =>
-      api.patch(`/applications/${pkg.id}`, { email_subject: subject, email_body: body }),
-    )
-
-  const recheck = () => run('check', () => api.post(`/applications/${pkg.id}/consistency`))
-
-  /* FR-324: regenerate with an instruction, keeping the same package. */
-  const regenerate = (parts, extra) =>
-    run('regen', () =>
-      api.post(`/applications/${pkg.id}/regenerate`, {
-        parts,
-        instructions: instructions.trim() || undefined,
-        use_llm: true,
-        ...extra,
-      }),
-    )
-
-  const download = (kind, label, extension) =>
-    api
-      .download(`/applications/${pkg.id}/documents/${kind}`, documentName(pkg, label, extension))
-      .catch(setError)
+  const sent = pkg.status === 'sent'
 
   return (
     <div className="col" style={{ gap: 0 }}>
       <div className="card">
-        <div className="card-header">
-          <div style={{ minWidth: 0 }}>
-            <h3>{pkg.opportunity_title || 'Untitled role'}</h3>
-            <div className="small muted">{pkg.company_name || 'Unknown company'}</div>
-          </div>
-          <div className="spacer" />
-          <KindBadge kind={pkg.opportunity_kind} />
-          <Badge tone={PACKAGE_STATUS_TONE[pkg.status]}>
-            {PACKAGE_STATUS_LABEL[pkg.status] || pkg.status}
-          </Badge>
-        </div>
+        <Header pkg={pkg} row={row} />
 
         {error && <ErrorBox error={error} />}
 
@@ -160,7 +185,7 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
           <button
             className="btn btn-primary"
             disabled={!canApprove(pkg)}
-            onClick={() => onApprove([pkg.id])}
+            onClick={onApprove}
             title={
               canApprove(pkg)
                 ? 'Read what will be sent, then approve'
@@ -169,16 +194,37 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
           >
             Approve for dispatch
           </button>
-          <button className="btn" disabled={busy === 'check'} onClick={recheck}>
+          <button className="btn" disabled={busy === 'check'} onClick={onRecheck}>
             {busy === 'check' ? <span className="spinner" /> : 'Re-run the checks'}
           </button>
+          <button className="btn btn-phase" disabled={busy === 'send'} onClick={onSend}>
+            {busy === 'send' ? (
+              <span className="spinner" />
+            ) : (
+              <>
+                <Icon name="send" /> Send email with CV attached
+              </>
+            )}
+          </button>
+          <HelpTip term="dry_run" />
           <div className="spacer" />
-          {editable && (
+          {editable && onDiscard && (
             <button className="btn btn-danger" onClick={() => setDiscarding(true)}>
               Discard
             </button>
           )}
         </div>
+
+        <p className="tiny muted" style={{ margin: '8px 0 0' }}>
+          Pressing Send runs the whole path and tells you where it stopped. It is never disabled,
+          because a button that reports is more use than one that is greyed out.
+        </p>
+
+        {(sendResult || sendError) && (
+          <div style={{ marginTop: 12 }}>
+            <SendReport result={sendResult} error={sendError} onDismiss={onDismissSend} />
+          </div>
+        )}
 
         {/* FR-322: the reason approval is unavailable belongs next to the button. */}
         {pkg.status === 'draft' && hard.length > 0 && (
@@ -211,9 +257,10 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
             pkg={pkg}
             editable={editable}
             busy={busy}
+            advisories={advisories}
             draft={{ subject, setSubject, body, setBody, instructions, setInstructions }}
-            onSave={save}
-            onRegenerate={regenerate}
+            onSave={onSave}
+            onRegenerate={onRegenerate}
           />
         )}
 
@@ -224,33 +271,25 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
             photo={photo}
             editable={editable}
             busy={busy}
-            onTemplate={(template) =>
-              run('tpl', () => api.post(`/applications/${pkg.id}/cv-template`, { template }))
-            }
-            onRegenerate={regenerate}
-            onDownload={download}
+            previewUrl={previewUrl}
+            onTemplate={onTemplate}
+            onRegenerate={onRegenerate}
+            onDownload={onDownload}
           />
         )}
 
         {tab === 'briefing' && (
           <SeekerOnlyPanel
-            packageId={pkg.id}
+            pkg={pkg}
             kind="briefing"
             title="The briefing"
             purpose="Everything known about the company and the role — the profile, five years of financials, hiring signals, competitors, and the questions worth asking. Written for you to read before an interview (FR-329)."
-            result={pkg.generation?.briefing || {}}
-            available={pkg.documents?.briefing}
-            neverSent={pkg.never_sent}
-            onDownload={() => download('briefing', 'briefing', 'pdf')}
+            previewUrl={previewUrl}
+            onDownload={onDownload}
             action={
-              editable && (
-                <button
-                  className="btn"
-                  disabled={busy === 'brief'}
-                  onClick={() =>
-                    run('brief', () => api.post(`/applications/${pkg.id}/briefing/refresh`))
-                  }
-                >
+              editable &&
+              onRefreshBriefing && (
+                <button className="btn" disabled={busy === 'brief'} onClick={onRefreshBriefing}>
                   {busy === 'brief' ? <span className="spinner" /> : 'Refresh before an interview'}
                 </button>
               )
@@ -260,14 +299,12 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
 
         {tab === 'motivation' && (
           <SeekerOnlyPanel
-            packageId={pkg.id}
+            pkg={pkg}
             kind="motivation"
             title="The motivation document"
             purpose="Why this role, where you meet its requirements and where you do not, and the talking points that follow. Written for you, so the gaps are stated plainly rather than written around (FR-330)."
-            result={pkg.generation?.motivation || {}}
-            available={pkg.documents?.motivation}
-            neverSent={pkg.never_sent}
-            onDownload={() => download('motivation', 'motivation', 'pdf')}
+            previewUrl={previewUrl}
+            onDownload={onDownload}
             extra={
               pkg.generation?.motivation?.gaps?.length > 0 && (
                 <div className="alert alert-warn">
@@ -287,7 +324,7 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
                 <button
                   className="btn btn-ghost"
                   disabled={busy === 'regen'}
-                  onClick={() => regenerate(['motivation'])}
+                  onClick={() => onRegenerate({ parts: ['motivation'] })}
                 >
                   {busy === 'regen' ? <span className="spinner" /> : 'Regenerate'}
                 </button>
@@ -297,12 +334,12 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
         )}
 
         {tab === 'checks' && (
-          <ChecksPanel pkg={pkg} busy={busy === 'check'} onRecheck={recheck} />
+          <ChecksPanel pkg={pkg} busy={busy === 'check'} onRecheck={onRecheck} />
         )}
       </div>
 
       {/* Discarding is destructive and outward-facing, so it confirms first. */}
-      {discarding && (
+      {discarding && onDiscard && (
         <Modal
           title="Discard this application package?"
           onClose={() => setDiscarding(false)}
@@ -314,29 +351,53 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
               <button
                 className="btn btn-danger"
                 disabled={busy === 'discard'}
-                onClick={() =>
-                  run('discard', async () => {
-                    await api.post(`/applications/${pkg.id}/discard`, { reason: reason.trim() })
-                    setDiscarding(false)
-                    setReason('')
-                  })
-                }
+                onClick={async () => {
+                  await onDiscard(reason.trim())
+                  setDiscarding(false)
+                  setReason('')
+                }}
               >
-                Discard
+                {busy === 'discard' ? <span className="spinner" /> : 'Discard'}
               </button>
             </>
           }
         >
           <p>
             The CV, briefing, motivation document and email for{' '}
-            <strong>{pkg.opportunity_title}</strong> at <strong>{pkg.company_name}</strong> stop
-            counting as a live application. Nothing is deleted, and you can generate a new package
-            for the same opportunity.
+            <strong>{pkg.opportunity_title || 'this role'}</strong> at{' '}
+            <strong>{pkg.company_name || 'this company'}</strong> stop counting as a live
+            application. Nothing is deleted, and you can generate a new package for the same
+            opportunity.
           </p>
           <Field label="Why (kept in the audit trail)">
             <input type="text" value={reason} onChange={(e) => setReason(e.target.value)} />
           </Field>
         </Modal>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The header reads whichever of the flat package preview or a list row it has,
+ * so the pane paints the moment a row is clicked rather than flashing empty.
+ */
+function Header({ pkg, row }) {
+  const title = pkg?.opportunity_title || row?.title || row?.opportunity_title || 'Untitled role'
+  const company = pkg?.company_name || row?.company_name || row?.company?.name || 'Unknown company'
+  const kind = pkg?.opportunity_kind ?? row?.kind
+  const status = pkg?.status ?? row?.package_status
+
+  return (
+    <div className="card-header">
+      <div style={{ minWidth: 0 }}>
+        <h3>{title}</h3>
+        <div className="small muted">{company}</div>
+      </div>
+      <div className="spacer" />
+      <KindBadge kind={kind} />
+      {status && (
+        <Badge tone={PACKAGE_STATUS_TONE[status]}>{PACKAGE_STATUS_LABEL[status] || status}</Badge>
       )}
     </div>
   )

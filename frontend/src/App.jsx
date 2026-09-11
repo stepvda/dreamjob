@@ -58,64 +58,55 @@ const AdminPage = lazy(() => import('./pages/AdminPage'))
 // ones that are configuration rather than a step live under Advanced, folded
 // away by default. Nothing was removed.
 const STEPS = [
-  { to: '/home', icon: 'overview', label: 'Start here', phase: 'phase-0' },
-  { to: '/profile', icon: 'profile', label: '1 · Your profile', phase: 'phase-1' },
-  { to: '/opportunities', icon: 'opportunities', label: '2 · Opportunities', phase: 'phase-3' },
-  { to: '/applications', icon: 'send', label: '3 · Apply', phase: 'phase-4' },
-  { to: '/pipeline', icon: 'pipeline', label: 'Follow up', phase: 'phase-5' },
+  { to: '/home', icon: 'overview', label: 'Start here' },
+  { to: '/profile', icon: 'profile', label: '1 · Your profile' },
+  { to: '/opportunities', icon: 'opportunities', label: '2 · Opportunities' },
+  { to: '/applications', icon: 'send', label: '3 · Apply' },
+  { to: '/pipeline', icon: 'pipeline', label: 'Follow up' },
 ]
 
+// The detail screens, folded into four groups rather than six. Every
+// destination is still here; each item carries the phase hue of the screen it
+// opens, so regrouping a group never recolours a screen.
 const ADVANCED = [
   {
-    label: 'Profile detail',
+    label: 'Profile & search',
     phase: 'phase-1',
     items: [
-      { to: '/composite', icon: 'composite', label: 'Composite profile' },
-      { to: '/dream-job', icon: 'dream', label: 'Dream job' },
+      { to: '/composite', icon: 'composite', label: 'Composite profile', phase: 'phase-1' },
+      { to: '/dream-job', icon: 'dream', label: 'Dream job', phase: 'phase-1' },
+      { to: '/directives', icon: 'directives', label: 'Directives', phase: 'phase-2' },
+      { to: '/campaigns', icon: 'campaign', label: 'Campaigns', phase: 'phase-2' },
+      { to: '/browser', icon: 'browser', label: 'Browser session', phase: 'phase-2' },
     ],
   },
   {
-    label: 'Search settings',
-    phase: 'phase-2',
-    items: [
-      { to: '/directives', icon: 'directives', label: 'Directives' },
-      { to: '/campaigns', icon: 'campaign', label: 'Campaigns' },
-      { to: '/browser', icon: 'browser', label: 'Browser session' },
-      { to: '/overview', icon: 'overview', label: 'Full journey map' },
-    ],
-  },
-  {
-    label: 'Research',
+    label: 'Research & apply',
     phase: 'phase-3',
     items: [
-      { to: '/companies', icon: 'companies', label: 'Companies' },
-      { to: '/intelligence', icon: 'intelligence', label: 'Dream-job gap' },
-      { to: '/contacts', icon: 'contacts', label: 'Contacts' },
+      { to: '/companies', icon: 'companies', label: 'Companies', phase: 'phase-3' },
+      { to: '/intelligence', icon: 'intelligence', label: 'Dream-job gap', phase: 'phase-3' },
+      { to: '/contacts', icon: 'contacts', label: 'Contacts', phase: 'phase-3' },
+      { to: '/apply', icon: 'send', label: 'Apply browser', phase: 'phase-4' },
+      { to: '/networking', icon: 'networking', label: 'Networking', phase: 'phase-4' },
     ],
   },
   {
-    label: 'Applying',
-    phase: 'phase-4',
-    items: [
-      { to: '/apply', icon: 'send', label: 'Apply browser' },
-      { to: '/networking', icon: 'networking', label: 'Networking' },
-    ],
-  },
-  {
-    label: 'Follow up',
+    label: 'Journey & follow up',
     phase: 'phase-5',
     items: [
-      { to: '/responses', icon: 'responses', label: 'Responses' },
-      { to: '/insights', icon: 'insights', label: 'What works' },
+      { to: '/overview', icon: 'overview', label: 'Where I am', phase: 'phase-2' },
+      { to: '/responses', icon: 'responses', label: 'Responses', phase: 'phase-5' },
+      { to: '/insights', icon: 'insights', label: 'What works', phase: 'phase-5' },
     ],
   },
   {
     label: 'System',
     phase: 'phase-0',
     items: [
-      { to: '/monitoring', icon: 'monitoring', label: 'Monitoring' },
-      { to: '/mail', icon: 'mailsetup', label: 'Mail setup' },
-      { to: '/admin', icon: 'admin', label: 'Administration' },
+      { to: '/monitoring', icon: 'monitoring', label: 'Monitoring', phase: 'phase-0' },
+      { to: '/mail', icon: 'mailsetup', label: 'Mail setup', phase: 'phase-0' },
+      { to: '/admin', icon: 'admin', label: 'Administration', phase: 'phase-0' },
     ],
   },
 ]
@@ -126,20 +117,24 @@ const NAV = [
   ...ADVANCED,
 ]
 
-// Which phase hue a route belongs to, for the header and page furniture.
+// Which phase hue a route belongs to, for the header and page furniture. The
+// steps keep the shell's slate; every Advanced item carries its own phase.
 const ROUTE_PHASE = Object.fromEntries(
-  NAV.flatMap((g) => g.items.map((i) => [i.to, g.phase])),
+  NAV.flatMap((g) => g.items.map((i) => [i.to, i.phase || g.phase])),
 )
 
 const ROUTE_ICON = Object.fromEntries(
   NAV.flatMap((g) => g.items.map((i) => [i.to, i.icon])),
 )
 
+// One name per screen. `/overview` is the detailed journey map ("Where I am"),
+// not a second landing: `/home` is the single landing that carries the next
+// action, and the map is the detail behind it.
 const TITLES = {
   '/home': 'Start here',
   '/overview': 'Where I am',
   '/responses': 'Responses received',
-  '/insights': 'What works, and where to redirect',
+  '/insights': 'What works',
   '/profile': 'Profile',
   '/composite': 'Composite profile',
   '/dream-job': 'Dream job',
@@ -195,8 +190,10 @@ function Shell({ session, onSignOut }) {
           ))}
         </nav>
 
-        {/* Everything else, folded away: reachable, not in the way. */}
-        <details className="nav-advanced">
+        {/* Everything else. Expanded by default so every destination is one
+            click away and reachable by name; still collapsible, so it never
+            competes with the steps above it. */}
+        <details className="nav-advanced" open>
           <summary className="nav-label">Advanced</summary>
           {ADVANCED.map((group) => (
             <nav className={`nav-group ${group.phase}`} key={group.label}>
@@ -205,7 +202,9 @@ function Shell({ session, onSignOut }) {
                 <NavLink
                   key={item.to}
                   to={item.to}
-                  className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+                  className={({ isActive }) =>
+                    `nav-item ${item.phase || ''}` + (isActive ? ' active' : '')
+                  }
                 >
                   <Icon name={item.icon} />
                   <span>{item.label}</span>

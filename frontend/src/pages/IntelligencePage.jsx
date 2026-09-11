@@ -30,15 +30,14 @@
 import { useCallback, useMemo, useState } from 'react'
 
 import { api } from '../api/client'
-import { ScreenIntro } from '../components/Help'
-import WorkflowMap from '../components/WorkflowMap'
 import { ErrorBox, Loading, Tabs, useFetch } from '../components/ui'
 import FitDistribution from './intelligence/FitDistribution'
 import GapAnalysis from './intelligence/GapAnalysis'
 import LinkedInAdvice from './intelligence/LinkedInAdvice'
+import MarketShell from './intelligence/MarketShell'
 import SteppingStones from './intelligence/SteppingStones'
 import ValuesConflicts from './intelligence/ValuesConflicts'
-import { AdvisoryNotice, IntelligenceFirstRun, TagConfirm } from './intelligence/panels'
+import { IntelligenceFirstRun, TagConfirm } from './intelligence/panels'
 
 /** One request per company, so the comparison is bounded rather than exhaustive. */
 const MAX_COMPANIES_CHECKED = 12
@@ -286,12 +285,11 @@ export default function IntelligencePage() {
   ]
 
   return (
-    <div className="content-wide">
-      <WorkflowMap journey={journey.data?.journey || {}} compact current="scoring" />
-      <ScreenIntro pathname="/intelligence" />
-
-      <AdvisoryNotice discretionMode={discretionMode} />
-
+    <MarketShell
+      route="intelligence"
+      journey={journey.data?.journey || {}}
+      discretionMode={discretionMode}
+    >
       {Array.isArray(campaigns.data) && campaigns.data.length > 1 && (
         <label className="row" style={{ gap: 8, alignItems: 'center', margin: '4px 0 8px' }}>
           <span className="muted small">Campaign</span>
@@ -420,6 +418,6 @@ export default function IntelligencePage() {
       )}
 
       {confirmTag && <TagConfirm onCancel={() => setConfirmTag(false)} onConfirm={applyTags} />}
-    </div>
+    </MarketShell>
   )
 }

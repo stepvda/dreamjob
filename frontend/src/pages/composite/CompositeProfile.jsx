@@ -118,10 +118,12 @@ export default function CompositeProfile({ composite, findings, busy, onBuild, o
           </div>
         )}
         <p className="small muted" style={{ margin: 0 }}>
-          Every line below carries the source that supports it
-          <HelpTip term="provenance" />. Editing a line makes you its source — your
-          wording wins over the synthesis and survives the next rebuild only if you
-          re-apply it.
+          These blocks are read-only. Every line below carries the source that
+          supports it
+          <HelpTip term="provenance" />, so read and verify before you change
+          anything. Editing is opt-in per block: choose <strong>Edit</strong> and
+          your wording wins over the synthesis — it survives the next rebuild only
+          if you re-apply it.
         </p>
       </div>
 
@@ -135,6 +137,15 @@ export default function CompositeProfile({ composite, findings, busy, onBuild, o
               <h3>{block.label}</h3>
               <div className="spacer" />
               <span className="small muted">{items.length || '–'}</span>
+              {open ? (
+                <Badge tone="accent">
+                  <Icon name="edit" /> Editing
+                </Badge>
+              ) : (
+                <span className="small muted row" style={{ gap: 4 }}>
+                  <Icon name="lock" /> Read-only
+                </span>
+              )}
               <button
                 className="btn btn-sm btn-ghost"
                 onClick={() => setEditing(open ? null : block.key)}
@@ -163,10 +174,16 @@ export default function CompositeProfile({ composite, findings, busy, onBuild, o
                 }}
               />
             ) : items.length === 0 ? (
-              <p className="small muted" style={{ margin: 0 }}>
-                Nothing here yet. Re-synthesise once your profile has more in it, or add a
-                line by hand.
-              </p>
+              <div className="row row-wrap" style={{ gap: 8, alignItems: 'center' }}>
+                <p className="small muted" style={{ margin: 0, flex: 1, minWidth: 200 }}>
+                  Nothing here yet. Re-synthesise once your profile has more in it, or add a
+                  line by hand.
+                </p>
+                <button className="btn btn-sm" onClick={() => setEditing(block.key)}>
+                  <Icon name="plus" />
+                  {block.kind === 'list' ? 'Add a statement' : 'Add content'}
+                </button>
+              </div>
             ) : (
               items.map((row) => (
                 <div

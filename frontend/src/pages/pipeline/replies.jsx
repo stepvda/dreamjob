@@ -9,22 +9,30 @@
  */
 
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 
 import { Caution, HelpTip } from '../../components/Help'
 import { Badge, formatDate, formatPercent } from '../../components/ui'
 import { CLASSIFICATION_LABEL, CLASSIFICATION_TONE, DRAFT_TONE } from './shared'
 
-export default function Replies({ replies, drafts, busy, onProcess, onEdit, onApprove, onDiscard }) {
+export default function Replies({
+  replies,
+  drafts,
+  busy,
+  onProcess,
+  onEdit,
+  onApprove,
+  onDiscard,
+  onRespond,
+}) {
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="card-header">
         <h3>What came back</h3>
         <HelpTip term="reply_classification" />
         <div className="spacer" />
-        <Link className="btn btn-sm" to="/responses">
-          Record a response
-        </Link>
+        <button className="btn btn-sm" onClick={onRespond}>
+          Record or correct a response
+        </button>
       </div>
 
       {replies.length === 0 && (

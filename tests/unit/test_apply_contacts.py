@@ -948,3 +948,122 @@ def test_selecting_a_page_and_moving_it_through_the_workflow() -> None:
     assert {row["opportunity_id"] for row in repo.list_jobs(seed["seeker_id"])} == {
         ids[0], ids[2]
     }
+
+
+# ---------------------------------------------------------------------------
+# NFR-502: the Contacts bar moves while the pass works, not once at the end
+# ---------------------------------------------------------------------------
+
+
+def test_the_pass_reports_each_company_as_it_is_visited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start tick names the work list and every company moves the bar on."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    for index in range(4):
+        company_id = _company(f"Acme {index} BV", domain=f"acme{index}.example")
+        _vacancy(
+            company_id,
+            application_channel="email",
+            application_target=f"jobs@acme{index}.example",
+        )
+
+    events: list[dict[str, Any]] = []
+    report = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"],
+            limit=50,
+            concurrency=1,
+            crawl_site=False,
+            derive_domains=False,
+            on_progress=events.append,
+        )
+    )
+
+    start = next(event for event in events if event["phase"] == "start")
+    assert start["done"] == 0
+    assert start["total"] == report.companies_visited == 4
+    assert start["report"]["companies_visited"] == 0
+
+    company_events = [event for event in events if event["phase"] == "company"]
+    assert [event["done"] for event in company_events] == [1, 2, 3, 4]
+    assert company_events[-1]["total"] == 4
+    assert len(company_events) == report.companies_visited
+    assert company_events[-1]["report"]["companies_reachable"] == report.companies_reachable
+
+
+def test_the_pass_reports_a_terminal_done_when_there_is_nothing_to_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass with no shortfall still ends 1 / 1 rather than hanging at 0 / 1."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    company_id = _company("Acme Data BV", domain="acme-data.example")
+    _vacancy(
+        company_id,
+        application_channel="email",
+        application_target="jobs@acme-data.example",
+    )
+    asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=1, concurrency=1, crawl_site=False,
+            derive_domains=False,
+        )
+    )
+
+    events: list[dict[str, Any]] = []
+    report = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=1, concurrency=1, crawl_site=False,
+            derive_domains=False, on_progress=events.append,
+        )
+    )
+    assert report.shortfall == 0
+    assert [event["phase"] for event in events] == ["done"]
+    assert events[0]["done"] == 1 and events[0]["total"] == 1
+
+
+def test_the_discovery_worker_drives_the_bar_from_the_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker turns each callback tick into ``ctx.progress`` and a checkpoint."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    for index in range(3):
+        company_id = _company(f"Acme {index} BV", domain=f"acme{index}.example")
+        _vacancy(
+            company_id,
+            application_channel="email",
+            application_target=f"jobs@acme{index}.example",
+        )
+
+    class _Ctx:
+        job_seeker_id = seed["seeker_id"]
+        campaign_id = seed["campaign_id"]
+        checkpoint = {
+            "options": {
+                "limit": 50, "crawl_site": False, "derive_domains": False, "concurrency": 1
+            }
+        }
+
+        def __init__(self) -> None:
+            self.progress_calls: list[tuple[int, int | None]] = []
+            self.checkpoints: list[dict[str, Any]] = []
+
+        def save_checkpoint(self, **kwargs: Any) -> None:
+            self.checkpoints.append(kwargs)
+
+        def progress(self, done: int, total: int | None = None) -> None:
+            self.progress_calls.append((done, total))
+
+    ctx = _Ctx()
+
+    async def run() -> None:
+        async for _ in pipeline.contacts_discovery_worker(ctx):  # type: ignore[arg-type]
+            pass
+
+    asyncio.run(run())
+    assert (0, 3) in ctx.progress_calls
+    assert (3, 3) in ctx.progress_calls
+    assert ctx.progress_calls[-1] == (1, 1)

@@ -179,33 +179,6 @@ export default function DirectivesPage() {
     }
   }
 
-  /** FR-385: the dedicated endpoint folds the current employer into the
-   *  exclusion list; using it keeps the two write paths in agreement. */
-  async function saveDiscretion() {
-    if (!current?.id) return
-    setSaving(true)
-    setSaveError(null)
-    try {
-      const all = draft.discretion_excluded_companies || []
-      const employer = all.find((c) => c.reason === 'current_employer') || null
-      const saved = await api.put(`/directives/${current.id}/discretion`, {
-        discretion_mode: Boolean(draft.discretion_mode),
-        current_employer: employer ? { name: employer.name, domain: employer.domain ?? null } : null,
-        excluded_companies: all.filter((c) => c.reason !== 'current_employer'),
-        excluded_contacts: draft.discretion_excluded_contacts || [],
-      })
-      setCurrent(saved)
-      setDraft(fromServer(saved))
-      setSavedNote('Discretion settings applied.')
-      setsQ.reload()
-      refreshSession()
-    } catch (e) {
-      setSaveError(e)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   async function runDialog() {
     const d = dialog
     setDialog(null)
@@ -314,8 +287,6 @@ export default function DirectivesPage() {
                   onChange={edit}
                   vocab={vocab}
                   savedId={current?.id}
-                  onSaveDiscretion={saveDiscretion}
-                  saving={saving}
                 />
 
                 {/* FR-141: the one and only free-text field on this screen. */}

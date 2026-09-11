@@ -206,15 +206,21 @@ export default function CampaignDetailPage() {
         <Badge tone={STATUS_TONE[status]}>{status}</Badge>
         {campaign.stage && <span className="small muted">stage: {campaign.stage}</span>}
         <div className="spacer" />
-        <button className="btn btn-sm" onClick={generatePlan} disabled={busy === 'plan' || running}>
-          {busy === 'plan' ? (
-            <span className="spinner" />
-          ) : (
-            <>
-              <Icon name="sparkle" /> {items.length ? 'Re-plan' : 'Generate plan'}
-            </>
-          )}
-        </button>
+        {/* One plan action per state: with no plan yet the empty state below is
+            the primary "Generate the plan", so the header only offers the
+            action once there is a plan to replace - or from a tab where the
+            empty state is not on screen. */}
+        {(items.length > 0 || active !== 'plan') && (
+          <button className="btn btn-sm" onClick={generatePlan} disabled={busy === 'plan' || running}>
+            {busy === 'plan' ? (
+              <span className="spinner" />
+            ) : (
+              <>
+                <Icon name="sparkle" /> {items.length ? 'Re-plan' : 'Generate plan'}
+              </>
+            )}
+          </button>
+        )}
         {interrupted && (
           <button
             className="btn btn-sm btn-primary"

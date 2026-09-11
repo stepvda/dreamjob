@@ -29,9 +29,9 @@ import { useCallback, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
-import { Caution, HelpTip, ScreenIntro } from '../components/Help'
-import WorkflowMap from '../components/WorkflowMap'
+import { HelpTip } from '../components/Help'
 import { Badge, Empty, ErrorBox, Loading, Modal, Tabs, useFetch } from '../components/ui'
+import MarketShell from './intelligence/MarketShell'
 import AdviceCard from './insights/AdviceCard'
 import AdviceHistory from './insights/AdviceHistory'
 import FiguresCard from './insights/FiguresCard'
@@ -173,22 +173,7 @@ export default function InsightsPage() {
   }
 
   return (
-    <div className="content-wide">
-      <WorkflowMap journey={journey.data?.journey || {}} compact current="learning" />
-      <ScreenIntro pathname="/insights" />
-
-      {/*
-        NFR-305: the analysis is advisory. Stated before the numbers rather than
-        under them, because the caveat only works if it is read first.
-      */}
-      <Caution title="Observed rates, not causes">
-        These are rates measured across your own applications. A weak segment may reflect which
-        companies happened to be in it, how many roles were speculative, or when the
-        applications went out. Nothing here changes your search on its own: advice becomes a
-        proposal you accept or dismiss, and accepting writes a new version of your directives
-        that you can revert.
-      </Caution>
-
+    <MarketShell route="insights" journey={journey.data?.journey || {}}>
       <Tabs tabs={OUTCOME_TABS} active={outcome} onChange={setOutcome} />
 
       {actionError && <ErrorBox error={actionError} onRetry={() => setActionError(null)} />}
@@ -378,6 +363,6 @@ export default function InsightsPage() {
           />
         </Modal>
       )}
-    </div>
+    </MarketShell>
   )
 }

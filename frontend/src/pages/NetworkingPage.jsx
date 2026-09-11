@@ -24,11 +24,11 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
 import Icon from '../components/Icon'
+import IntroductionRoutes from '../components/IntroductionRoutes'
 import WorkflowMap from '../components/WorkflowMap'
 import { ErrorBox, Loading, Tabs, useFetch } from '../components/ui'
 import CampaignExport from './networking/CampaignExport'
 import EventRadar from './networking/EventRadar'
-import IntroductionRoutes from './networking/IntroductionRoutes'
 
 export default function NetworkingPage() {
   const campaigns = useFetch(() => api.get('/campaigns'))

@@ -24,6 +24,10 @@
  *
  * 3. Approval and dispatch stay two separate acts (FR-324), and the bulk path
  *    goes through a table of exactly who receives what before it will run.
+ *
+ * The review pane and the confirmation modals are the canonical components in
+ * `components/package/`, shared with the Applications screen; this route keeps
+ * its own server-faceted, paginated list.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -35,12 +39,12 @@ import Icon from '../components/Icon'
 import WorkflowMap from '../components/WorkflowMap'
 import { ErrorBox, JobProgress, Loading, useFetch } from '../components/ui'
 
-import JobDetail from './apply/JobDetail'
 import JobList from './apply/JobList'
-import SendAllModal from './apply/SendAllModal'
-import SendGuardBanner from './apply/SendGuardBanner'
+import PackageDetail from '../components/package/PackageDetail'
+import { BulkApprovalModal, SendAllModal } from '../components/package/Modals'
+import { SendGuardBanner } from '../components/package/Send'
 import applyApi from './apply/api'
-import { isSendable, photoBlocked } from './apply/shared'
+import { documentName, isSendable, photoBlocked } from '../components/package/shared'
 
 const PAGE_SIZE = 50
 /** The backend budgets 45 seconds per package when it estimates a batch. */
@@ -66,6 +70,7 @@ export default function ApplyBrowserPage() {
   const [plan, setPlan] = useState(null)
   const [batch, setBatch] = useState(null)
   const [batchError, setBatchError] = useState(null)
+  const [approving, setApproving] = useState(null)
   const [gen, setGen] = useState(null)
 
   // Typing in a 1,600-row corpus should not issue a request per keystroke.
@@ -126,6 +131,8 @@ export default function ApplyBrowserPage() {
       throw error
     }
   }, [selectedId])
+
+  const pkg = detail.data?.package || null
 
   /* --- Generation, watched by its output (NFR-502) ------------------------ */
 
@@ -204,53 +211,60 @@ export default function ApplyBrowserPage() {
     guard.reload()
   }
 
-  const packageId = detail.data?.package?.id
-
-  const actions = {
-    onGenerate: () => startGeneration([selectedId]),
-    onSave: (body) =>
-      run('save', async () => {
-        await applyApi.editEmail(selectedId, body)
-        reloadBoth()
-      }),
-    onRegenerate: (body) =>
-      run('regen', async () => {
-        await applyApi.regenerate(selectedId, body)
-        reloadBoth()
-      }),
-    onTemplate: (template) =>
-      run('tpl', async () => {
-        await applyApi.retemplate(packageId, template)
-        reloadBoth()
-      }),
-    onRecheck: () =>
-      run('check', async () => {
-        await applyApi.recheck(packageId)
-        reloadBoth()
-      }),
-    onApprove: () =>
-      run('approve', async () => {
-        await applyApi.approve(packageId, {})
-        reloadBoth()
-      }),
-    onSend: () =>
-      run('send', async () => {
-        setSendResult(null)
-        setSendError(null)
-        try {
-          setSendResult(await applyApi.sendOne(selectedId))
-        } catch (error) {
-          // A refusal is the answer, not a failure of the screen.
-          setSendError(error)
-        }
-        reloadBoth()
-      }),
-    onDismissSend: () => {
-      setSendResult(null)
-      setSendError(null)
-    },
-    onReload: reloadBoth,
-  }
+  const detailActions = pkg
+    ? {
+        onSave: (draft) =>
+          run('save', async () => {
+            await applyApi.editEmail(selectedId, { subject: draft.subject, body: draft.body })
+            reloadBoth()
+          }),
+        onRegenerate: (payload) =>
+          run('regen', async () => {
+            await applyApi.regenerate(selectedId, {
+              instruction: payload.instructions,
+              parts: payload.parts,
+              language: payload.language,
+            })
+            reloadBoth()
+          }),
+        onTemplate: (template) =>
+          run('tpl', async () => {
+            await applyApi.retemplate(pkg.id, template)
+            reloadBoth()
+          }),
+        onRecheck: () =>
+          run('check', async () => {
+            await applyApi.recheck(pkg.id)
+            reloadBoth()
+          }),
+        onRefreshBriefing: () =>
+          run('brief', async () => {
+            await api.post(`/applications/${pkg.id}/briefing/refresh`)
+            reloadBoth()
+          }),
+        onApprove: () => setApproving([pkg.id]),
+        onSend: () =>
+          run('send', async () => {
+            setSendResult(null)
+            setSendError(null)
+            try {
+              setSendResult(await applyApi.sendOne(selectedId))
+            } catch (error) {
+              // A refusal is the answer, not a failure of the screen.
+              setSendError(error)
+            }
+            reloadBoth()
+          }),
+        onDismissSend: () => {
+          setSendResult(null)
+          setSendError(null)
+        },
+        onDownload: (kind, extension) =>
+          applyApi.download(selectedId, kind, documentName(pkg, kind, extension)),
+        previewUrl: (kind) => applyApi.documentUrl(selectedId, kind),
+        onReload: reloadBoth,
+      }
+    : {}
 
   /* --- Bulk (FR-324) ------------------------------------------------------ */
 
@@ -356,9 +370,7 @@ export default function ApplyBrowserPage() {
               className="btn"
               disabled={busy === 'gen' || rows.every((r) => r.package_id)}
               onClick={() =>
-                startGeneration(
-                  rows.filter((r) => !r.package_id).map((r) => r.opportunity_id),
-                )
+                startGeneration(rows.filter((r) => !r.package_id).map((r) => r.opportunity_id))
               }
               title="Generate the four documents for every job on this page that has none"
             >
@@ -440,20 +452,40 @@ export default function ApplyBrowserPage() {
               />
             )}
 
-            <JobDetail
+            <PackageDetail
+              pkg={pkg}
               row={row}
-              detail={detail.data}
               loading={detail.loading}
               error={detail.error}
               templates={statics.data?.templates}
               photo={photo}
               busy={busy}
+              advisories={detail.data?.advisories}
               sendResult={sendResult}
               sendError={sendError}
-              {...actions}
+              onGenerate={() => startGeneration([selectedId])}
+              onReload={() => {
+                detail.reload()
+                list.reload()
+              }}
+              {...detailActions}
             />
           </div>
         </>
+      )}
+
+      {approving && (
+        <BulkApprovalModal
+          packageIds={approving}
+          onClose={() => {
+            setApproving(null)
+            reloadBoth()
+          }}
+          onApproved={() => {
+            setApproving(null)
+            reloadBoth()
+          }}
+        />
       )}
 
       {plan && (

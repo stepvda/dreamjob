@@ -24,9 +24,9 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
 import WorkflowMap from '../components/WorkflowMap'
-import { Empty, ErrorBox, Loading, useFetch } from '../components/ui'
+import { ErrorBox, Loading, useFetch } from '../components/ui'
 import ResponseRow from './responses/ResponseRow'
-import { AwaitingPicker, RecordForm } from './responses/RecordResponse'
+import { ResponseRecorder } from './responses/ResponseSurface'
 import { MIN_TO_ANALYSE, SILENCE_DAYS, daysSince, normaliseOutcome, outcomeLabel } from './responses/vocabulary'
 
 /* --- The screen ----------------------------------------------------------- */
@@ -176,37 +176,15 @@ export default function ResponsesPage() {
         </div>
       </div>
 
-      {/* --- 1. Record a response --- */}
-      <div className="card">
-        <div className="card-header">
-          <h3>Record a response</h3>
-          <div className="spacer" />
-          <span className="small muted">
-            Anything automatic detection cannot see — a call, a LinkedIn message, an ATS
-            portal, or any reply to mail sent through Resend.
-          </span>
-        </div>
-
-        {target ? (
-          <RecordForm target={target} onCancel={() => setTarget(null)} onRecorded={recorded} />
-        ) : (
-          <>
-            {awaiting.loading && <Loading rows={3} />}
-            {awaiting.error && <ErrorBox error={awaiting.error} onRetry={awaiting.reload} />}
-            {!awaiting.loading &&
-              !awaiting.error &&
-              (waiting.length ? (
-                <AwaitingPicker rows={waiting} onPick={setTarget} />
-              ) : (
-                <Empty title="Every sent application has a response recorded">
-                  Nothing is waiting. When the next application goes out it appears here, and
-                  a response that arrives anywhere but a polled mailbox is recorded from this
-                  list.
-                </Empty>
-              ))}
-          </>
-        )}
-      </div>
+      {/* --- 1. Record a response: the shared surface, drawn inline here and
+          opened as a sheet from the pipeline board. --- */}
+      <ResponseRecorder
+        awaiting={awaiting}
+        target={target}
+        onPick={setTarget}
+        onCancel={() => setTarget(null)}
+        onRecorded={recorded}
+      />
 
       {/* --- 2. What has come back --- */}
       <div className="card">

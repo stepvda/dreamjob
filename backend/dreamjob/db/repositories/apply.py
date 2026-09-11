@@ -483,6 +483,85 @@ def companies_needing_contact(
     return query_all(sql, tuple(params))
 
 
+#: How ``all_companies_for_contact`` orders the whole company table.  ``name``
+#: is the default because the pool is not ranked by anything: it is a sweep, and
+#: a stable alphabetical order is the one a person can follow.
+_ALL_COMPANY_ORDERINGS: dict[str, str] = {
+    "name": "COALESCE(co.name, '') COLLATE NOCASE ASC",
+    "vacancies": "vacancy_count DESC, has_contact ASC, backs_opportunity DESC,"
+                 " COALESCE(co.name, '') COLLATE NOCASE ASC",
+    "recency": "backs_opportunity DESC, has_contact ASC, latest_vacancy_at DESC,"
+               " COALESCE(co.name, '') COLLATE NOCASE ASC",
+}
+
+
+def all_companies_for_contact(
+    limit: int = 500,
+    *,
+    job_seeker_id: str | None = None,
+    include_resolved: bool = False,
+    resolved_before: str | None = None,
+    order: str = "name",
+) -> list[dict[str, Any]]:
+    """Every company in the knowledge base, for the ``scope='all'`` sweep (FR-301).
+
+    :func:`companies_needing_contact` answers "which employers could carry a
+    contact for a vacancy"; this answers the wider question the Contacts screen
+    can ask - "which employers exist at all" - and therefore selects from
+    ``company`` with no requirement that a vacancy or an opportunity exists.
+    ``vacancy_count`` may be 0, which is exactly the row the narrower work list
+    cannot produce and the sweep must still visit: a company the corpus has
+    heard of but never seen hire.
+
+    The row shape, the ``_HAS_USABLE_CONTACT`` reuse and the
+    :data:`_VERDICT_PREDATES_THE_DOMAIN` skip are deliberately identical to
+    :func:`companies_needing_contact`, so the ladder receives the same company
+    dict from either work list.
+    """
+    seeker_join = (
+        "LEFT JOIN opportunity o ON o.company_id = co.id AND o.job_seeker_id = ?"
+        if job_seeker_id
+        else ""
+    )
+    seeker_rank = "MAX(CASE WHEN o.id IS NOT NULL THEN 1 ELSE 0 END)" if job_seeker_id else "0"
+    params: list[Any] = [job_seeker_id] if job_seeker_id else []
+
+    freshness = ""
+    if not include_resolved:
+        freshness = f" AND (r.company_id IS NULL OR {_VERDICT_PREDATES_THE_DOMAIN})"
+    elif resolved_before:
+        freshness = (
+            " AND (r.company_id IS NULL OR r.resolved_at < ?"
+            f" OR {_VERDICT_PREDATES_THE_DOMAIN})"
+        )
+        params.append(resolved_before)
+
+    sql = f"""
+        SELECT co.id                        AS company_id,
+               co.name                      AS company_name,
+               co.domain                    AS company_domain,
+               co.careers_url               AS careers_url,
+               co.country                   AS company_country,
+               (SELECT COUNT(*) FROM vacancy v WHERE v.company_id = co.id)
+                                            AS vacancy_count,
+               (SELECT MAX(COALESCE(v.posted_at, v.collected_at)) FROM vacancy v
+                 WHERE v.company_id = co.id) AS latest_vacancy_at,
+               {seeker_rank}                AS backs_opportunity,
+               EXISTS ({_HAS_USABLE_CONTACT}) AS has_contact,
+               r.status                     AS resolution_status,
+               r.resolved_at                AS resolved_at
+          FROM company co
+          LEFT JOIN apply_contact_resolution r ON r.company_id = co.id
+          {seeker_join}
+         WHERE co.name IS NOT NULL AND co.name != ''{freshness}
+         GROUP BY co.id
+         ORDER BY {_ALL_COMPANY_ORDERINGS.get(order, _ALL_COMPANY_ORDERINGS["name"])}
+         LIMIT ?
+    """
+    params.append(limit)
+    return query_all(sql, tuple(params))
+
+
 def vacancy_hints(company_id: str, limit: int = 6) -> list[dict[str, Any]]:
     """The newest vacancies of one company, for the FR-303 "look there first".
 

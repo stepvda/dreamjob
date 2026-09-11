@@ -10,21 +10,30 @@
  * The shell owns only what more than one tab needs — the profile version, the
  * conflict queue and the CR-410 consent — and hands each tab a reload callback
  * so a save on one tab is visible on the others without a page refresh.
+ *
+ * First-run disclosure: the landing tab is Documents, because the two uploads
+ * are the only thing a new seeker can usefully do here. The refinement tabs
+ * are one click behind "More profile detail" until a version exists; the
+ * conflict queue stays in the primary row and raises a blocker banner whenever
+ * something is still contested, because that is the one thing that can make
+ * every downstream answer wrong.
  */
 
 import { useState } from 'react'
 
 import { api, ApiError } from '../api/client'
-import { Caution, FirstRun, ScreenIntro } from '../components/Help'
+import { FirstRun, ScreenIntro } from '../components/Help'
 import Icon from '../components/Icon'
 import WorkflowMap from '../components/WorkflowMap'
-import { ErrorBox, Loading, Stat, Tabs, useFetch } from '../components/ui'
-import DreamJobPage from './DreamJobPage'
+import ConsentNotice from '../components/ConsentNotice'
+import { ErrorBox, Loading, Stat, useFetch } from '../components/ui'
+import DreamJobTab from './profile/DreamJobTab'
 import ConflictsTab from './profile/ConflictsTab'
 import DocumentsTab from './profile/DocumentsTab'
 import EvidenceTab from './profile/EvidenceTab'
 import PersonasTab from './profile/PersonasTab'
 import PrivacyTab from './profile/PrivacyTab'
+import ProfileTabs from './profile/ProfileTabs'
 import SectionsTab from './profile/SectionsTab'
 import SkillsTab from './profile/SkillsTab'
 
@@ -43,6 +52,9 @@ async function loadProfile() {
 
 export default function ProfilePage() {
   const [tab, setTab] = useState('documents')
+  // null = "leave it to the default": collapsed on the first run, revealed once
+  // a version exists. A click pins the choice so the seeker can collapse again.
+  const [detailOpen, setDetailOpen] = useState(null)
 
   const journey = useFetch(() => api.get('/overview/journey'), [])
   const profile = useFetch(loadProfile, [])
@@ -53,6 +65,9 @@ export default function ProfilePage() {
     (c) => !c.resolution || c.resolution === 'unresolved',
   ).length
 
+  const hasProfile = Boolean(profile.data)
+  const showDetail = detailOpen ?? hasProfile
+
   /** A new profile version arrived — from an upload, a save, or a restore. */
   function adopt(version) {
     if (version) profile.setData(version)
@@ -62,27 +77,14 @@ export default function ProfilePage() {
 
   const llm = consent.data?.llm_transfer
 
-  async function grantTransfer() {
-    await api.post('/auth/consent', { kind: 'llm_transfer', granted: true })
-    consent.reload()
-  }
-
   /* The icon is the tab's second cue: colour says which phase you are in, the
      glyph says which part of the profile this is. */
-  const tabs = [
+  const primaryTabs = [
     {
       key: 'documents',
       label: (
         <>
           <Icon name="document" /> Documents
-        </>
-      ),
-    },
-    {
-      key: 'sections',
-      label: (
-        <>
-          <Icon name="edit" /> Sections
         </>
       ),
     },
@@ -100,6 +102,19 @@ export default function ProfilePage() {
       label: (
         <>
           <Icon name="dream" /> Dream job
+        </>
+      ),
+    },
+  ]
+
+  /* The refinement tabs. They only make sense once there is a profile to
+     refine, so they are disclosed a click away rather than shown up front. */
+  const detailTabs = [
+    {
+      key: 'sections',
+      label: (
+        <>
+          <Icon name="edit" /> Sections
         </>
       ),
     },
@@ -145,18 +160,29 @@ export default function ProfilePage() {
       <ScreenIntro pathname="/profile" />
 
       {/* CR-410: profile text reaches a model outside the EU only after the
-          job seeker has said so. Without the consent, extraction stays
-          deterministic rather than failing (NFR-104). */}
-      {llm && (
-        <Caution
-          title="Your profile leaves the EU only if you allow it"
-          acknowledge="I consent to this transfer"
-          onAcknowledge={grantTransfer}
-          acknowledged={Boolean(llm.granted)}
-        >
-          {llm.text} Until you consent, documents are read by the deterministic parser alone —
-          which works, but reads an unusual layout less well.
-        </Caution>
+          job seeker has said so. The wording, the POST and the once-only
+          behaviour live in one shared component; the consent fetch here keeps
+          the rest of the screen able to see the decision (NFR-104). */}
+      {llm && <ConsentNotice consent={llm} onGranted={consent.reload} />}
+
+      {/* FR-103: an unresolved conflict is a blocker. It is surfaced here, above
+          the tab body, so it is visible whatever tab the seeker is on, and the
+          Conflicts tab it points to is always in the primary row. */}
+      {unresolved > 0 && (
+        <div className="alert alert-danger" style={{ alignItems: 'center' }}>
+          <Icon name="warning" />
+          <div style={{ flex: 1 }}>
+            <strong>
+              {unresolved} unresolved conflict{unresolved === 1 ? '' : 's'} still block your
+              profile.
+            </strong>{' '}
+            Your LinkedIn export and CV disagree; until you decide, the system keeps a value it
+            knows is contested — and a tailored CV can repeat it to an employer.
+          </div>
+          <button className="btn btn-sm" onClick={() => setTab('conflicts')}>
+            Resolve now
+          </button>
+        </div>
       )}
 
       {profile.loading && <Loading rows={4} />}
@@ -203,7 +229,14 @@ export default function ProfilePage() {
           )}
 
           <div>
-            <Tabs tabs={tabs} active={tab} onChange={setTab} />
+            <ProfileTabs
+              primary={primaryTabs}
+              detail={detailTabs}
+              active={tab}
+              onChange={setTab}
+              open={showDetail}
+              onToggle={() => setDetailOpen(!showDetail)}
+            />
 
             {tab === 'documents' && (
               <DocumentsTab profile={profile.data} onNewVersion={adopt} />
@@ -221,11 +254,10 @@ export default function ProfilePage() {
                 onNewVersion={adopt}
               />
             )}
-            {/* The same editor Advanced offers. The dream-job statement is the
-                one field the search cannot proceed without, so it belongs on
-                the screen a new job seeker is already working in rather than
-                only behind a separate nav item. */}
-            {tab === 'dream_job' && <DreamJobPage />}
+            {/* Single dream-job entry: this tab summarises what is saved and
+                links to the one editor on /dream-job rather than embedding a
+                second copy of it. */}
+            {tab === 'dream_job' && <DreamJobTab />}
             {tab === 'skills' && <SkillsTab profile={profile.data} />}
             {tab === 'evidence' && <EvidenceTab profile={profile.data} />}
             {tab === 'personas' && <PersonasTab />}

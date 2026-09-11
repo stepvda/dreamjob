@@ -35,6 +35,7 @@ import {
   useFetch,
 } from '../components/ui'
 import EmployerKindBadge from '../components/EmployerKindBadge'
+import EmailCertaintyBadge from './contact/EmailCertaintyBadge'
 import { PostingOnBehalfNote, UndisclosedEmployer } from './employers'
 
 const TIMING_LABELS = { apply_now: 'Apply now', favourable: 'Favourable window' }
@@ -653,7 +654,10 @@ export default function OpportunityDetailPage() {
                           </>
                         ) : null}
                       </td>
-                      <td className="mono">{c.email || '–'}</td>
+                      <td className="mono">
+                        {c.email || '–'}
+                        <EmailCertaintyBadge contact={c} />
+                      </td>
                       <td>
                         <ValidationBadge result={c.email_validation} />
                       </td>

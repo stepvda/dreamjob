@@ -14,7 +14,7 @@ import { api } from '../../api/client'
 import { Caution, HelpTip } from '../../components/Help'
 import Icon from '../../components/Icon'
 import { ChipSelect, Field, formatDuration, formatMoney } from '../../components/ui'
-import { CompanyList, Group, NumberBox, PlaceAutocomplete, Select, Slider, TitleAutocomplete } from './controls'
+import { Advanced, CompanyList, Group, NumberBox, PlaceAutocomplete, Select, Slider, TitleAutocomplete } from './controls'
 
 /** Vocabulary group -> ChipSelect options. */
 export function opts(vocab, group) {
@@ -103,31 +103,6 @@ export function JobContentCard({ value, onChange, vocab, locale }) {
         )}
       </Field>
 
-      <Field
-        label={
-          <>
-            Accepted synonyms
-            <HelpTip term="title_synonyms" />
-          </>
-        }
-        hint="Picked up from the catalogue when you choose a title. Remove any that would pull in the wrong work."
-      >
-        <ChipSelect
-          options={synonymPool.map((s) => ({ value: s, label: s }))}
-          value={v.title_synonyms || []}
-          onChange={(x) => set({ title_synonyms: x })}
-          allowCustom
-        />
-      </Field>
-
-      <Field label="Function families">
-        <ChipSelect
-          options={opts(vocab, 'function_family')}
-          value={v.function_families || []}
-          onChange={(x) => set({ function_families: x })}
-        />
-      </Field>
-
       <div className="grid grid-2">
         <Select
           label="Seniority from"
@@ -152,23 +127,6 @@ export function JobContentCard({ value, onChange, vocab, locale }) {
         />
       </div>
 
-      <div className="grid grid-2">
-        <Select
-          label="Management scope"
-          value={v.management_scope}
-          onChange={(x) => set({ management_scope: x })}
-          options={vocab?.groups?.management_scope}
-        />
-        <NumberBox
-          label="Minimum direct reports"
-          value={v.min_direct_reports}
-          onChange={(x) => set({ min_direct_reports: x })}
-          range={vocab?.ranges?.min_direct_reports}
-          unit="people"
-          hint="Leave blank unless team size is a real requirement."
-        />
-      </div>
-
       <Field label="Must-have skills" hint="Type and press Enter. These filter; the nice-to-haves only score.">
         <ChipSelect
           options={(v.must_have_skills || []).map((s) => ({ value: s, label: s }))}
@@ -177,45 +135,90 @@ export function JobContentCard({ value, onChange, vocab, locale }) {
           allowCustom
         />
       </Field>
-      <Field label="Nice-to-have skills">
-        <ChipSelect
-          options={(v.nice_to_have_skills || []).map((s) => ({ value: s, label: s }))}
-          value={v.nice_to_have_skills || []}
-          onChange={(x) => set({ nice_to_have_skills: x })}
-          allowCustom
-        />
-      </Field>
 
-      <div className="grid grid-2">
-        <Field label="Industries to include">
+      <Advanced>
+        <Field
+          label={
+            <>
+              Accepted synonyms
+              <HelpTip term="title_synonyms" />
+            </>
+          }
+          hint="Picked up from the catalogue when you choose a title. Remove any that would pull in the wrong work."
+        >
           <ChipSelect
-            options={(v.industries_include || []).map((s) => ({ value: s, label: s }))}
-            value={v.industries_include || []}
-            onChange={(x) => set({ industries_include: x })}
+            options={synonymPool.map((s) => ({ value: s, label: s }))}
+            value={v.title_synonyms || []}
+            onChange={(x) => set({ title_synonyms: x })}
             allowCustom
           />
         </Field>
-        <Field label="Industries to exclude">
+
+        <Field label="Function families">
           <ChipSelect
-            options={(v.industries_exclude || []).map((s) => ({ value: s, label: s }))}
-            value={v.industries_exclude || []}
-            onChange={(x) => set({ industries_exclude: x })}
+            options={opts(vocab, 'function_family')}
+            value={v.function_families || []}
+            onChange={(x) => set({ function_families: x })}
+          />
+        </Field>
+
+        <div className="grid grid-2">
+          <Select
+            label="Management scope"
+            value={v.management_scope}
+            onChange={(x) => set({ management_scope: x })}
+            options={vocab?.groups?.management_scope}
+          />
+          <NumberBox
+            label="Minimum direct reports"
+            value={v.min_direct_reports}
+            onChange={(x) => set({ min_direct_reports: x })}
+            range={vocab?.ranges?.min_direct_reports}
+            unit="people"
+            hint="Leave blank unless team size is a real requirement."
+          />
+        </div>
+
+        <Field label="Nice-to-have skills">
+          <ChipSelect
+            options={(v.nice_to_have_skills || []).map((s) => ({ value: s, label: s }))}
+            value={v.nice_to_have_skills || []}
+            onChange={(x) => set({ nice_to_have_skills: x })}
             allowCustom
           />
         </Field>
-      </div>
 
-      <Field
-        label="Keywords to avoid"
-        hint="A vacancy containing one of these is dropped before it is ever scored."
-      >
-        <ChipSelect
-          options={(v.keywords_to_avoid || []).map((s) => ({ value: s, label: s }))}
-          value={v.keywords_to_avoid || []}
-          onChange={(x) => set({ keywords_to_avoid: x })}
-          allowCustom
-        />
-      </Field>
+        <div className="grid grid-2">
+          <Field label="Industries to include">
+            <ChipSelect
+              options={(v.industries_include || []).map((s) => ({ value: s, label: s }))}
+              value={v.industries_include || []}
+              onChange={(x) => set({ industries_include: x })}
+              allowCustom
+            />
+          </Field>
+          <Field label="Industries to exclude">
+            <ChipSelect
+              options={(v.industries_exclude || []).map((s) => ({ value: s, label: s }))}
+              value={v.industries_exclude || []}
+              onChange={(x) => set({ industries_exclude: x })}
+              allowCustom
+            />
+          </Field>
+        </div>
+
+        <Field
+          label="Keywords to avoid"
+          hint="A vacancy containing one of these is dropped before it is ever scored."
+        >
+          <ChipSelect
+            options={(v.keywords_to_avoid || []).map((s) => ({ value: s, label: s }))}
+            value={v.keywords_to_avoid || []}
+            onChange={(x) => set({ keywords_to_avoid: x })}
+            allowCustom
+          />
+        </Field>
+      </Advanced>
     </Group>
   )
 }
@@ -266,44 +269,46 @@ export function CompanyTypeCard({ value, onChange, vocab }) {
         <ChipSelect options={opts(vocab, 'stage')} value={v.stages || []} onChange={(x) => set({ stages: x })} />
       </Field>
 
-      <Field
-        label={
-          <>
-            Trajectory
-            <HelpTip title="Trajectory">
-              Read from five years of filed accounts and recent news, not from what the company
-              says about itself. It feeds the ability-to-pay and investment-capacity scores that
-              decide whether a speculative opening is plausible.
-            </HelpTip>
-          </>
-        }
-      >
-        <ChipSelect
-          options={opts(vocab, 'trajectory')}
-          value={v.trajectories || []}
-          onChange={(x) => set({ trajectories: x })}
-        />
-      </Field>
-
-      <Field label="Ownership">
-        <ChipSelect
-          options={opts(vocab, 'ownership')}
-          value={v.ownerships || []}
-          onChange={(x) => set({ ownerships: x })}
-        />
-      </Field>
-
-      <div className="grid grid-2">
-        <Field label="Always include these companies" hint="Searched even if they fail the filters above.">
-          <CompanyList value={v.include_companies || []} onChange={(x) => set({ include_companies: x })} />
-        </Field>
+      <Advanced>
         <Field
-          label="Never search these companies"
-          hint="A preference, not a secrecy measure — for that, use discretion mode below."
+          label={
+            <>
+              Trajectory
+              <HelpTip title="Trajectory">
+                Read from five years of filed accounts and recent news, not from what the company
+                says about itself. It feeds the ability-to-pay and investment-capacity scores that
+                decide whether a speculative opening is plausible.
+              </HelpTip>
+            </>
+          }
         >
-          <CompanyList value={v.exclude_companies || []} onChange={(x) => set({ exclude_companies: x })} />
+          <ChipSelect
+            options={opts(vocab, 'trajectory')}
+            value={v.trajectories || []}
+            onChange={(x) => set({ trajectories: x })}
+          />
         </Field>
-      </div>
+
+        <Field label="Ownership">
+          <ChipSelect
+            options={opts(vocab, 'ownership')}
+            value={v.ownerships || []}
+            onChange={(x) => set({ ownerships: x })}
+          />
+        </Field>
+
+        <div className="grid grid-2">
+          <Field label="Always include these companies" hint="Searched even if they fail the filters above.">
+            <CompanyList value={v.include_companies || []} onChange={(x) => set({ include_companies: x })} />
+          </Field>
+          <Field
+            label="Never search these companies"
+            hint="A preference, not a secrecy measure — for that, use discretion mode below."
+          >
+            <CompanyList value={v.exclude_companies || []} onChange={(x) => set({ exclude_companies: x })} />
+          </Field>
+        </div>
+      </Advanced>
     </Group>
   )
 }
@@ -393,15 +398,16 @@ export function LocationCard({ value, onChange, vocab, locale }) {
         </div>
       ))}
 
-      <div className="grid grid-2" style={{ marginTop: 14 }}>
-        <Field label="Countries" hint="ISO two-letter codes. Also narrows the place lookup above.">
-          <ChipSelect
-            options={COMMON_COUNTRIES.map((c) => ({ value: c, label: c }))}
-            value={v.countries || []}
-            onChange={(x) => set({ countries: x.map((c) => c.toUpperCase()) })}
-            allowCustom
-          />
-        </Field>
+      <Field label="Countries" hint="ISO two-letter codes. Also narrows the place lookup above.">
+        <ChipSelect
+          options={COMMON_COUNTRIES.map((c) => ({ value: c, label: c }))}
+          value={v.countries || []}
+          onChange={(x) => set({ countries: x.map((c) => c.toUpperCase()) })}
+          allowCustom
+        />
+      </Field>
+
+      <Advanced>
         <Field label="Regions" hint="Free labels a source may understand, such as “Flanders”.">
           <ChipSelect
             options={(v.regions || []).map((s) => ({ value: s, label: s }))}
@@ -410,85 +416,85 @@ export function LocationCard({ value, onChange, vocab, locale }) {
             allowCustom
           />
         </Field>
-      </div>
 
-      <Field label="Relocation">
-        <label className="checkline">
-          <input
-            type="checkbox"
-            checked={Boolean(v.willing_to_relocate)}
-            onChange={(e) => set({ willing_to_relocate: e.target.checked })}
-          />
-          I am willing to relocate
-        </label>
-        {v.willing_to_relocate && (
-          <div style={{ marginTop: 8 }}>
-            <ChipSelect
-              options={COMMON_COUNTRIES.map((c) => ({ value: c, label: c }))}
-              value={v.relocation_countries || []}
-              onChange={(x) => set({ relocation_countries: x.map((c) => c.toUpperCase()) })}
-              allowCustom
+        <Field label="Relocation">
+          <label className="checkline">
+            <input
+              type="checkbox"
+              checked={Boolean(v.willing_to_relocate)}
+              onChange={(e) => set({ willing_to_relocate: e.target.checked })}
             />
-          </div>
-        )}
-      </Field>
+            I am willing to relocate
+          </label>
+          {v.willing_to_relocate && (
+            <div style={{ marginTop: 8 }}>
+              <ChipSelect
+                options={COMMON_COUNTRIES.map((c) => ({ value: c, label: c }))}
+                value={v.relocation_countries || []}
+                onChange={(x) => set({ relocation_countries: x.map((c) => c.toUpperCase()) })}
+                allowCustom
+              />
+            </div>
+          )}
+        </Field>
 
-      <Field
-        label={
-          <>
-            Home location
-            <HelpTip title="Why the system needs this">
-              Only to work out commute time. It is never written into a CV or an e-mail, and a
-              commute tolerance is treated as a tighter statement than a plain radius — set one
-              and the areas above are narrowed to match.
-            </HelpTip>
-          </>
-        }
-        hint={v.home_location?.label ? `Currently: ${v.home_location.label}` : 'Not set'}
-      >
-        <PlaceAutocomplete
-          locale={locale}
-          countries={v.countries}
-          placeholder="Where you commute from…"
-          onPick={(area) => set({ home_location: { radius_km: 0, ...area } })}
-        />
-        {v.home_location && (
-          <button
-            type="button"
-            className="btn btn-sm btn-ghost"
-            style={{ alignSelf: 'flex-start', marginTop: 6 }}
-            onClick={() => set({ home_location: null })}
-          >
-            <Icon name="x" /> Clear home location
-          </button>
-        )}
-      </Field>
-
-      <div className="grid grid-2">
-        <Slider
-          label="Maximum commute"
-          tip={
-            <HelpTip title="Commute tolerance">
-              Converted into a search radius using a documented speed model per mode — not a
-              routing engine. It is a filter bound, not a promise about any particular journey.
-            </HelpTip>
+        <Field
+          label={
+            <>
+              Home location
+              <HelpTip title="Why the system needs this">
+                Only to work out commute time. It is never written into a CV or an e-mail, and a
+                commute tolerance is treated as a tighter statement than a plain radius — set one
+                and the areas above are narrowed to match.
+              </HelpTip>
+            </>
           }
-          value={v.max_commute_minutes}
-          onChange={(x) => set({ max_commute_minutes: x })}
-          range={vocab?.ranges?.max_commute_minutes}
-          format={(x) => `${x} min`}
-          nullable
-        />
-        <Select
-          label="Commute mode"
-          value={v.commute_mode || 'car'}
-          onChange={(x) => set({ commute_mode: x || 'car' })}
-          options={vocab?.groups?.commute_mode}
-          placeholder="Car"
-        />
-      </div>
+          hint={v.home_location?.label ? `Currently: ${v.home_location.label}` : 'Not set'}
+        >
+          <PlaceAutocomplete
+            locale={locale}
+            countries={v.countries}
+            placeholder="Where you commute from…"
+            onPick={(area) => set({ home_location: { radius_km: 0, ...area } })}
+          />
+          {v.home_location && (
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              style={{ alignSelf: 'flex-start', marginTop: 6 }}
+              onClick={() => set({ home_location: null })}
+            >
+              <Icon name="x" /> Clear home location
+            </button>
+          )}
+        </Field>
 
-      <CommuteEstimator home={v.home_location} areas={v.areas} vocab={vocab} />
+        <div className="grid grid-2">
+          <Slider
+            label="Maximum commute"
+            tip={
+              <HelpTip title="Commute tolerance">
+                Converted into a search radius using a documented speed model per mode — not a
+                routing engine. It is a filter bound, not a promise about any particular journey.
+              </HelpTip>
+            }
+            value={v.max_commute_minutes}
+            onChange={(x) => set({ max_commute_minutes: x })}
+            range={vocab?.ranges?.max_commute_minutes}
+            format={(x) => `${x} min`}
+            nullable
+          />
+          <Select
+            label="Commute mode"
+            value={v.commute_mode || 'car'}
+            onChange={(x) => set({ commute_mode: x || 'car' })}
+            options={vocab?.groups?.commute_mode}
+            placeholder="Car"
+          />
+        </div>
+
+        <CommuteEstimator home={v.home_location} areas={v.areas} vocab={vocab} />
+      </Advanced>
     </Group>
   )
 }
@@ -644,49 +650,51 @@ export function WorkArrangementCard({ value, onChange, vocab }) {
         </Field>
       </div>
 
-      <div className="grid grid-2">
+      <Advanced>
+        <div className="grid grid-2">
+          <Slider
+            label="Minimum FTE"
+            value={v.fte_percentage_min}
+            onChange={(x) => set({ fte_percentage_min: x })}
+            range={vocab?.ranges?.fte_percentage}
+            format={(x) => `${x}%`}
+            nullable
+          />
+          <Slider
+            label="Maximum FTE"
+            value={v.fte_percentage_max}
+            onChange={(x) => set({ fte_percentage_max: x })}
+            range={vocab?.ranges?.fte_percentage}
+            format={(x) => `${x}%`}
+            nullable
+          />
+        </div>
+
+        <Select
+          label="Travel tolerance"
+          tip={
+            <HelpTip title="Travel tolerance">
+              A band rather than a number, because that is how vacancies describe it. Each band
+              implies a ceiling — occasional means up to 10% of your time. Override it below when
+              a vacancy-stated percentage matters more than the band.
+            </HelpTip>
+          }
+          value={v.travel_tolerance || 'occasional'}
+          onChange={(x) => set({ travel_tolerance: x || 'occasional' })}
+          options={vocab?.groups?.travel_tolerance}
+          placeholder="Occasional"
+          hint={`Current ceiling: ${ceiling}% of your time.`}
+        />
+
         <Slider
-          label="Minimum FTE"
-          value={v.fte_percentage_min}
-          onChange={(x) => set({ fte_percentage_min: x })}
-          range={vocab?.ranges?.fte_percentage}
+          label="Override the travel ceiling"
+          value={v.max_travel_percent}
+          onChange={(x) => set({ max_travel_percent: x })}
+          range={vocab?.ranges?.max_travel_percent}
           format={(x) => `${x}%`}
           nullable
         />
-        <Slider
-          label="Maximum FTE"
-          value={v.fte_percentage_max}
-          onChange={(x) => set({ fte_percentage_max: x })}
-          range={vocab?.ranges?.fte_percentage}
-          format={(x) => `${x}%`}
-          nullable
-        />
-      </div>
-
-      <Select
-        label="Travel tolerance"
-        tip={
-          <HelpTip title="Travel tolerance">
-            A band rather than a number, because that is how vacancies describe it. Each band
-            implies a ceiling — occasional means up to 10% of your time. Override it below when
-            a vacancy-stated percentage matters more than the band.
-          </HelpTip>
-        }
-        value={v.travel_tolerance || 'occasional'}
-        onChange={(x) => set({ travel_tolerance: x || 'occasional' })}
-        options={vocab?.groups?.travel_tolerance}
-        placeholder="Occasional"
-        hint={`Current ceiling: ${ceiling}% of your time.`}
-      />
-
-      <Slider
-        label="Override the travel ceiling"
-        value={v.max_travel_percent}
-        onChange={(x) => set({ max_travel_percent: x })}
-        range={vocab?.ranges?.max_travel_percent}
-        format={(x) => `${x}%`}
-        nullable
-      />
+      </Advanced>
     </Group>
   )
 }
@@ -749,47 +757,6 @@ export function CompensationCard({ value, onChange, vocab }) {
         />
       </div>
 
-      <div className="grid grid-2">
-        <Select
-          label="How equity counts"
-          tip={
-            <HelpTip title="Counting equity and variable pay">
-              “Ignore” leaves it out of the package total, “partial” counts the share you set
-              below, “full” counts all of it, and “required” drops any role that offers none.
-            </HelpTip>
-          }
-          value={v.equity_treatment || 'ignore'}
-          onChange={(x) => set({ equity_treatment: x || 'ignore' })}
-          options={vocab?.groups?.pay_component_treatment}
-          placeholder="Ignore"
-        />
-        <Select
-          label="How variable pay counts"
-          value={v.variable_treatment || 'partial'}
-          onChange={(x) => set({ variable_treatment: x || 'partial' })}
-          options={vocab?.groups?.pay_component_treatment}
-          placeholder="Partial"
-        />
-      </div>
-
-      <Slider
-        label="Share of variable pay counted"
-        value={v.variable_share_counted ?? 0.5}
-        onChange={(x) => set({ variable_share_counted: x })}
-        range={vocab?.ranges?.variable_share_counted}
-        format={(x) => `${Math.round(x * 100)}%`}
-        hint="Applied when variable pay is counted partially."
-      />
-
-      <Field label="Benefits you will not go without">
-        <ChipSelect
-          options={COMMON_BENEFITS.map((b) => ({ value: b, label: b.replace(/_/g, ' ') }))}
-          value={v.benefits_must_have || []}
-          onChange={(x) => set({ benefits_must_have: x })}
-          allowCustom
-        />
-      </Field>
-
       {/* FR-146: compensation is for filtering and scoring only. The opt-in is
           explicit, defaults to off, and every generator checks it before a
           figure can appear in a CV, a letter or an e-mail. */}
@@ -823,6 +790,50 @@ export function CompensationCard({ value, onChange, vocab }) {
         </label>
         <HelpTip term="do_not_disclose" align="right" />
       </div>
+
+      <Advanced>
+        <div className="grid grid-2">
+          <Select
+            label="How equity counts"
+            tip={
+              <HelpTip title="Counting equity and variable pay">
+                “Ignore” leaves it out of the package total, “partial” counts the share you set
+                below, “full” counts all of it, and “required” drops any role that offers none.
+              </HelpTip>
+            }
+            value={v.equity_treatment || 'ignore'}
+            onChange={(x) => set({ equity_treatment: x || 'ignore' })}
+            options={vocab?.groups?.pay_component_treatment}
+            placeholder="Ignore"
+          />
+          <Select
+            label="How variable pay counts"
+            value={v.variable_treatment || 'partial'}
+            onChange={(x) => set({ variable_treatment: x || 'partial' })}
+            options={vocab?.groups?.pay_component_treatment}
+            placeholder="Partial"
+          />
+        </div>
+
+        <Slider
+          label="Share of variable pay counted"
+          value={v.variable_share_counted ?? 0.5}
+          onChange={(x) => set({ variable_share_counted: x })}
+          range={vocab?.ranges?.variable_share_counted}
+          format={(x) => `${Math.round(x * 100)}%`}
+          hint="Applied when variable pay is counted partially."
+        />
+
+        <Field label="Benefits you will not go without">
+          <ChipSelect
+            options={COMMON_BENEFITS.map((b) => ({ value: b, label: b.replace(/_/g, ' ') }))}
+            value={v.benefits_must_have || []}
+            onChange={(x) => set({ benefits_must_have: x })}
+            allowCustom
+          />
+        </Field>
+
+      </Advanced>
     </Group>
   )
 }

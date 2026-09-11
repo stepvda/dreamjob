@@ -143,6 +143,15 @@ source: 103/104 Must, 44/44 Should, 9/9 Could.
 Indeed, StepStone, SmartRecruiters and the social-event adapter ship disabled
 until an administrator acknowledges their terms of service (IR-101).
 
+**Contact discovery** does not stop at the company home page. It reads the
+pages the home page links to, the site's **sitemap**, **schema.org JSON-LD**
+and **`security.txt`**; it infers the domain's address convention from observed
+addresses; and, for the large corporate sites that answer every fetch with an
+F5/Cloudflare challenge, it can query a **search API** (Brave, Bing or Google
+CSE — set it on the Contacts screen; off until a key is supplied, because the
+engines disallow their HTML search endpoint). A blocked site is recorded as
+`blocked`, not reported as having no address.
+
 ### Persistence
 
 SQLite in WAL mode with a deliberate **one-writer** discipline; repositories are

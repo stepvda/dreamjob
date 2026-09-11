@@ -35,6 +35,7 @@ import CardDetail from './pipeline/detail'
 import NegotiationBrief from './pipeline/negotiation'
 import MockInterview from './pipeline/rehearse'
 import { STAGES } from './pipeline/shared'
+import ResponseSheet from './responses/ResponseSheet'
 
 /** FR-327 nags before the moment passes, not after it. */
 const DUE_HORIZON_DAYS = 3
@@ -47,6 +48,7 @@ export default function PipelinePage() {
   const silent = useFetch(() => api.get('/pipeline/cards/silent'))
 
   const [openCardId, setOpenCardId] = useState(null)
+  const [responding, setResponding] = useState(null)
   const [rehearsing, setRehearsing] = useState(null)
   const [negotiating, setNegotiating] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -150,9 +152,9 @@ export default function PipelinePage() {
       )}
 
       <div className="row row-wrap" style={{ margin: '4px 0 14px' }}>
-        <Link className="btn btn-sm" to="/responses">
-          Record a response
-        </Link>
+        <button className="btn btn-sm" onClick={() => setResponding({ scope: null })}>
+          Record or correct a response
+        </button>
         <Link className="btn btn-sm" to="/applications">
           Applications
         </Link>
@@ -212,6 +214,10 @@ export default function PipelinePage() {
           cardId={openCardId}
           onClose={() => setOpenCardId(null)}
           onChanged={refresh}
+          onRespond={(card) => {
+            setOpenCardId(null)
+            setResponding({ scope: card })
+          }}
           onRehearse={(card) => {
             setOpenCardId(null)
             setRehearsing(card)
@@ -223,6 +229,14 @@ export default function PipelinePage() {
         />
       )}
 
+      {responding && (
+        <ResponseSheet
+          key={responding.scope?.id || 'all'}
+          scope={responding.scope}
+          onClose={() => setResponding(null)}
+          onChanged={refresh}
+        />
+      )}
       {rehearsing && <MockInterview card={rehearsing} onClose={() => setRehearsing(null)} />}
       {negotiating && (
         <NegotiationBrief card={negotiating} onClose={() => setNegotiating(null)} />

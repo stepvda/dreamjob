@@ -1,5 +1,6 @@
 /**
- * Applications: generate, review, approve (FR-321..324, FR-329..331, NFR-206).
+ * Applications: generate, review, approve and send (FR-321..324, FR-329..331,
+ * NFR-206).
  *
  * Master-detail, because the two questions a job seeker has here are different
  * questions: "which of these is ready?" is a list, and "is this one right?" is
@@ -11,6 +12,11 @@
  * through the same modal, which shows what will be sent and to whom before it
  * asks for a decision (FR-324). That is the whole point of this screen, so the
  * bulk path and the single path deliberately share one gate rather than two.
+ *
+ * The review pane and both confirmation modals are the canonical components in
+ * `components/package/`, shared with the Apply Browser; this screen keeps its
+ * own list and its own endpoints. Sending is available here as well as there,
+ * behind the same server-side guard (RK-05, FR-325).
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -19,25 +25,23 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
 import WorkflowMap from '../components/WorkflowMap'
-import {
-  Badge,
-  ErrorBox,
-  JobProgress,
-  KindBadge,
-  Loading,
-  useFetch,
-} from '../components/ui'
+import { Badge, ErrorBox, JobProgress, KindBadge, Loading, useFetch } from '../components/ui'
 
-import BulkApprovalModal from './applications/BulkApprovalModal'
-import PackageDetail from './applications/PackageDetail'
+import PackageDetail from '../components/package/PackageDetail'
+import { BulkApprovalModal, SendAllModal } from '../components/package/Modals'
+import { SendGuardBanner } from '../components/package/Send'
+import applyApi from './apply/api'
 import {
   ConsistencyBadge,
   PACKAGE_STATUS_LABEL,
   PACKAGE_STATUS_TONE,
   canApprove,
+  documentName,
   hardBlockers,
+  isSendable,
   photoBlocked,
-} from './applications/shared'
+  toSendRow,
+} from '../components/package/shared'
 
 /** The backend budgets 45 seconds per package when it estimates a batch. */
 const SECONDS_PER_PACKAGE = 45
@@ -65,12 +69,21 @@ export default function ApplicationsPage() {
   // Orientation, not data the screen depends on: never block on it.
   const journey = useFetch(() => api.get('/overview/journey').catch(() => null))
 
+  // The send guard, read before either send control is pressed (RK-05).
+  const guard = useFetch(() => applyApi.sendStatus(), [])
+
   const [filter, setFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(null)
   const [checked, setChecked] = useState([])
   const [approving, setApproving] = useState(null)
+  const [busy, setBusy] = useState(null)
   const [gen, setGen] = useState(null)
   const [actionError, setActionError] = useState(null)
+  const [sendResult, setSendResult] = useState(null)
+  const [sendError, setSendError] = useState(null)
+  const [plan, setPlan] = useState(null)
+  const [batch, setBatch] = useState(null)
+  const [batchError, setBatchError] = useState(null)
 
   const packages = data?.list?.packages || []
   const counts = data?.list?.counts || {}
@@ -81,6 +94,7 @@ export default function ApplicationsPage() {
   )
   const selected = packages.find((p) => p.id === selectedId) || visible[0] || null
 
+  const byId = useMemo(() => Object.fromEntries(packages.map((p) => [p.id, p])), [packages])
   /* --- Generation (FR-321) ------------------------------------------------ */
 
   const madeSoFar = gen ? Math.max(0, packages.length - gen.base) : 0
@@ -143,10 +157,97 @@ export default function ApplicationsPage() {
     }
   }, [data?.profile])
 
-  /* --- Selection for bulk approval (FR-324) ------------------------------- */
+  /* --- Actions ------------------------------------------------------------ */
 
-  const approvable = visible.filter(canApprove)
-  const checkedIds = checked.filter((id) => approvable.some((p) => p.id === id))
+  async function run(key, fn) {
+    setBusy(key)
+    setActionError(null)
+    try {
+      await fn()
+    } catch (e) {
+      setActionError(e)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const detailActions = selected
+    ? {
+        onSave: (draft) =>
+          run('save', async () => {
+            await api.patch(`/applications/${selected.id}`, {
+              email_subject: draft.subject,
+              email_body: draft.body,
+            })
+            reload()
+          }),
+        onRegenerate: (payload) =>
+          run('regen', async () => {
+            await api.post(`/applications/${selected.id}/regenerate`, {
+              parts: payload.parts,
+              instructions: payload.instructions,
+              language: payload.language,
+              use_llm: true,
+            })
+            reload()
+          }),
+        onTemplate: (template) =>
+          run('tpl', async () => {
+            await api.post(`/applications/${selected.id}/cv-template`, { template })
+            reload()
+          }),
+        onRecheck: () =>
+          run('check', async () => {
+            await api.post(`/applications/${selected.id}/consistency`)
+            reload()
+          }),
+        onRefreshBriefing: () =>
+          run('brief', async () => {
+            await api.post(`/applications/${selected.id}/briefing/refresh`)
+            reload()
+          }),
+        onDiscard: (reason) =>
+          run('discard', async () => {
+            await api.post(`/applications/${selected.id}/discard`, { reason })
+            reload()
+          }),
+        onApprove: () => setApproving([selected.id]),
+        onSend: () =>
+          run('send', async () => {
+            setSendResult(null)
+            setSendError(null)
+            try {
+              setSendResult(await applyApi.sendOne(selected.opportunity_id))
+            } catch (err) {
+              // A refusal is the answer, not a failure of the screen.
+              setSendError(err)
+            }
+            reload()
+          }),
+        onDismissSend: () => {
+          setSendResult(null)
+          setSendError(null)
+        },
+        onDownload: (kind, extension) =>
+          api.download(
+            `/applications/${selected.id}/documents/${kind}`,
+            documentName(selected, kind, extension),
+          ),
+        previewUrl: (kind) => `/api/applications/${selected.id}/documents/${kind}`,
+        onReload: reload,
+      }
+    : {}
+
+  /* --- Selection for bulk approval and bulk send (FR-324) ----------------- */
+
+  const selectable = visible.filter((p) => canApprove(p) || isSendable(p))
+  const checkedIds = checked.filter((id) => selectable.some((p) => p.id === id))
+  // The list carries a status filter, so a tick made under one filter and read
+  // under another is not acted upon; both bulk paths stay scoped to what is on
+  // screen, exactly as the single approval gate does.
+  const checkedVisible = checkedIds.map((id) => byId[id]).filter(Boolean)
+  const approvableChecked = checkedVisible.filter(canApprove)
+  const sendableChecked = checkedVisible.filter(isSendable)
 
   function toggle(id) {
     setChecked((c) => (c.includes(id) ? c.filter((x) => x !== id) : [...c, id]))
@@ -154,11 +255,48 @@ export default function ApplicationsPage() {
 
   const awaitingDispatch = packages.filter((p) => p.status === 'approved').length
 
+  /* --- Bulk send (FR-324, FR-325) ----------------------------------------- */
+
+  function openPlan() {
+    setBatch(null)
+    setBatchError(null)
+    setPlan({
+      rows: sendableChecked.map(toSendRow),
+      excluded: checkedVisible.filter((p) => !isSendable(p)).map(toSendRow),
+    })
+  }
+
+  async function confirmPlan() {
+    setBusy('sendall')
+    setBatchError(null)
+    try {
+      const result = await applyApi.sendAll({
+        package_ids: plan.rows.map((r) => r.package_id),
+        limit: Math.max(1, plan.rows.length),
+      })
+      setBatch(result)
+      setChecked([])
+      reload()
+      guard.reload()
+    } catch (e) {
+      setBatchError(e)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <div className="content-wide">
       <WorkflowMap journey={journey.data?.journey || {}} compact current="documents" />
 
       <ScreenIntro pathname="/applications" />
+
+      <SendGuardBanner
+        status={guard.data}
+        loading={guard.loading}
+        error={guard.error}
+        onRetry={guard.reload}
+      />
 
       {actionError && <ErrorBox error={actionError} />}
       {error && <ErrorBox error={error} onRetry={reload} />}
@@ -184,9 +322,10 @@ export default function ApplicationsPage() {
       {/* RK-05: approval is the decision to send; the caps are the next screen's. */}
       {awaitingDispatch > 0 && (
         <Caution title={`${awaitingDispatch} approved and waiting to be sent`}>
-          Approving authorises dispatch but sends nothing by itself. The messages leave from your own
-          mailbox on the <Link to="/mail">Mail screen</Link>, spread over the day and inside the
-          daily sending cap, so a large batch goes out over several days rather than in one burst.
+          Approving authorises dispatch but sends nothing by itself. You can send one from here, or
+          send the approved selection from the list, and the messages leave from your own mailbox on
+          the <Link to="/mail">Mail screen</Link>, spread over the day and inside the daily sending
+          cap, so a large batch goes out over several days rather than in one burst.
         </Caution>
       )}
 
@@ -239,16 +378,16 @@ export default function ApplicationsPage() {
                 Generate more
               </button>
               <div className="spacer" />
-              {approvable.length > 0 && (
+              {selectable.length > 0 && (
                 <button
                   className="btn btn-sm btn-ghost"
                   onClick={() =>
                     setChecked(
-                      checkedIds.length === approvable.length ? [] : approvable.map((p) => p.id),
+                      checkedIds.length === selectable.length ? [] : selectable.map((p) => p.id),
                     )
                   }
                 >
-                  {checkedIds.length === approvable.length ? 'Clear' : `Select all ${approvable.length}`}
+                  {checkedIds.length === selectable.length ? 'Clear' : `Select all ${selectable.length}`}
                 </button>
               )}
             </div>
@@ -269,11 +408,13 @@ export default function ApplicationsPage() {
                   <input
                     type="checkbox"
                     checked={checked.includes(p.id)}
-                    disabled={!canApprove(p)}
+                    disabled={!canApprove(p) && !isSendable(p)}
                     title={
                       canApprove(p)
                         ? 'Include in a bulk approval'
-                        : hardBlockers(p).map((b) => b.detail).join(' ') || 'Already decided'
+                        : isSendable(p)
+                          ? 'Include in a bulk send'
+                          : hardBlockers(p).map((b) => b.detail).join(' ') || 'Already decided'
                     }
                     onChange={() => toggle(p.id)}
                   />
@@ -303,9 +444,19 @@ export default function ApplicationsPage() {
                   <HelpTip term="bulk_approval_summary" />
                 </span>
                 <div className="spacer" />
-                <button className="btn btn-primary btn-sm" onClick={() => setApproving(checkedIds)}>
-                  Review and approve
-                </button>
+                {sendableChecked.length > 0 && (
+                  <button className="btn btn-phase btn-sm" onClick={openPlan}>
+                    Send all with attachment ({sendableChecked.length})
+                  </button>
+                )}
+                {approvableChecked.length > 0 && (
+                  <button
+                    className="btn btn-primary btn-sm"
+                    onClick={() => setApproving(approvableChecked.map((p) => p.id))}
+                  >
+                    Review and approve
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -315,10 +466,13 @@ export default function ApplicationsPage() {
               <PackageDetail
                 key={selected.id}
                 pkg={selected}
+                row={selected}
                 templates={data?.templates}
                 photo={photo}
-                onChanged={reload}
-                onApprove={setApproving}
+                busy={busy}
+                sendResult={sendResult}
+                sendError={sendError}
+                {...detailActions}
               />
             ) : (
               <div className="card">
@@ -341,6 +495,23 @@ export default function ApplicationsPage() {
             setChecked([])
             reload()
           }}
+        />
+      )}
+
+      {plan && (
+        <SendAllModal
+          rows={plan.rows}
+          excluded={plan.excluded}
+          guard={guard.data}
+          busy={busy === 'sendall'}
+          result={batch}
+          error={batchError}
+          onClose={() => {
+            setPlan(null)
+            setBatch(null)
+            setBatchError(null)
+          }}
+          onConfirm={confirmPlan}
         />
       )}
     </div>

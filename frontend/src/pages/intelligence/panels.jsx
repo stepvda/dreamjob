@@ -15,17 +15,51 @@ import Icon from '../../components/Icon'
 import { Badge, Modal } from '../../components/ui'
 
 /**
- * NFR-305 / CR-405. Stated before the numbers, because a caveat read
- * afterwards is a caveat that was not read.
+ * The shared advisory-only notice (NFR-305 / CR-405), rendered by MarketShell
+ * above whichever reading is open.
+ *
+ * The opening paragraph is route-specific, because a caveat only works if it is
+ * about what is actually on screen. The closing line is the rule that holds for
+ * both routes and is stated once, here, rather than repeated per screen: the
+ * figures rank and suggest, they never decide.
  */
-export function AdvisoryNotice({ discretionMode }) {
-  return (
-    <>
-      <Caution title="A reading of the market, not a verdict on you">
+const NOTICE = {
+  insights: {
+    title: 'Observed rates, not causes',
+    body: (
+      <>
+        These are rates measured across your own applications. A weak segment may reflect which
+        companies happened to be in it, how many roles were speculative, or when the
+        applications went out. Nothing here changes your search on its own: advice becomes a
+        proposal you accept or dismiss, and accepting writes a new version of your directives
+        that you can revert.
+      </>
+    ),
+  },
+  intelligence: {
+    title: 'A reading of the market, not a verdict on you',
+    body: (
+      <>
         Every gap, route and mismatch below is derived from your own profile and from the
         postings and company pages this campaign actually collected. Nothing here is a statement
         about you that the material does not support, no score decides anything on its own, and
         nothing changes your ranked list or your profile unless you ask it to.
+      </>
+    ),
+  },
+}
+
+export function AdvisoryNotice({ route = 'insights', discretionMode }) {
+  const copy = NOTICE[route] || NOTICE.insights
+
+  return (
+    <>
+      <Caution title={copy.title}>
+        {copy.body}
+        <div className="small" style={{ marginTop: 6 }}>
+          These figures rank and suggest; they never decide. Whatever they point at, the choice
+          to act — or not — stays yours.
+        </div>
       </Caution>
 
       {/* FR-385: the flag every screen in this module is told about. */}

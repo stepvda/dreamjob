@@ -16,6 +16,7 @@ import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
 import Icon from '../components/Icon'
+import IntroductionRoutes from '../components/IntroductionRoutes'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
 import {
   Badge,
@@ -23,13 +24,14 @@ import {
   ErrorBox,
   JobProgress,
   Loading,
-  Modal,
   Tabs,
   ValidationBadge,
   formatDate,
   useFetch,
 } from '../components/ui'
 import WorkflowMap from '../components/WorkflowMap'
+import BrowseContacts from './contact/BrowseContacts'
+import EmailCertaintyBadge from './contact/EmailCertaintyBadge'
 
 // The company chooser asks for one page of the knowledge-base browser. 100 is
 // the maximum GET /api/companies allows (FR-345); asking for more is answered
@@ -39,6 +41,7 @@ const COMPANY_CHOICES = 100
 
 const TABS = [
   { key: 'contacts', label: 'Contacts' },
+  { key: 'browse', label: 'Browse all' },
   { key: 'introductions', label: 'Introduction routes' },
   { key: 'network', label: 'My network' },
   { key: 'privacy', label: 'Objections & retention' },
@@ -58,7 +61,8 @@ export default function ContactsPage() {
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
       {tab === 'contacts' && <ContactList />}
-      {tab === 'introductions' && <IntroductionRoutes />}
+      {tab === 'browse' && <BrowseContacts />}
+      {tab === 'introductions' && <IntroductionRoutes mode="opportunity" />}
       {tab === 'network' && <NetworkImport />}
       {tab === 'privacy' && <PrivacyPanel />}
     </div>
@@ -86,6 +90,8 @@ function ContactList() {
   const [scrapeError, setScrapeError] = useState(null)
   const [batch, setBatch] = useState(null)
   const [batchError, setBatchError] = useState(null)
+  const [target, setTarget] = useState(DISCOVERY_LIMIT)
+  const [scope, setScope] = useState('shortlist')
 
   const list = Array.isArray(companies.data)
     ? companies.data
@@ -120,12 +126,31 @@ function ContactList() {
     }
   }
 
-  /** FR-301 for the whole shortlist, as a resumable background job (FR-185). */
-  async function findForShortlist() {
+  /**
+   * FR-301 as a resumable background job (FR-185).
+   *
+   * `scope` decides what `limit` counts. On the shortlist the pass stops once
+   * that many *vacancies* have somebody to write to; across the whole database
+   * it instead visits that many *companies*. The distinction is carried into
+   * the job so the progress and the closing report use the right unit.
+   */
+  async function findContacts() {
     setBatchError(null)
+    const parsed = Math.round(Number(target))
+    const limit = Number.isFinite(parsed)
+      ? Math.max(1, Math.min(5000, parsed))
+      : DISCOVERY_LIMIT
+    setTarget(limit)
     try {
-      const started = await api.post('/contacts/discover', { limit: DISCOVERY_LIMIT })
-      setBatch({ job_id: started.job_id, job: null, done: false, startedAt: Date.now() })
+      const started = await api.post('/contacts/discover', { limit, scope })
+      setBatch({
+        job_id: started.job_id,
+        job: null,
+        done: false,
+        startedAt: Date.now(),
+        scope,
+        limit,
+      })
     } catch (error) {
       setBatchError(error)
     }
@@ -181,17 +206,59 @@ function ContactList() {
           (FR-301, FR-303, FR-304). It is rate-limited per domain, so it runs as a
           background job you can leave.
         </p>
-        <div className="row row-wrap" style={{ gap: 8 }}>
-          <button className="btn btn-primary" disabled={running} onClick={findForShortlist}>
-            {running ? <span className="spinner" /> : <Icon name="search" />} Find contacts for
-            my shortlist
-          </button>
-          <HelpTip term="reachability" />
+        <div className="row row-wrap" style={{ gap: 12, alignItems: 'flex-end' }}>
+          <div className="field" style={{ marginBottom: 0, width: 170 }}>
+            <label>
+              How many to find
+              <HelpTip title="How many to find">
+                {scope === 'shortlist'
+                  ? 'The pass stops once this many vacancies on your shortlist have somebody to write to.'
+                  : 'The pass visits this many companies across the whole database, best-covered vacancies first.'}
+              </HelpTip>
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={5000}
+              value={target}
+              disabled={running}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+          </div>
+          <div className="field" style={{ marginBottom: 0, width: 240 }}>
+            <label>Scope</label>
+            <select
+              value={scope}
+              disabled={running}
+              onChange={(e) => setScope(e.target.value)}
+            >
+              <option value="shortlist">My shortlist</option>
+              <option value="all">All companies in the database</option>
+            </select>
+          </div>
+          <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 240 }}>
+            <label>&nbsp;</label>
+            <div className="row" style={{ gap: 8 }}>
+              <button className="btn btn-primary" disabled={running} onClick={findContacts}>
+                {running ? <span className="spinner" /> : <Icon name="search" />}
+                {scope === 'shortlist'
+                  ? 'Find contacts for my shortlist'
+                  : 'Find contacts for all companies'}
+              </button>
+              <HelpTip term="reachability" />
+            </div>
+          </div>
         </div>
+        <p className="small muted" style={{ margin: '8px 0 0' }}>
+          {scope === 'shortlist'
+            ? `Looking for up to ${target || DISCOVERY_LIMIT} vacancies with a reachable contact on your shortlist.`
+            : `Visiting up to ${target || DISCOVERY_LIMIT} companies across the whole database, best-covered vacancies first.`}
+        </p>
         {batchError && <ErrorBox error={batchError} onRetry={() => setBatchError(null)} />}
         {batch && (
           <div style={{ marginTop: 12 }}>
             <JobProgress
+              report={batch.job?.checkpoint?.report}
               job={
                 batch.job
                   ? { ...batch.job, kind: 'Finding hiring contacts' }
@@ -203,11 +270,22 @@ function ContactList() {
                     }
               }
             />
-            {batch.done && batch.job?.checkpoint?.report && (
+            {batch.job?.checkpoint?.report && (
               <p className="small muted" style={{ margin: '8px 0 0' }}>
-                {batch.job.checkpoint.report.companies_reachable || 0} reachable ·{' '}
-                {batch.job.checkpoint.report.companies_unreachable || 0} nothing found ·{' '}
-                {batch.job.checkpoint.report.vacancies_covered || 0} vacancies newly covered
+                {batch.scope === 'all' ? (
+                  <>
+                    {batch.job.checkpoint.report.companies_reachable || 0} companies reachable ·{' '}
+                    {batch.job.checkpoint.report.companies_unreachable || 0} companies with
+                    nothing found · {batch.job.checkpoint.report.vacancies_covered || 0}{' '}
+                    vacancies newly covered
+                  </>
+                ) : (
+                  <>
+                    {batch.job.checkpoint.report.companies_reachable || 0} reachable ·{' '}
+                    {batch.job.checkpoint.report.companies_unreachable || 0} nothing found ·{' '}
+                    {batch.job.checkpoint.report.vacancies_covered || 0} vacancies newly covered
+                  </>
+                )}
               </p>
             )}
           </div>
@@ -349,7 +427,10 @@ function ContactList() {
                           {c.role_title || '–'}
                           {c.department && <div className="tiny muted">{c.department}</div>}
                         </td>
-                        <td className="mono">{c.email || '–'}</td>
+                        <td className="mono">
+                          {c.email || '–'}
+                          <EmailCertaintyBadge contact={c} />
+                        </td>
                         <td>
                           <ValidationBadge result={c.email_validation} />
                           {c.email_validated_at && (
@@ -425,123 +506,6 @@ function ScrapeOutcome({ result }) {
         </p>
       )}
     </div>
-  )
-}
-
-/* --- Introduction routes --------------------------------------------------- */
-
-function IntroductionRoutes() {
-  const opportunities = useFetch(
-    () => api.get('/opportunities?limit=100').catch(() => []),
-    [],
-  )
-  const [oppId, setOppId] = useState('')
-  const routes = useFetch(
-    () =>
-      oppId
-        ? api.get(`/contacts/opportunities/${oppId}/introductions`)
-        : Promise.resolve(null),
-    [oppId],
-  )
-  const [draft, setDraft] = useState(null)
-
-  const opps = Array.isArray(opportunities.data)
-    ? opportunities.data
-    : opportunities.data?.items || opportunities.data?.opportunities || []
-
-  async function generate(path) {
-    const res = await api.post(`/contacts/introductions/${path.id}/message`, {})
-    setDraft({ path, text: res.message_draft || res.draft || res.message || '' })
-  }
-
-  return (
-    <>
-      <p className="section-intro">
-        A warm introduction outperforms a cold email, so routes are ranked by the strength
-        of the relationship. The message here goes to the <em>intermediary</em>, asking
-        them to introduce you — it is not the application itself, which lives on the
-        Applications screen.
-      </p>
-
-      <div className="card">
-        <div className="field" style={{ marginBottom: 0 }}>
-          <label>Opportunity</label>
-          <select value={oppId} onChange={(e) => setOppId(e.target.value)}>
-            <option value="">Choose an opportunity…</option>
-            {opps.map((o) => (
-              <option key={o.id} value={o.id}>
-                {o.title} — {o.company_name || 'unknown company'}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {oppId && routes.loading && <Loading rows={3} />}
-      {routes.error && <ErrorBox error={routes.error} onRetry={routes.reload} />}
-
-      {oppId && routes.data && (routes.data.paths || routes.data || []).length === 0 && (
-        <Empty title="No introduction route found">
-          Nobody in your imported network is connected to this company. You can still apply
-          directly — or import more of your network on the previous tab.
-        </Empty>
-      )}
-
-      <div className="grid grid-2">
-        {(routes.data?.paths || (Array.isArray(routes.data) ? routes.data : []) || []).map(
-          (p) => (
-            <div className="card phase-edge phase-4" key={p.id}>
-              <div className="row" style={{ marginBottom: 8 }}>
-                <span className="icon-chip phase-chip">
-                  <Icon name="networking" />
-                </span>
-                <div>
-                  <strong>{p.intermediary_name || 'Contact'}</strong>
-                  <div className="tiny muted">{p.intermediary_role}</div>
-                </div>
-                <div className="spacer" />
-                <Badge tone="accent">{p.relationship?.replace(/_/g, ' ')}</Badge>
-              </div>
-              <div className="row small muted" style={{ marginBottom: 10 }}>
-                <span>Degree {p.degree ?? '–'}</span>
-                <span>· strength {Math.round((p.strength ?? 0) * 100)}%</span>
-                <span>· {p.status}</span>
-              </div>
-              <button className="btn btn-sm" onClick={() => generate(p)}>
-                <Icon name="edit" /> Draft the request
-              </button>
-            </div>
-          ),
-        )}
-      </div>
-
-      {draft && (
-        <Modal
-          title={`Introduction request to ${draft.path.intermediary_name || 'your contact'}`}
-          onClose={() => setDraft(null)}
-          actions={
-            <>
-              <button className="btn" onClick={() => navigator.clipboard?.writeText(draft.text)}>
-                <Icon name="copy" /> Copy
-              </button>
-              <button className="btn btn-primary" onClick={() => setDraft(null)}>
-                Done
-              </button>
-            </>
-          }
-        >
-          <p className="small muted">
-            Send this yourself, from wherever you normally speak to this person. Dream Job
-            does not send introduction requests on your behalf.
-          </p>
-          <textarea
-            rows={12}
-            value={draft.text}
-            onChange={(e) => setDraft({ ...draft, text: e.target.value })}
-          />
-        </Modal>
-      )}
-    </>
   )
 }
 

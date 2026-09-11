@@ -5,13 +5,18 @@
  * both are on the row and the correction is the visible control beside them
  * (PATCH /api/learning/responses/{manual_response_id}). A misread rejection is
  * not a cosmetic problem: it is counted in every rate on /insights.
+ *
+ * The correction control itself lives in `CorrectOutcome` so the same one is
+ * drawn by the response sheet the pipeline board opens. This row is the table
+ * shape both routes share.
  */
 
 import { useState } from 'react'
 
 import { HelpTip } from '../../components/Help'
 import { Badge, KindBadge, formatDate } from '../../components/ui'
-import { OUTCOMES, channelLabel, normaliseOutcome, outcomeLabel } from './vocabulary'
+import CorrectOutcome from './CorrectOutcome'
+import { channelLabel, normaliseOutcome, outcomeLabel } from './vocabulary'
 
 /**
  * One recorded response. Where the model read the reply differently from what
@@ -20,7 +25,6 @@ import { OUTCOMES, channelLabel, normaliseOutcome, outcomeLabel } from './vocabu
  */
 export default function ResponseRow({ row, modelReading, onCorrect, onAnother, busy }) {
   const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState('')
 
   const stated = normaliseOutcome(row.stated_outcome)
   const model = normaliseOutcome(modelReading?.classification ?? row.classification)
@@ -79,34 +83,12 @@ export default function ResponseRow({ row, modelReading, onCorrect, onAnother, b
         </td>
 
         <td>
-          {row.manual_response_id ? (
-            <div className="row" style={{ gap: 6 }}>
-              <select
-                value={draft || effective || ''}
-                onChange={(e) => setDraft(e.target.value)}
-                aria-label="What this response actually was"
-                style={{ minWidth: 170 }}
-              >
-                <option value="">Choose…</option>
-                {OUTCOMES.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="btn btn-sm"
-                disabled={busy || !draft || draft === effective}
-                onClick={() => onCorrect(row, draft)}
-              >
-                {busy ? <span className="spinner" /> : 'Correct'}
-              </button>
-            </div>
-          ) : (
-            <span className="tiny muted">
-              Detected replies are corrected on the pipeline board, not here.
-            </span>
-          )}
+          <CorrectOutcome
+            row={row}
+            modelReading={modelReading}
+            busy={busy}
+            onCorrect={onCorrect}
+          />
           <div style={{ marginTop: 6 }}>
             <button className="btn btn-sm btn-ghost" onClick={() => onAnother(row)}>
               Another response to this one

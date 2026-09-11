@@ -23,10 +23,11 @@
 import { useEffect, useState } from 'react'
 
 import { api } from '../api/client'
-import { Caution, ScreenIntro } from '../components/Help'
+import { ScreenIntro } from '../components/Help'
 import Icon from '../components/Icon'
 import WorkflowMap, { deriveJourney } from '../components/WorkflowMap'
-import { ErrorBox, JobProgress, Loading, Tabs, formatDate, useFetch } from '../components/ui'
+import ConsentNotice from '../components/ConsentNotice'
+import { ErrorBox, JobProgress, Loading, Tabs, useFetch } from '../components/ui'
 import CompositeProfile from './composite/CompositeProfile'
 import EnrichmentSettings from './composite/EnrichmentSettings'
 import FindingsQueue from './composite/FindingsQueue'
@@ -109,33 +110,15 @@ export default function CompositePage() {
 
       {/* CR-410: profile data is processed by DeepSeek, outside the EU. The
           composite cannot be synthesised until this consent is on record - the
-          pipeline raises ConsentRequired at the moment of egress. */}
-      <div style={{ marginTop: 14 }}>
-        <Caution
-          title="Your profile is sent outside the European Union"
-          acknowledge="I consent to this transfer"
-          acknowledged={Boolean(llmConsent?.granted)}
-          onAcknowledge={() =>
-            run('consent', async () => {
-              await api.post('/auth/consent', {
-                kind: 'llm_transfer',
-                granted: true,
-                detail: 'Granted from the composite profile screen (CR-410).',
-              })
-              reload()
-            })
-          }
-        >
-          {llmConsent?.text ||
-            'Profile, campaign and vacancy text is sent to the DeepSeek API, which processes it outside the European Union. Fields you marked "do not disclose" (FR-106) and special categories of personal data (FR-127) are removed before any prompt is sent.'}
-          {llmConsent?.granted && llmConsent.decided_at && (
-            <div className="small muted" style={{ marginTop: 4 }}>
-              Recorded {formatDate(llmConsent.decided_at)}. You can withdraw it on the
-              administration screen.
-            </div>
-          )}
-        </Caution>
-      </div>
+          pipeline raises ConsentRequired at the moment of egress. The same
+          shared notice as the profile screen renders it and records the one
+          `llm_transfer` decision exactly once. */}
+      <ConsentNotice
+        consent={llmConsent}
+        detail="Granted from the composite profile screen (CR-410)."
+        onGranted={reload}
+        style={{ marginTop: 14 }}
+      />
 
       {actionError && (
         <div className="alert alert-danger" style={{ marginTop: 12 }}>
@@ -183,6 +166,37 @@ export default function CompositePage() {
           ]}
         />
       </div>
+
+      {/* The composite blocks are read-only by default, so the two decisions
+          that actually change the profile - ruling on online findings and
+          switching enrichment on or off - are surfaced here rather than left
+          only in their tabs. */}
+      {tab === 'profile' && (
+        <div className="card phase-1" style={{ marginTop: 12 }}>
+          <div className="row row-wrap" style={{ gap: 10, alignItems: 'center' }}>
+            <span className="icon-chip phase-chip">
+              <Icon name={pending.length > 0 ? 'warning' : 'check'} />
+            </span>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <strong>
+                {pending.length > 0
+                  ? `${pending.length} online finding${pending.length === 1 ? '' : 's'} await your decision`
+                  : 'No online findings await a decision'}
+              </strong>
+              <div className="small muted">
+                Confirming merges a page into the profile; rejecting hides it from every
+                future run. Online enrichment is {enrichmentOn ? 'on' : 'off'}.
+              </div>
+            </div>
+            <button className="btn btn-sm" onClick={() => setTab('findings')}>
+              <Icon name="browser" /> Review findings
+            </button>
+            <button className="btn btn-sm btn-ghost" onClick={() => setTab('enrichment')}>
+              <Icon name="sparkle" /> Enrichment settings
+            </button>
+          </div>
+        </div>
+      )}
 
       {tab === 'profile' && (
         <CompositeProfile

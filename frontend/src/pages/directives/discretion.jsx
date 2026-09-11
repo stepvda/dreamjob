@@ -6,11 +6,11 @@
  * directive groups and deliberately explicit about what it does and does not
  * guarantee.
  *
- * The shape mirrors PUT /api/directives/{id}/discretion: the current employer
- * is not a field of its own in storage — the backend folds it into
- * `discretion_excluded_companies` with reason `current_employer`, and this
- * editor keeps exactly that representation so a plain save and the dedicated
- * endpoint produce the same record.
+ * The editor keeps the stored representation exactly: the current employer is
+ * not a field of its own — it lives in `discretion_excluded_companies` with
+ * reason `current_employer`. That is what the main directive save persists, so
+ * discretion travels with the rest of the set and no second write path can
+ * leave a set half-saved.
  */
 
 import { useState } from 'react'
@@ -19,9 +19,9 @@ import { api } from '../../api/client'
 import { Caution, HelpTip } from '../../components/Help'
 import Icon from '../../components/Icon'
 import { Badge, Field } from '../../components/ui'
-import { CompanyList } from './controls'
+import { Advanced, CompanyList } from './controls'
 
-export default function DiscretionCard({ value, onChange, vocab, savedId, onSaveDiscretion, saving }) {
+export default function DiscretionCard({ value, onChange, vocab, savedId }) {
   const all = value.discretion_excluded_companies || []
   const employer = all.find((c) => c.reason === 'current_employer') || null
   const others = all.filter((c) => c.reason !== 'current_employer')
@@ -136,36 +136,9 @@ export default function DiscretionCard({ value, onChange, vocab, savedId, onSave
           />
         </Field>
 
-        <ExclusionCheck savedId={savedId} />
-      </div>
-
-      {/* Outside the inert block on purpose. The lists above are only editable
-          while the mode is on, but *switching it off* has to be saveable through
-          the same control — that is the half of FR-385 that matters when the job
-          seeker has changed employer, and a button inside a `pointerEvents:
-          none` wrapper would look enabled and swallow the click. */}
-      <div className="row" style={{ marginTop: 14 }}>
-        <span className="small muted">
-          {on
-            ? 'Applies to every campaign that runs under this directive set.'
-            : 'Applying now records that this search is no longer being kept quiet.'}
-        </span>
-        <div className="spacer" />
-        <button
-          type="button"
-          className="btn btn-sm"
-          disabled={!savedId || saving}
-          title={savedId ? undefined : 'Save the directive set first'}
-          onClick={onSaveDiscretion}
-        >
-          {saving ? (
-            <span className="spinner" />
-          ) : (
-            <>
-              <Icon name="check" /> Apply discretion settings now
-            </>
-          )}
-        </button>
+        <Advanced label="Advanced discretion tools">
+          <ExclusionCheck savedId={savedId} />
+        </Advanced>
       </div>
     </div>
   )

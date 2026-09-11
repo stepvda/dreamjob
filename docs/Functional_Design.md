@@ -563,6 +563,20 @@ company's own pages, then a convention inferred from other observed addresses on
 the domain, and only last a generic careers mailbox. SMTP probing is off by
 default at this stage, so a bulk pass costs no outbound connections.
 
+The "company's own pages" step is fed by **four sources, not one**, because the
+home page stopped being where an address lives: the pages the home page links
+to; the site's own **sitemap**, which names the contact and team pages a
+JavaScript shell does not link; **schema.org JSON-LD** (`Organization.email`,
+`contactPoint`, `Person.email` on a team page); and an RFC 9116
+**`security.txt`**. A fifth source — a **search API** (Brave, Bing or Google
+CSE, administrator-configured) — exists because large corporate sites answer
+every fetch with a bot-protection interstitial (F5/TSPD, Cloudflare, Incapsula),
+so our crawl sees no page at all. A search engine has already indexed those
+pages; the API result and its snippet are the only compliant way in, since the
+engines disallow their HTML search endpoint in `robots.txt` (IR-101). When a
+challenge is detected the company is recorded as **blocked** with that reason,
+rather than silently reported as having no address.
+
 **Addresses are found or inferred** (FR-303) from the company website, press
 pages, or pattern inference from other addresses on the same domain — and the
 method is recorded, because an inferred address deserves less confidence than a
@@ -903,6 +917,11 @@ Carried forward honestly rather than closed:
 - **Bulk register and board importers are operator scripts**, run by hand rather
   than on the scheduler, so the company inventory widens when an operator runs
   them.
+- **Web-search contact discovery is off until an administrator configures a
+  provider key** (Brave, Bing or Google CSE). The sitemap, JSON-LD and
+  `security.txt` sources need no key; the search source is what reaches the
+  F5/Cloudflare-protected sites, and without a key those companies are recorded
+  as `blocked` rather than silently contactless.
 - **DuckDuckGo search** returns a bot-check page from datacentre ranges, so
   FR-122 degrades to declared and handle-derived URLs in such an environment.
 

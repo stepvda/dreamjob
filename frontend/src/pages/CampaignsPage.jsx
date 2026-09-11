@@ -30,7 +30,7 @@ import {
   useFetch,
 } from '../components/ui'
 
-import { STATUS_TONE, cost, num, secondsBetween } from './campaign/shared'
+import { Advanced, STATUS_TONE, cost, num, secondsBetween } from './campaign/shared'
 
 /** NFR-104: at this share of the budget the pipeline starts shedding work. */
 const DEGRADE_AT = 0.8
@@ -385,41 +385,46 @@ function CreateCampaign({ directives, versions, onClose, onCreated }) {
         </select>
       </Field>
 
-      <div className="grid grid-2">
-        <Field
-          label={
-            <>
-              Token budget
-              <HelpTip term="token_budget" />
-            </>
-          }
-          hint="Leave blank for the configured default."
-        >
-          <input
-            type="number"
-            min="0"
-            step="10000"
-            value={budget}
-            placeholder="default"
-            onChange={(e) => setBudget(e.target.value)}
-          />
-        </Field>
+      {/* Token budget and page ceiling are tuning, not essentials: collapsed by
+          default so name, directive set and profile version lead. Both stay
+          empty unless changed, so the backend defaults still apply (FR-186). */}
+      <Advanced label="Advanced settings">
+        <div className="grid grid-2">
+          <Field
+            label={
+              <>
+                Token budget
+                <HelpTip term="token_budget" />
+              </>
+            }
+            hint="Leave blank for the configured default."
+          >
+            <input
+              type="number"
+              min="0"
+              step="10000"
+              value={budget}
+              placeholder="default"
+              onChange={(e) => setBudget(e.target.value)}
+            />
+          </Field>
 
-        {/* FR-186: hard ceilings are set before anything is fetched. */}
-        <Field
-          label="Maximum pages"
-          hint="A ceiling across every source in the plan. Leave empty for the default (10,000)."
-        >
-          <input
-            type="number"
-            min="1"
-            step="10"
-            value={maxPages}
-            placeholder="default"
-            onChange={(e) => setMaxPages(e.target.value)}
-          />
-        </Field>
-      </div>
+          {/* FR-186: hard ceilings are set before anything is fetched. */}
+          <Field
+            label="Maximum pages"
+            hint="A ceiling across every source in the plan. Leave empty for the default (10,000)."
+          >
+            <input
+              type="number"
+              min="1"
+              step="10"
+              value={maxPages}
+              placeholder="default"
+              onChange={(e) => setMaxPages(e.target.value)}
+            />
+          </Field>
+        </div>
+      </Advanced>
     </Modal>
   )
 }

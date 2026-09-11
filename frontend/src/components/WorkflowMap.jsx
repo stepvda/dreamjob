@@ -4,8 +4,9 @@
  * Dream Job is a ten-stage pipeline (specification section 2.3) and the single
  * most common way to get lost in it is not knowing which stage you are in or
  * what unblocks the next one. This component is the answer to "where am I?" —
- * it is rendered on the overview screen at full size and as a compact strip at
- * the top of each stage's own screen.
+ * it is rendered at full size on "Where I am" (`/overview`), the detailed view
+ * behind the guided three steps on `/home`, and as a compact strip at the top
+ * of each stage's own screen.
  *
  * Every node reports real state from the API, not a static picture: what is
  * done, what is running, what is blocked and why, and what it produced. A node

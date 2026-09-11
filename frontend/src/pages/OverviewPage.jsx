@@ -1,10 +1,16 @@
 /**
- * Overview - "Where I am". The landing screen.
+ * Overview - "Where I am". The detailed journey map.
  *
- * Dream Job is a ten-stage pipeline and the commonest way to get lost in it is
- * not knowing which stage you are in or what unblocks the next one. So this
- * screen answers three questions, in this order: what should I do next, where
- * am I in the process, and what has the process actually produced.
+ * This is the detail view behind the guided three steps on `/home`, not a
+ * second landing. Dream Job is a ten-stage pipeline and the commonest way to
+ * get lost in it is not knowing which stage you are in or what unblocks the
+ * next one, so this screen shows the whole map: what is done, what is running,
+ * what is waiting and on what, and what the process has actually produced.
+ *
+ * `/home` is where the single next action lives. Here the map's own suggestion
+ * is kept deliberately quiet - it marks the stage and links into it, but the
+ * call to action is a link back to Start here, so the two screens never compete
+ * for the same decision.
  *
  * The map itself is <WorkflowMap>, which is shared with every working screen.
  * Everything here is the frame around it.
@@ -116,7 +122,11 @@ export default function OverviewPage() {
 
   return (
     <div className="content-wide">
-      <ScreenIntro pathname="/overview" />
+      <ScreenIntro pathname="/overview">
+        The detailed journey map: every stage, what is done, what is running and what it
+        is waiting on. For the guided path and the one thing to do next, go to{' '}
+        <Link to="/home">Start here</Link>.
+      </ScreenIntro>
 
       {/* FR-385: if the search is being run discreetly, say so plainly. */}
       {data.discretion_mode && <DiscretionNotice />}
@@ -126,19 +136,23 @@ export default function OverviewPage() {
           <FirstRun
             pathname="/overview"
             action={
-              next ? (
-                <Link className="btn btn-primary btn-lg" to={next.to}>
-                  <Icon name="play" />
-                  {next.label}
+              <div className="row row-wrap" style={{ gap: 10 }}>
+                {next && (
+                  <Link className="btn" to={next.to}>
+                    <Icon name="play" />
+                    {next.label}
+                  </Link>
+                )}
+                <Link className="btn" to="/home">
+                  <Icon name="overview" />
+                  Go to Start here
                 </Link>
-              ) : (
-                <Link className="btn btn-primary btn-lg" to="/profile">
-                  <Icon name="profile" />
-                  Start with your profile
-                </Link>
-              )
+              </div>
             }
-          />
+          >
+            This is the detailed map of the whole process. The guided three steps — and
+            the one thing to do next — are on <Link to="/home">Start here</Link>.
+          </FirstRun>
 
           <div className="card phase-0 phase-edge" style={{ marginTop: 14 }}>
             <div className="card-header">
@@ -203,57 +217,47 @@ export default function OverviewPage() {
   )
 }
 
-/* --- The one thing to do next --------------------------------------------- */
+/* --- The map's own suggested stage ----------------------------------------- */
 
 /**
  * The suggested next action (`next_action`), which the API derives as the first
- * stage in pipeline order that is ready or already running. It is deliberately
- * the loudest thing on the screen: a user who does not know what to do next
- * should not have to read the map to find out.
+ * stage in pipeline order that is ready or already running. It marks the stage
+ * on the map, but it is deliberately secondary here: `/home` owns the single
+ * primary action, and this screen is the detail behind it. The stage is named
+ * and linked, and the quiet way through is back to Start here.
  */
 function NextAction({ next }) {
-  if (!next) {
-    return (
-      <div className="card next-action phase-0">
-        <div className="next-action-body">
+  return (
+    <div className="card phase-0" style={{ marginTop: 0 }}>
+      <div className="row row-wrap" style={{ alignItems: 'center', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
           <div className="next-action-eyebrow">
             <Icon name="target" />
-            <span style={{ marginLeft: 6 }}>Suggested next action</span>
+            <span style={{ marginLeft: 6 }}>Next in the map</span>
             <HelpTip term="next_action" />
           </div>
-          <h3>Nothing is waiting on you</h3>
-          <p>
-            Every stage that can move has either finished or is running. Follow up
-            on what comes back, or plan another campaign when you want more to
-            choose from.
+          <h3 style={{ margin: '6px 0 4px' }}>
+            {next ? next.label : 'Nothing is waiting on you'}
+          </h3>
+          <p className="small muted" style={{ margin: 0 }}>
+            {next
+              ? 'This is the earliest stage in the process that is ready to move. Nothing '
+                + 'later can finish until it does.'
+              : 'Every stage that can move has either finished or is running. Follow up on '
+                + 'what comes back, or plan another campaign when you want more to choose from.'}
           </p>
         </div>
-        <Link className="btn btn-lg" to="/campaigns">
-          <Icon name="campaign" />
-          Plan a campaign
+        {next && (
+          <Link className="btn" to={next.to}>
+            <Icon name="play" />
+            Open this step
+          </Link>
+        )}
+        <Link className="btn" to={next ? '/home' : '/campaigns'}>
+          <Icon name={next ? 'overview' : 'campaign'} />
+          {next ? 'Go to Start here' : 'Plan a campaign'}
         </Link>
       </div>
-    )
-  }
-
-  return (
-    <div className="card next-action phase-0">
-      <div className="next-action-body">
-        <div className="next-action-eyebrow">
-          <Icon name="target" />
-          <span style={{ marginLeft: 6 }}>Suggested next action</span>
-          <HelpTip term="next_action" />
-        </div>
-        <h3>{next.label}</h3>
-        <p>
-          This is the earliest stage in the process that is ready to move. Nothing
-          later can finish until it does.
-        </p>
-      </div>
-      <Link className="btn btn-primary btn-lg" to={next.to}>
-        <Icon name="play" />
-        Continue
-      </Link>
     </div>
   )
 }

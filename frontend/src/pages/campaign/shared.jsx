@@ -6,9 +6,36 @@
  * campaign costs cents, and the house formatMoney rounds those away to "EUR 0".
  */
 
+import { useState } from 'react'
+
 import { HelpTip } from '../../components/Help'
 import Icon from '../../components/Icon'
 import { formatMoney } from '../../components/ui'
+
+/**
+ * Progressive disclosure for the campaign screens: the essential controls stay
+ * on screen and the tuning controls fold away behind one consistent toggle.
+ * Collapsed by default so the defaults are what a reader sees first.
+ */
+export function Advanced({ label = 'Advanced settings', children }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div style={{ marginTop: 4, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+      <button
+        type="button"
+        className="btn btn-sm btn-ghost"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="dir-caret" aria-hidden>
+          {open ? '\u25be' : '\u25b8'}
+        </span>
+        {open ? `Hide ${label}` : `Show ${label}`}
+      </button>
+      {open && <div style={{ marginTop: 10 }}>{children}</div>}
+    </div>
+  )
+}
 
 export const STATUS_TONE = {
   draft: undefined,

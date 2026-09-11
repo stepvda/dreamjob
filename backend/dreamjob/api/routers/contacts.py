@@ -17,7 +17,7 @@ an opportunity, a network member or an introduction path filters on
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -33,6 +33,7 @@ from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as repo
 from dreamjob.jobs.runner import runner
 from dreamjob.pipeline import apply_contacts as scale_pipeline
+from dreamjob.pipeline import contact_email_backfill as backfill
 from dreamjob.pipeline import contacts as pipeline
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
@@ -78,21 +79,48 @@ class CompanyDiscoverRequest(BaseModel):
 
 
 class DiscoverAllRequest(BaseModel):
-    """FR-301 for a seeker's whole shortlist, as a resumable job (FR-185).
+    """FR-301 for a seeker's corpus, as a resumable job (FR-185).
 
-    ``limit`` counts vacancies, not companies, matching
-    :func:`apply_contacts.ensure_apply_contacts`: the pass stops as soon as that
-    many vacancies have somebody to write to.
+    ``scope`` decides what the target counts.  ``shortlist`` (the default) is
+    the original pass over the vacancies that back the seeker's opportunities:
+    ``limit`` counts *vacancies*, and the pass stops as soon as that many have
+    somebody to write to.  ``all`` widens the work list to every company in the
+    knowledge base - including companies with no vacancy and no opportunity -
+    where ``limit`` counts *companies to visit* and the pass does not stop early
+    on vacancy coverage.
+
+    ``max_companies`` is an optional ceiling on the work list, independent of
+    ``scope``; it is most useful with ``all``, where the pool is the whole
+    company table.
     """
 
     limit: int = Field(default=500, ge=1, le=5000)
     campaign_id: str | None = None
+    scope: Literal["shortlist", "all"] = "shortlist"
+    max_companies: int | None = Field(default=None, ge=1, le=50000)
     crawl_site: bool = True
     allow_smtp: bool = False
     derive_domains: bool = True
     allow_generic: bool = True
     refresh: bool = False
     order: str = Field(default="vacancies", pattern="^(vacancies|recency)$")
+
+
+class BackfillRequest(BaseModel):
+    """FR-303 for contacts that have no address, as a resumable job (FR-185).
+
+    ``scope='mine'`` fills the seeker's own and shared contacts; ``scope='all'``
+    sweeps the whole contact table and is administrator-only.  ``allow_smtp`` is
+    off, like the batch pass: one button must not open thousands of probes to
+    other people's mail servers (FR-305, CR-402).
+    """
+
+    limit: int = Field(default=500, ge=1, le=5000)
+    scope: Literal["mine", "all"] = "mine"
+    max_companies: int | None = Field(default=None, ge=1, le=50000)
+    allow_smtp: bool = False
+    crawl_site: bool = True
+    use_lookup_service: bool = False
 
 
 class ValidateRequest(BaseModel):
@@ -173,6 +201,79 @@ class LookupServiceSettings(BaseModel):
     url: str = Field(default="", max_length=500)
     api_key: str = Field(default="", max_length=200)
     name: str = Field(default="", max_length=120)
+
+
+class SearchProviderSettings(BaseModel):
+    """The FR-303 search source: an API, keyed, off until an admin switches it on.
+
+    Scraping a search engine's HTML results page is not an option - Bing and
+    Startpage disallow ``/search`` in robots.txt and IR-101 means a refusal is
+    recorded, not worked around - so a provider and a key are required.
+    """
+
+    enabled: bool = False
+    provider: str = Field(default="", max_length=40)   # brave | bing | google_cse
+    api_key: str = Field(default="", max_length=200)
+    url: str = Field(default="", max_length=500)       # required for google_cse
+
+
+# ---------------------------------------------------------------------------
+# Browse the stored contact corpus (FR-301, FR-344, NFR-303)
+# ---------------------------------------------------------------------------
+
+
+@router.get("")
+def browse_contacts(
+    seeker: Seeker,
+    q: str | None = Query(default=None, max_length=200),
+    company_id: str | None = None,
+    validation: str | None = Query(default=None, pattern="^(valid|risky|unknown|invalid)$"),
+    method: str | None = Query(default=None, max_length=60),
+    uncertain: int | None = Query(default=None, ge=0, le=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    order: str = Query(default="recent", pattern="^(recent|name|company)$"),
+    include_blocked: bool = Query(default=False),
+) -> dict[str, Any]:
+    """One page of the contact corpus, filterable (FR-301, NFR-303, NFR-502).
+
+    Non-administrators read the ``usable_contact`` view, scoped to their own
+    campaigns: objected (NFR-302) and ``invalid`` (FR-304) addresses are never
+    listed, and a campaign-scoped row belonging to somebody else is invisible.
+    ``include_blocked=true`` is the administrator's view of ``contact`` itself
+    and is refused to anyone else.  ``q`` matches name, e-mail or company.
+    """
+    if include_blocked and not seeker.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
+    scoped = None if seeker.is_admin else seeker.id
+    items, total = repo.browse_contacts(
+        q=q,
+        company_id=company_id,
+        validation=validation,
+        method=method,
+        uncertain=uncertain,
+        limit=limit,
+        offset=offset,
+        order=order,
+        include_blocked=include_blocked,
+        job_seeker_id=scoped,
+    )
+    facets = repo.browse_facets(
+        q=q,
+        company_id=company_id,
+        validation=validation,
+        method=method,
+        uncertain=uncertain,
+        include_blocked=include_blocked,
+        job_seeker_id=scoped,
+    )
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "facets": facets,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -266,24 +367,32 @@ async def discover_company_contacts(
 
 @router.post("/discover", status_code=status.HTTP_202_ACCEPTED)
 async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker) -> dict[str, Any]:
-    """Start the FR-301 pass for a seeker's shortlist as a resumable job (FR-185).
+    """Start the FR-301 pass for a seeker as a resumable job (FR-185).
 
     The Contacts screen used to list whatever contacts happened to exist and
     offered no way to find more; the Apply Browser's control only covered its
     current page.  This is the missing trigger, and it is a job rather than a
     request because a bounded pass over many companies is not something a screen
-    should wait for (NFR-502).  The options travel in the checkpoint, so a run
-    interrupted by a restart resumes with the same limits (NFR-401).
+    should wait for (NFR-502).  ``scope`` picks the pool - the seeker's vacancy
+    shortlist or the whole company table - and the options travel in the
+    checkpoint, so a run interrupted by a restart resumes with the same limits
+    (NFR-401).
     """
     options = body.model_dump()
     options.pop("campaign_id", None)
+    # ``shortlist`` counts vacancies; ``all`` counts companies.  Once the pool
+    # is the whole company table, ``max_companies`` is the ceiling that
+    # matters, so the estimate follows the smaller of the two.
+    work = body.limit if body.scope == "shortlist" else min(
+        body.limit, body.max_companies or body.limit
+    )
     job_id = runner.create(
         scale_pipeline.DISCOVERY_JOB_KIND,
         job_seeker_id=seeker.id,
         campaign_id=body.campaign_id,
         total=1,
         # A ladder step budgets about eight seconds per company (FR-182 pacing).
-        estimated_seconds=max(60, min(body.limit, 1000) * 8),
+        estimated_seconds=max(60, min(work, 1000) * 8),
     )
     update_row("job_run", job_id, {"checkpoint": to_json({"options": options})})
     await runner.start(job_id)
@@ -291,6 +400,7 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
         "job_id": job_id,
         "kind": scale_pipeline.DISCOVERY_JOB_KIND,
         "campaign_id": body.campaign_id,
+        "scope": body.scope,
         "limit": body.limit,
     }
 
@@ -488,6 +598,108 @@ def set_lookup_service(body: LookupServiceSettings, admin: Admin) -> dict[str, A
         detail={"enabled": body.enabled, "name": body.name, "url": body.url},
     )
     return lookup_service_status(admin)
+
+
+@router.get("/search-provider")
+def search_provider_status(admin: Admin) -> dict[str, Any]:
+    """The FR-303 search source, and what it needs before it can run."""
+    config = patterns.search_config()
+    return {
+        "enabled": config["enabled"],
+        "configured": bool(config["provider"] and config["key"]),
+        "provider": config["provider"],
+        "url": config["url"],
+        "supported": ["brave", "bing", "google_cse"],
+        "note": (
+            "The website source cannot read sites behind F5/Cloudflare/Incapsula: they "
+            "answer every fetch with a challenge. A search API has already indexed those "
+            "pages, which is why FR-303 uses one. A provider and key are required; the "
+            "engines disallow their HTML search endpoint in robots.txt."
+        ),
+    }
+
+
+@router.put("/search-provider")
+def set_search_provider(body: SearchProviderSettings, admin: Admin) -> dict[str, Any]:
+    """Name a search provider and switch it on (FR-303).  Administrator only."""
+    from dreamjob.db.repositories import knowledge as kb  # noqa: PLC0415
+
+    provider = body.provider.strip().lower()
+    if provider and provider not in ("brave", "bing", "google_cse"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"unsupported provider {provider!r}")
+    if body.enabled and not provider:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "a provider is required to enable search")
+    if provider == "google_cse" and body.enabled and not body.url:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "google_cse needs its endpoint URL (with cx=)"
+        )
+    kb.set_setting(patterns.SETTING_SEARCH_ENABLED, bool(body.enabled))
+    kb.set_setting(patterns.SETTING_SEARCH_PROVIDER, provider)
+    kb.set_setting(patterns.SETTING_SEARCH_URL, body.url)
+    if body.api_key:
+        kb.set_setting(patterns.SETTING_SEARCH_KEY, body.api_key)
+    record_audit(
+        "contacts.search_provider_configured",
+        seeker_id=admin.id,
+        detail={"enabled": body.enabled, "provider": provider},
+    )
+    return search_provider_status(admin)
+
+
+# ---------------------------------------------------------------------------
+# FR-303: fill in contacts that have no address yet
+# ---------------------------------------------------------------------------
+
+
+@router.get("/emails/missing")
+def emails_missing(
+    seeker: Seeker, scope: Literal["mine", "all"] = Query(default="mine")
+) -> dict[str, Any]:
+    """How many stored contacts still have no address (FR-303).
+
+    ``scope=all`` counts the whole contact table and is administrator-only.
+    """
+    if scope == "all" and not seeker.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
+    scoped = None if scope == "all" else seeker.id
+    return {
+        "count": repo.contacts_missing_email_count(job_seeker_id=scoped),
+        "scope": scope,
+    }
+
+
+@router.post("/emails/backfill", status_code=status.HTTP_202_ACCEPTED)
+async def start_emails_backfill(body: BackfillRequest, seeker: Seeker) -> dict[str, Any]:
+    """Start the FR-303 backfill as a resumable job (FR-185).
+
+    The options travel in the checkpoint, so a run interrupted by a restart
+    resumes with the same scope and limits (NFR-401).
+    """
+    if body.scope == "all" and not seeker.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
+    options = body.model_dump()
+    job_id = runner.create(
+        backfill.BACKFILL_JOB_KIND,
+        job_seeker_id=seeker.id,
+        total=1,
+        estimated_seconds=max(60, min(body.limit, 1000) * 2),
+    )
+    update_row("job_run", job_id, {"checkpoint": to_json({"options": options})})
+    await runner.start(job_id)
+    return {
+        "job_id": job_id,
+        "kind": backfill.BACKFILL_JOB_KIND,
+        "scope": body.scope,
+        "limit": body.limit,
+    }
+
+
+@router.get("/emails/backfill/{job_id}")
+def emails_backfill_status(job_id: str, seeker: Seeker) -> dict[str, Any]:
+    """Progress of a backfill started above, owned by this seeker (FR-344)."""
+    row = owned_or_404("job_run", job_id, seeker.id)
+    checkpoint = from_json(row.get("checkpoint"), {}) or {}
+    return {**row, "checkpoint": checkpoint, "report": checkpoint.get("report")}
 
 
 # ---------------------------------------------------------------------------
