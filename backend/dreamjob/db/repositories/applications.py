@@ -36,9 +36,29 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+from dreamjob.security import at_rest
 
 #: Columns of ``application_package`` holding JSON, decoded on the way out.
 JSON_COLUMNS = ("consistency_report", "generation_notes")
+
+
+def _encode_sensitive(payload: dict[str, Any], job_seeker_id: str) -> dict[str, Any]:
+    """JSON-encode the package's JSON columns, sealing the CV/motivation text.
+
+    NFR-201 names generated CVs: ``generation_notes`` holds the tailored CV,
+    motivation and briefing text, so it is sealed with the job seeker's key.
+    ``consistency_report`` is a check result with no personal prose and stays a
+    plain JSON column.  The read side unseals centrally.
+    """
+    report = payload.get("consistency_report")
+    if isinstance(report, (dict, list)):
+        payload["consistency_report"] = to_json(report)
+    notes = payload.get("generation_notes")
+    if isinstance(notes, (dict, list)):
+        payload["generation_notes"] = at_rest.seal(
+            to_json(notes), purpose="cv", scope=job_seeker_id
+        )
+    return payload
 
 PACKAGE_STATUSES = frozenset({"draft", "approved", "discarded", "sent"})
 
@@ -101,7 +121,7 @@ def create_package(job_seeker_id: str, opportunity_id: str, values: dict[str, An
             "updated_at": utcnow(),
         }
     )
-    return insert_row("application_package", payload)
+    return insert_row("application_package", _encode_sensitive(payload, job_seeker_id))
 
 
 def get_package(package_id: str, job_seeker_id: str) -> dict | None:
@@ -184,9 +204,7 @@ def update_package(package_id: str, job_seeker_id: str, values: dict[str, Any]) 
     payload = {k: v for k, v in values.items() if k in _UPDATABLE}
     if not payload:
         return get_package(package_id, job_seeker_id)
-    for column in JSON_COLUMNS:
-        if isinstance(payload.get(column), (dict, list)):
-            payload[column] = to_json(payload[column])
+    payload = _encode_sensitive(payload, job_seeker_id)
     payload["updated_at"] = utcnow()
     update_row("application_package", package_id, payload)
     return get_package(package_id, job_seeker_id)

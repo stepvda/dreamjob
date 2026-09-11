@@ -37,6 +37,7 @@ from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.pipeline import directives as dir_mod
 from dreamjob.pipeline import signals as signals_mod
+from dreamjob.pipeline import taxonomy as tax
 from dreamjob.pipeline.skills import normalise_labels
 
 log = logging.getLogger(__name__)
@@ -286,8 +287,12 @@ def normalise_vacancy(
         "company_id": vacancy.get("company_id") or (company or {}).get("id"),
         "vacancy_id": vacancy.get("id"),
         "title": title or "Untitled role",
-        "function_family": vacancy.get("function_family") or infer_function_family(title, head),
-        "seniority": vacancy.get("seniority") or infer_seniority(title, head),
+        # FR-261: canonicalise the source's own label first; only when it is a
+        # word we do not know do we fall back to reading the advertisement.
+        "function_family": tax.canonical_function_family(vacancy.get("function_family"))
+        or infer_function_family(title, head),
+        "seniority": tax.canonical_seniority(vacancy.get("seniority"))
+        or infer_seniority(title, head),
         "description": description or None,
         "required_skills": _skill_labels(vacancy.get("required_skills"), use_llm=use_llm),
         "desirable_skills": _skill_labels(vacancy.get("desirable_skills"), use_llm=use_llm),

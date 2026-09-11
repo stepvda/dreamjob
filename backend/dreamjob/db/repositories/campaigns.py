@@ -177,6 +177,23 @@ def companies_in_scope(countries: list[str] | None = None, limit: int = 200) -> 
     return query_all(sql, tuple(params))
 
 
+def dominant_company_countries(limit: int = 3) -> list[str]:
+    """The countries most of the known companies are in (FR-162).
+
+    A campaign whose directives name no geography still has one: the companies
+    it is about.  Without inferring it, coverage filtering was disabled and
+    every registry on earth was planned - 379 SEC EDGAR lookups against an
+    all-Belgian corpus, each resolving no CIK.
+    """
+    rows = query_all(
+        "SELECT country, COUNT(*) AS n FROM company "
+        "WHERE country IS NOT NULL AND TRIM(country) <> '' "
+        "GROUP BY country ORDER BY n DESC LIMIT ?",
+        (max(1, int(limit)),),
+    )
+    return [str(r["country"]).upper() for r in rows]
+
+
 def companies_with_ats_board(vendor: str | None = None, limit: int = 200) -> list[dict]:
     """Companies whose ATS board is already known (FR-162).
 

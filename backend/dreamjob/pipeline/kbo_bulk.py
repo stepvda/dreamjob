@@ -43,7 +43,7 @@ SOURCE = "kbo_bulk"
 #: seed table is shared by every bulk register importer, so the promotion has to
 #: read the type off the source rather than assume Belgium (DR-101).
 LEGAL_ID_TYPE_BY_SOURCE: dict[str, str] = {
-    "kbo_bulk": "kbo",
+    "kbo_bulk": "kbo_bce",
     "companies_house_bulk": "companies_house",
 }
 

@@ -694,7 +694,7 @@ def get_company(company_id: str) -> dict | None:
 def latest_profile_sections(job_seeker_id: str) -> dict:
     """Employers and schools of the job seeker - the alumni join key (FR-461)."""
     row = query_one(
-        "SELECT sections FROM profile_version WHERE job_seeker_id = ? "
+        "SELECT sections, job_seeker_id FROM profile_version WHERE job_seeker_id = ? "
         "ORDER BY version DESC LIMIT 1",
         (job_seeker_id,),
     )

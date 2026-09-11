@@ -237,6 +237,36 @@ def test_generate_plan_persists_estimates_and_honours_exclusions(db):
     assert still_excluded["excluded_by_user"] == 1
 
 
+def test_a_campaign_with_no_geography_does_not_plan_foreign_registries(db):
+    """FR-164/NFR-403: an all-Belgian corpus must not plan US SEC EDGAR.
+
+    ``select_sources`` treats an empty wanted-set as "every coverage matches",
+    so a campaign whose directives name no country planned every registry on
+    earth; 379 EDGAR lookups resolved no CIK.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker, directives={"location": {"countries": []}})
+    insert_row(
+        "company",
+        {
+            "name": "Acme NV",
+            "normalised_name": "acme",
+            "country": "BE",
+            "source": "test",
+            "access_method": "registry",
+            "collected_at": utcnow(),
+        },
+    )
+    _catalogue("kbo", source_type="registry", coverage_countries=["BE"])
+    _catalogue("sec_edgar", source_type="registry", coverage_countries=["US"])
+
+    summary = planning.generate_plan(campaign_id, seeker, use_llm=False)
+
+    keys = {i["adapter_key"] for i in summary["items"]}
+    assert "kbo" in keys
+    assert "sec_edgar" not in keys
+
+
 class _RecordingLLM:
     """A stand-in that captures everything the planner would send (CR-410)."""
 

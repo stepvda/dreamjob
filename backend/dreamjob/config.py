@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     local_llm_api_key: str = Field("not-needed", alias="DREAMJOB_LOCAL_LLM_API_KEY")
     local_llm_tasks: str = Field("", alias="DREAMJOB_LOCAL_LLM_TASKS")
 
+    # Optional embeddings model for the semantic index (FR-261).  Empty means
+    # no semantic index: the feature is inert rather than broken.
+    embeddings_model: str = Field("", alias="DREAMJOB_EMBEDDINGS_MODEL")
+    embeddings_base_url: str = Field("", alias="DREAMJOB_EMBEDDINGS_BASE_URL")
+
     default_token_budget: int = Field(2_000_000, alias="DREAMJOB_DEFAULT_TOKEN_BUDGET")
     # How many opportunities of a campaign earn an LLM scoring call (NFR-104;
     # docs/Data_Gathering_Plan.md N11).  A campaign can produce ~93,000
@@ -98,6 +103,14 @@ class Settings(BaseSettings):
     # Both are bounded on purpose: the alternative to a starved event loop is
     # not an unbounded thread count, and CR-408 still allows only one writer.
     job_pool_size: int = Field(4, alias="DREAMJOB_JOB_POOL_SIZE")
+
+    # Continuous monitoring (FR-401, FR-403, NFR-303, FR-364).  The scheduler
+    # implements watchlist checks, digests, reply polling, follow-ups, contact
+    # retention and prompt redaction, but nothing ever started it - so on a
+    # running installation every one of those stayed dormant.  It is on by
+    # default and can be turned off for an external `--once` cron, or in tests.
+    scheduler_enabled: bool = Field(True, alias="DREAMJOB_SCHEDULER_ENABLED")
+    scheduler_tick_seconds: int = Field(60, alias="DREAMJOB_SCHEDULER_TICK_SECONDS")
     job_io_threads: int = Field(8, alias="DREAMJOB_JOB_IO_THREADS")
     # How long a writer waits for the single writer (CR-408) before giving up.
     # A request is impatient because a person is waiting and an error beats a

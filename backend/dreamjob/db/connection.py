@@ -411,10 +411,26 @@ def write_tx(
         _write_gate.release()
 
 
+def _unseal(row: dict) -> dict:
+    """Return the row with NFR-201 sealed columns opened for its job seeker.
+
+    The import is local so the connection layer stays importable without the
+    crypto dependency, and so a test that swaps the connection cache does not
+    drag the security package in with it.
+    """
+    try:
+        from dreamjob.security import at_rest  # noqa: PLC0415
+
+        return at_rest.unseal_row(row) or row
+    except Exception:  # noqa: BLE001 - reading a row is never worth a crash here
+        log.debug("Could not unseal a row; returning it as stored", exc_info=True)
+        return row
+
+
 def query_all(sql: str, params: tuple | dict = (), db_path: Path | None = None) -> list[dict]:
     cur = get_connection(db_path).execute(sql, params)
     try:
-        return [dict(r) for r in cur.fetchall()]
+        return [_unseal(dict(r)) for r in cur.fetchall()]
     finally:
         cur.close()
 
@@ -423,7 +439,7 @@ def query_one(sql: str, params: tuple | dict = (), db_path: Path | None = None) 
     cur = get_connection(db_path).execute(sql, params)
     try:
         row = cur.fetchone()
-        return dict(row) if row else None
+        return _unseal(dict(row)) if row else None
     finally:
         cur.close()
 

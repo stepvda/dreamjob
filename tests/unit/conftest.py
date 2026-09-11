@@ -37,6 +37,9 @@ def scratch_database(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]
     patch = pytest.MonkeyPatch()
     patch.setenv("DREAMJOB_DATA_DIR", str(root / "data"))
     patch.setenv("DREAMJOB_DB_PATH", str(root / "data" / "unit.db"))
+    # No background scheduler in tests: it would run monitoring tasks against
+    # the scratch database on its first tick and make the suite order-dependent.
+    patch.setenv("DREAMJOB_SCHEDULER_ENABLED", "0")
     get_settings.cache_clear()
     get_settings().ensure_dirs()
     migrate()

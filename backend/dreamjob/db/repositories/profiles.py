@@ -26,6 +26,7 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+from dreamjob.security import at_rest
 
 _JSON_COLUMNS = {
     "sections": dict,
@@ -118,7 +119,10 @@ def create_version(
             " photo_path, source_note, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                row_id, job_seeker_id, persona_id, version, to_json(sections),
+                row_id, job_seeker_id, persona_id, version,
+                # NFR-201: the profile is sealed with this job seeker's key.  The
+                # read side unseals it centrally, so every reader is unchanged.
+                at_rest.seal(to_json(sections), purpose="profile", scope=job_seeker_id),
                 dream_job_statement, photo_path, source_note, utcnow(),
             ),
         )

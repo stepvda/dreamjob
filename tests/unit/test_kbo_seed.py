@@ -139,7 +139,7 @@ class TestMaterialise:
 
         company = query_one("SELECT * FROM company WHERE id = ?", (company_id,))
         assert company["legal_id"] == seed["entity_number"]
-        assert company["legal_id_type"] == "kbo"
+        assert company["legal_id_type"] == "kbo_bce"
         assert company["country"] == "BE"
         assert "62.010" in company["sector_codes"]
         # And the seed records where it went, so it is not promoted again.
@@ -199,7 +199,7 @@ def test_select_for_directives_walks_the_whole_path(extract):
     # already have promoted it. What must hold is that the path produces KBO
     # companies.
     assert result["selected"] >= 1
-    assert query_one("SELECT COUNT(*) n FROM company WHERE legal_id_type = 'kbo'")["n"] >= 1
+    assert query_one("SELECT COUNT(*) n FROM company WHERE legal_id_type = 'kbo_bce'")["n"] >= 1
 
 
 def test_coverage_reports_the_staged_universe(extract):

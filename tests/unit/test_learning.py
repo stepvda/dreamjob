@@ -378,3 +378,31 @@ def test_a_failing_audit_trail_does_not_lose_the_response(responses_api, monkeyp
     # The audit really did fail: without this the test would pass on a route
     # that never audits at all.
     assert query_one("SELECT COUNT(*) AS n FROM audit_event")["n"] == 0
+
+
+def test_ready_learning_is_announced_without_being_applied(db):
+    """FR-425: the analysis and the nudge existed; nothing said it was ready.
+
+    The scheduler announces readiness and leaves adopting the defaults to the
+    job seeker (NFR-305), so the weight table is untouched by the sweep.
+    """
+    from dreamjob.db.connection import query_all
+    from dreamjob.db.repositories import opportunities as opp_repo
+    from dreamjob.monitoring.scheduler import _learning_sweep
+
+    seeker_id = _seed()
+    weights_before = opp_repo.get_weights(seeker_id)
+
+    result = _learning_sweep()
+
+    assert result["notified"] == 1
+    notifications = query_all(
+        "SELECT kind, dedup_key FROM notification WHERE job_seeker_id = ?", (seeker_id,)
+    )
+    assert any(n["kind"] == "learning_ready" for n in notifications)
+    # Announcing is not applying.
+    assert opp_repo.get_weights(seeker_id) == weights_before
+
+    # The same sample is not announced twice.
+    assert _learning_sweep()["notified"] == 0
+

@@ -111,7 +111,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - a checkpoint is never worth a failed boot
         log.exception("Could not checkpoint the WAL at boot")
 
-    yield
+    # Continuous monitoring: watchlist rechecks (FR-401), weekly digests
+    # (FR-403), reply/bounce polling (FR-326), follow-ups (FR-327), contact
+    # retention (NFR-303) and LLM prompt redaction (FR-364).  The scheduler
+    # implemented all of these and nothing started it, so on a running
+    # installation none of them had ever run.  `--once` from an external cron
+    # remains available by setting DREAMJOB_SCHEDULER_ENABLED=0.
+    from dreamjob.monitoring import scheduler as scheduler_mod  # noqa: PLC0415
+
+    try:
+        scheduler_mod.scheduler.tick_seconds = settings.scheduler_tick_seconds
+        if scheduler_mod.maybe_autostart():
+            log.info("Monitoring scheduler started")
+    except Exception:  # noqa: BLE001 - monitoring must not fail the boot
+        log.exception("Could not start the monitoring scheduler")
+
+    try:
+        yield
+    finally:
+        if scheduler_mod.scheduler.running:
+            try:
+                await scheduler_mod.scheduler.stop()
+            except Exception:  # noqa: BLE001 - shutting down, best effort
+                log.exception("Could not stop the monitoring scheduler")
 
 
 _FRIENDLY_FIELDS = {

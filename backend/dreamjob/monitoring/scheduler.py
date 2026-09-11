@@ -36,11 +36,13 @@ stops the others.
 Running it for real
 -------------------
 
-In development the loop lives in the API process, started by ``POST
-/api/monitoring/scheduler/start`` (admin).  :func:`maybe_autostart` is the
-one-line hook for an application lifespan that wants it up without the call;
-nothing invokes it today, so ``DREAMJOB_SCHEDULER_AUTOSTART`` has no effect
-until ``main.py`` does.
+In development the loop lives in the API process.  :func:`maybe_autostart`
+starts it from the application lifespan, controlled by
+``DREAMJOB_SCHEDULER_ENABLED`` (default on) with
+``DREAMJOB_SCHEDULER_AUTOSTART`` still honoured as an explicit override.  An
+administrator can also start and stop it from ``POST
+/api/monitoring/scheduler/start``.  It used to be reachable only from that API
+call, so nothing ever ran.
 
 For a real deployment on macOS, run the tasks from ``launchd`` instead, so
 that they survive an API restart and appear in the system log::
@@ -85,7 +87,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from dreamjob.db.connection import utcnow
+from dreamjob.config import get_settings
+from dreamjob.db.connection import query_all, utcnow
 from dreamjob.db.repositories import knowledge as kb_repo
 from dreamjob.db.repositories import pipeline_cards as repo
 from dreamjob.monitoring import digest as digest_mod
@@ -269,6 +272,53 @@ async def _run_company_enrichment() -> dict[str, Any]:
     }
 
 
+async def _run_learning() -> dict[str, Any]:
+    """Tell a seeker when outcome learning has enough evidence to apply (FR-425).
+
+    The effect analysis and the capped weight nudge both exist; what never
+    happened was anyone applying them, because nothing said they were ready.
+    This only announces readiness - adopting the defaults stays the seeker's
+    decision (NFR-305).
+    """
+    return await asyncio.to_thread(_learning_sweep)
+
+
+def _learning_sweep() -> dict[str, Any]:
+    from dreamjob.postapp import outcomes  # noqa: PLC0415
+
+    seekers = query_all(
+        "SELECT DISTINCT job_seeker_id AS id FROM pipeline_card WHERE job_seeker_id IS NOT NULL"
+    )
+    notified = 0
+    for row in seekers:
+        seeker_id = str(row["id"])
+        try:
+            analysis = outcomes.analyse(seeker_id)
+        except Exception:  # noqa: BLE001 - one seeker must not stop the sweep
+            log.debug("Outcome analysis failed for %s", seeker_id, exc_info=True)
+            continue
+        if analysis.closed < outcomes.MIN_SAMPLE_TO_REPORT:
+            continue
+        current = repo.get_learning(seeker_id)
+        if current and current.get("applied"):
+            continue
+        stored = repo.notify(
+            seeker_id,
+            {
+                "kind": "learning_ready",
+                "title": "Outcome learning is ready",
+                "body": (
+                    f"{analysis.closed} of your applications have resolved. "
+                    "The results suggest defaults you can review and apply."
+                ),
+                "payload": {"closed": analysis.closed},
+                "dedup_key": f"learning:{analysis.closed}",
+            },
+        )
+        notified += 1 if stored else 0
+    return {"seekers": len(seekers), "notified": notified}
+
+
 HOUR = 3600
 
 DEFAULT_TASKS: list[Task] = [
@@ -280,6 +330,8 @@ DEFAULT_TASKS: list[Task] = [
          "Enrich the employers behind the opportunities (FR-221..246, FR-341)"),
     Task("follow_ups", HOUR, _run_follow_ups,
          "Notify about follow-ups whose date has passed (FR-327)"),
+    Task("learning", 24 * HOUR, _run_learning,
+         "Announce outcome learning once it has evidence to apply (FR-425)"),
     Task("digest", 6 * HOUR, _run_digest,
          "Generate the weekly digests that are due (FR-403)"),
     Task("retention", 24 * HOUR, _run_retention,
@@ -414,15 +466,20 @@ scheduler = Scheduler()
 
 
 def maybe_autostart() -> dict[str, Any] | None:
-    """Start the loop if the deployment asked for it.
+    """Start the loop unless the deployment turned it off.
 
-    Kept here rather than in ``main.py`` so that the decision to run background
-    work inside the API process is one line at the call site and reversible by
-    an environment variable.  Returns ``None`` when autostart is off.
+    ``DREAMJOB_SCHEDULER_AUTOSTART`` still wins when set, so an external cron
+    setup keeps control; otherwise the ``DREAMJOB_SCHEDULER_ENABLED`` setting
+    decides, and it defaults on.  The loop used to be reachable only from the
+    admin API, so a running product never checked a watchlist, sent a digest,
+    swept retention or redacted a prompt.
     """
-    if os.environ.get("DREAMJOB_SCHEDULER_AUTOSTART", "").strip().lower() not in {
-        "1", "true", "yes", "on"
-    }:
+    explicit = os.environ.get("DREAMJOB_SCHEDULER_AUTOSTART", "").strip().lower()
+    if explicit:
+        enabled = explicit in {"1", "true", "yes", "on"}
+    else:
+        enabled = bool(get_settings().scheduler_enabled)
+    if not enabled:
         return None
     return scheduler.start()
 

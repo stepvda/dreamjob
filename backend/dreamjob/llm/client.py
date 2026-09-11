@@ -390,6 +390,42 @@ class LLMClient:
         )
         self.timeout = timeout
 
+    # -- embeddings (FR-261) ------------------------------------------------
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts with the configured embeddings model.
+
+        Off unless ``DREAMJOB_EMBEDDINGS_MODEL`` names one: the semantic index
+        is an enhancement, and an installation that has not chosen a model must
+        get a clear refusal rather than a silent empty index.
+        """
+        model = (self.settings.embeddings_model or "").strip()
+        if not model:
+            raise LLMError(
+                "No embeddings model is configured (DREAMJOB_EMBEDDINGS_MODEL); "
+                "the semantic index is unavailable."
+            )
+        base = (
+            self.settings.embeddings_base_url
+            or self.settings.local_llm_base_url
+            or self.settings.deepseek_base_url
+        ).rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1" if "/v1/" not in base else base
+        key = self.settings.local_llm_api_key or self.settings.deepseek_api_key or "not-needed"
+        payload = {"model": model, "input": list(texts)}
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(f"{base}/embeddings", json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+        vectors = [list(map(float, item.get("embedding") or [])) for item in data.get("data") or []]
+        if len(vectors) != len(texts):
+            raise LLMError(
+                f"The embeddings endpoint returned {len(vectors)} vector(s) for "
+                f"{len(texts)} input(s)"
+            )
+        return vectors
+
     # -- routing (FR-362, NFR-306) -----------------------------------------
     def route(self, task: str, prefer_strong: bool | None = None) -> tuple[str, str, str, str]:
         """Return ``(base_url, api_key, model, provider)`` for a task.

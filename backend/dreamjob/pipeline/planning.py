@@ -1286,6 +1286,13 @@ def generate_plan(
     profile = inputs["profile_version"] or {}
 
     countries = target_countries(directives)
+    if not countries:
+        # A search that names no geography still has one: the companies it is
+        # about.  Inferring it here keeps the registries constrained - without
+        # it, `select_sources` treated an empty wanted-set as "everything
+        # matches" and planned 379 US SEC EDGAR lookups for an all-Belgian
+        # corpus, every one of which resolved no CIK (NFR-403).
+        countries = repo.dominant_company_countries()
     keywords = campaign_keywords(directives, dream, composite)
     locations = _locations(directives)
     industries = _industries(directives)
