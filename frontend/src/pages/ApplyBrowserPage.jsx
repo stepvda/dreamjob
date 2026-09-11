@@ -42,7 +42,7 @@ import { ErrorBox, JobProgress, Loading, useFetch } from '../components/ui'
 import JobList from './apply/JobList'
 import PackageDetail from '../components/package/PackageDetail'
 import { BulkApprovalModal, SendAllModal } from '../components/package/Modals'
-import { SendGuardBanner } from '../components/package/Send'
+import { SendGuardBanner, SendNowProvider } from '../components/package/Send'
 import applyApi from './apply/api'
 import { documentName, isSendable, photoBlocked } from '../components/package/shared'
 
@@ -211,6 +211,21 @@ export default function ApplyBrowserPage() {
     guard.reload()
   }
 
+  // FR-325: the same send path, with or without the recipient's send window.
+  async function sendOne(ignoreWindow = false) {
+    setSendResult(null)
+    setSendError(null)
+    try {
+      setSendResult(
+        await applyApi.sendOne(selectedId, ignoreWindow ? { ignore_window: true } : {}),
+      )
+    } catch (error) {
+      // A refusal is the answer, not a failure of the screen.
+      setSendError(error)
+    }
+    reloadBoth()
+  }
+
   const detailActions = pkg
     ? {
         onSave: (draft) =>
@@ -243,18 +258,7 @@ export default function ApplyBrowserPage() {
             reloadBoth()
           }),
         onApprove: () => setApproving([pkg.id]),
-        onSend: () =>
-          run('send', async () => {
-            setSendResult(null)
-            setSendError(null)
-            try {
-              setSendResult(await applyApi.sendOne(selectedId))
-            } catch (error) {
-              // A refusal is the answer, not a failure of the screen.
-              setSendError(error)
-            }
-            reloadBoth()
-          }),
+        onSend: () => run('send', () => sendOne(false)),
         onDismissSend: () => {
           setSendResult(null)
           setSendError(null)
@@ -297,6 +301,9 @@ export default function ApplyBrowserPage() {
       const result = await applyApi.sendAll({
         package_ids: plan.rows.map((r) => r.package_id),
         limit: Math.max(1, plan.rows.length),
+        // FR-325: the bulk override would be a checkbox in SendAllModal; that
+        // component is outside this change, so the window is honoured explicitly.
+        ignore_window: false,
       })
       setBatch(result)
       setChosenRows({})
@@ -452,24 +459,26 @@ export default function ApplyBrowserPage() {
               />
             )}
 
-            <PackageDetail
-              pkg={pkg}
-              row={row}
-              loading={detail.loading}
-              error={detail.error}
-              templates={statics.data?.templates}
-              photo={photo}
-              busy={busy}
-              advisories={detail.data?.advisories}
-              sendResult={sendResult}
-              sendError={sendError}
-              onGenerate={() => startGeneration([selectedId])}
-              onReload={() => {
-                detail.reload()
-                list.reload()
-              }}
-              {...detailActions}
-            />
+            <SendNowProvider onSendNow={() => sendOne(true)}>
+              <PackageDetail
+                pkg={pkg}
+                row={row}
+                loading={detail.loading}
+                error={detail.error}
+                templates={statics.data?.templates}
+                photo={photo}
+                busy={busy}
+                advisories={detail.data?.advisories}
+                sendResult={sendResult}
+                sendError={sendError}
+                onGenerate={() => startGeneration([selectedId])}
+                onReload={() => {
+                  detail.reload()
+                  list.reload()
+                }}
+                {...detailActions}
+              />
+            </SendNowProvider>
           </div>
         </>
       )}

@@ -147,6 +147,14 @@ def collect_attachments(package: dict) -> list[Attachment]:
         break  # one CV, not two copies of the same document
 
     if not attachments:
+        # A declared CV path that resolved to nothing is a hard stop: an
+        # application must never go out without its CV, so the job seeker is
+        # told to regenerate rather than silently sending the cover note alone.
+        if any(str(package.get(field) or "").strip() for field in CV_FIELDS):
+            raise AttachmentRefused(
+                "The tailored CV for this package is missing from disk; "
+                "regenerate the CV before sending (FR-321)."
+            )
         log.info("Package %s has no CV file; sending the message without one", package.get("id"))
     return attachments
 

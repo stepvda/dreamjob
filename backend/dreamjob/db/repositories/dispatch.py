@@ -451,12 +451,57 @@ def last_sent_at(job_seeker_id: str) -> str | None:
 
 
 def already_sent_to(job_seeker_id: str, recipient_email: str, package_id: str) -> dict | None:
-    """Guards against sending the same package to the same person twice."""
+    """Guards against sending the same package to the same person twice.
+
+    Only a dispatch that actually left counts (``sent_at`` is set).  A row that
+    is merely ``queued`` for its send window - or a dry-run rehearsal - has not
+    reached the recipient and must not block a later attempt as though it had.
+    """
     return query_one(
-        "SELECT id, sent_at FROM dispatch WHERE job_seeker_id = ? AND lower(recipient_email) = ? "
-        "AND application_package_id = ? AND delivery_status <> 'failed' LIMIT 1",
+        "SELECT id, sent_at, delivery_status, scheduled_for FROM dispatch "
+        "WHERE job_seeker_id = ? AND lower(recipient_email) = ? "
+        "AND application_package_id = ? AND sent_at IS NOT NULL "
+        "ORDER BY sent_at DESC LIMIT 1",
         (job_seeker_id, recipient_email.strip().lower(), package_id),
     )
+
+
+def supersede_pending(
+    job_seeker_id: str, recipient_email: str, package_id: str, *, reason: str
+) -> int:
+    """Close dispatches that have not left, so a newer attempt can replace them.
+
+    A ``queued`` row is a promise to send later and a ``dry_run`` row is a
+    rehearsal; both are pending, neither has reached the recipient.  Leaving
+    them pending would let the queue deliver the same package after the new
+    attempt has already gone out, so they are marked ``failed`` with the reason
+    and a ``superseded`` flag merged into ``delivery_detail`` (which is stored
+    as JSON text, so it is decoded, merged and re-encoded).  Returns how many
+    rows were changed.
+    """
+    rows = query_all(
+        "SELECT id, delivery_detail FROM dispatch "
+        "WHERE job_seeker_id = ? AND lower(recipient_email) = ? AND application_package_id = ? "
+        "AND sent_at IS NULL AND delivery_status IN ('queued', 'dry_run', 'sending')",
+        (job_seeker_id, recipient_email.strip().lower(), package_id),
+    )
+    changed = 0
+    for row in rows:
+        detail = from_json(row.get("delivery_detail"), None)
+        if not isinstance(detail, dict):
+            detail = {}
+        detail["superseded"] = True
+        update_row(
+            "dispatch",
+            row["id"],
+            {
+                "delivery_status": "failed",
+                "last_error": reason,
+                "delivery_detail": detail,
+            },
+        )
+        changed += 1
+    return changed
 
 
 def due_queued(

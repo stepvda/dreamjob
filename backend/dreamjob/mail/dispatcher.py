@@ -461,14 +461,20 @@ def _send_package_locked(
             "sending. This check cannot be overridden."
         )
 
-    existing = repo.already_sent_to(
-        job_seeker_id, package.get("contact_email") or "", package_id
-    )
-    if existing:
+    existing = repo.already_sent_to(job_seeker_id, package.get("contact_email") or "", package_id)
+    if existing and existing.get("sent_at"):
         raise SendRefused(
             f"This package was already dispatched to {package.get('contact_email')} "
-            f"on {existing.get('sent_at') or 'an earlier attempt'}."
+            f"on {existing['sent_at']}."
         )
+    # A dispatch that is merely queued for its window (or a dry-run rehearsal) has
+    # not left. A new attempt replaces it, so the queue does not also send it later.
+    repo.supersede_pending(
+        job_seeker_id,
+        package.get("contact_email") or "",
+        package_id,
+        reason="superseded by a newer send attempt",
+    )
 
     seeker = repo.seeker_identity(job_seeker_id) or {}
     backend, account = resolve_backend(job_seeker_id, backend_key)

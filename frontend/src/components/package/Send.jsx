@@ -12,11 +12,27 @@
  * guard actually is. Both routes render the same banner.
  */
 
+import { createContext, useContext } from 'react'
+
 import { HelpTip } from '../Help'
 import Icon from '../Icon'
 import { Badge } from '../ui'
 
 import { errorText } from '../packageStatus'
+
+/**
+ * FR-325: the "send now anyway" override.
+ *
+ * `SendReport` is rendered by the shared `PackageDetail` pane, which forwards
+ * only the report's own data. The host screen supplies the callback through
+ * this context, so the override reaches the report without the pane having to
+ * know about it.
+ */
+export const SendNowContext = createContext(null)
+
+export function SendNowProvider({ onSendNow, children }) {
+  return <SendNowContext.Provider value={onSendNow}>{children}</SendNowContext.Provider>
+}
 
 export function SendGuardBanner({ status, loading, error, onRetry }) {
   if (loading) {
@@ -174,7 +190,10 @@ const OUTCOME = {
  * attachment, here is the file on disk" teaches exactly where the pipeline
  * stops. A refusal is therefore a result rather than a failure.
  */
-export function SendReport({ result, error, onDismiss }) {
+export function SendReport({ result, error, onDismiss, onSendNow }) {
+  const inheritedSendNow = useContext(SendNowContext)
+  const sendNow = onSendNow || inheritedSendNow
+
   if (!result && !error) return null
 
   if (error) {
@@ -205,6 +224,9 @@ export function SendReport({ result, error, onDismiss }) {
     title: `The send path finished as “${result.status}”.`,
   }
   const rails = result.guard_rails
+  // The window the message was held for, when the server names it. Falls back to
+  // the plain phrase so the button reads well either way.
+  const sendWindow = result.window || result.send_window || 'send window'
 
   return (
     <div className={`alert ${shape.tone}`}>
@@ -238,7 +260,7 @@ export function SendReport({ result, error, onDismiss }) {
                 </Badge>
               ))
             ) : (
-              <span className="muted">nothing — the CV file was not found</span>
+              <span className="muted">nothing — this package has no CV attached</span>
             )}
             <span className="tiny muted">
               The briefing and the motivation document are not in this list, and cannot be.
@@ -302,6 +324,19 @@ export function SendReport({ result, error, onDismiss }) {
                 It is {rails.recipient_local_time} where the recipient is ({rails.timezone}).
               </div>
             )}
+          </div>
+        )}
+
+        {/* FR-325: the job seeker can step over the send window and deliver now. */}
+        {result.status === 'queued' && sendNow && (
+          <div style={{ marginTop: 10 }}>
+            <button className="btn btn-sm" onClick={sendNow}>
+              <Icon name="send" /> Send now anyway (outside the {sendWindow})
+            </button>
+            <div className="small muted" style={{ marginTop: 6 }}>
+              This overrides the recipient’s send window. The override is recorded in the audit
+              trail, with the reason the message was held.
+            </div>
           </div>
         )}
 

@@ -29,7 +29,7 @@ import { Badge, ErrorBox, JobProgress, KindBadge, Loading, useFetch } from '../c
 
 import PackageDetail from '../components/package/PackageDetail'
 import { BulkApprovalModal, SendAllModal } from '../components/package/Modals'
-import { SendGuardBanner } from '../components/package/Send'
+import { SendGuardBanner, SendNowProvider } from '../components/package/Send'
 import applyApi from './apply/api'
 import {
   ConsistencyBadge,
@@ -194,6 +194,24 @@ export default function ApplicationsPage() {
     }
   }
 
+  // FR-325: the same send path, with or without the recipient's send window.
+  async function sendOne(ignoreWindow = false) {
+    setSendResult(null)
+    setSendError(null)
+    try {
+      setSendResult(
+        await applyApi.sendOne(
+          selected.opportunity_id,
+          ignoreWindow ? { ignore_window: true } : {},
+        ),
+      )
+    } catch (err) {
+      // A refusal is the answer, not a failure of the screen.
+      setSendError(err)
+    }
+    reload()
+  }
+
   const detailActions = selected
     ? {
         onSave: (draft) =>
@@ -235,18 +253,7 @@ export default function ApplicationsPage() {
             reload()
           }),
         onApprove: () => setApproving([selected.id]),
-        onSend: () =>
-          run('send', async () => {
-            setSendResult(null)
-            setSendError(null)
-            try {
-              setSendResult(await applyApi.sendOne(selected.opportunity_id))
-            } catch (err) {
-              // A refusal is the answer, not a failure of the screen.
-              setSendError(err)
-            }
-            reload()
-          }),
+        onSend: () => run('send', () => sendOne(false)),
         onDismissSend: () => {
           setSendResult(null)
           setSendError(null)
@@ -296,6 +303,9 @@ export default function ApplicationsPage() {
       const result = await applyApi.sendAll({
         package_ids: plan.rows.map((r) => r.package_id),
         limit: Math.max(1, plan.rows.length),
+        // FR-325: the bulk override would be a checkbox in SendAllModal; that
+        // component is outside this change, so the window is honoured explicitly.
+        ignore_window: false,
       })
       setBatch(result)
       setChecked([])
@@ -486,17 +496,19 @@ export default function ApplicationsPage() {
 
           <div>
             {selected ? (
-              <PackageDetail
-                key={selected.id}
-                pkg={selected}
-                row={selected}
-                templates={data?.templates}
-                photo={photo}
-                busy={busy}
-                sendResult={sendResult}
-                sendError={sendError}
-                {...detailActions}
-              />
+              <SendNowProvider onSendNow={() => sendOne(true)}>
+                <PackageDetail
+                  key={selected.id}
+                  pkg={selected}
+                  row={selected}
+                  templates={data?.templates}
+                  photo={photo}
+                  busy={busy}
+                  sendResult={sendResult}
+                  sendError={sendError}
+                  {...detailActions}
+                />
+              </SendNowProvider>
             ) : (
               <div className="card">
                 <p className="muted">Choose an application on the left.</p>

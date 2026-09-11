@@ -271,6 +271,30 @@ def test_a_cv_field_pointing_at_the_briefing_is_refused(world):
         composer.collect_attachments(package)
 
 
+def test_a_declared_cv_that_is_missing_from_disk_is_refused(world):
+    """FR-321: an application must never go out without its CV."""
+    from dreamjob.db.repositories import dispatch as repo
+    from dreamjob.mail import composer
+
+    package = repo.package_for_dispatch(world["package_id"], world["seeker_id"])
+    world["cv"].unlink()
+
+    with pytest.raises(composer.AttachmentRefused, match="missing from disk"):
+        composer.collect_attachments(package)
+
+
+def test_a_package_with_no_declared_cv_sends_without_an_attachment(world):
+    """Only a declared path that cannot be resolved is a refusal; none at all is not."""
+    from dreamjob.db.repositories import dispatch as repo
+    from dreamjob.mail import composer
+
+    package = repo.package_for_dispatch(world["package_id"], world["seeker_id"])
+    package["cv_pdf_path"] = None
+    package["cv_docx_path"] = None
+
+    assert composer.collect_attachments(package) == []
+
+
 @pytest.mark.parametrize(
     ("language", "needle"),
     [("en", "no thank you"), ("nl", "liever niet"), ("fr", "non merci"), ("de", "nein danke")],
@@ -510,6 +534,62 @@ def test_a_send_outside_the_window_is_queued_not_lost(world):
     row = repo.get_dispatch(result["dispatch_id"], world["seeker_id"])
     assert row["delivery_status"] == "queued"
     assert world["backend"].sent == []
+
+
+def test_a_queued_dispatch_does_not_block_a_new_send_and_is_superseded(world):
+    """A queued row has not left, so it must not block, and must not send later."""
+    from dreamjob.db.repositories import dispatch as repo
+    from dreamjob.mail.dispatcher import send_package
+
+    held = send_package(
+        world["package_id"],
+        world["seeker_id"],
+        approved_by=world["seeker_id"],
+        now=datetime(2026, 9, 9, 2, 0, tzinfo=UTC),  # 04:00 in Brussels: queued
+    )
+    assert held["status"] == "queued"
+
+    sent = send_package(
+        world["package_id"],
+        world["seeker_id"],
+        approved_by=world["seeker_id"],
+        now=datetime(2026, 9, 9, 7, 30, tzinfo=UTC),  # inside the window
+    )
+    assert sent["status"] == "sent"
+
+    queued_row = repo.get_dispatch(held["dispatch_id"], world["seeker_id"])
+    assert queued_row["delivery_status"] == "failed"
+    assert queued_row["last_error"] == "superseded by a newer send attempt"
+    assert queued_row["delivery_detail"]["superseded"] is True
+
+    assert len(world["backend"].sent) == 1
+    # The queue must not also deliver the superseded row.
+    assert repo.due_queued(world["seeker_id"]) == []
+
+
+def test_a_dispatch_with_a_sent_at_blocks_a_resend(world):
+    """A message that actually left is the one case that still refuses a resend."""
+    from dreamjob.db.connection import update_row
+    from dreamjob.mail.dispatcher import SendRefused, send_package
+
+    send_package(
+        world["package_id"],
+        world["seeker_id"],
+        approved_by=world["seeker_id"],
+        now=datetime(2026, 9, 9, 7, 30, tzinfo=UTC),
+    )
+    # A send stamps the package ``sent``; re-approving it isolates the
+    # already-dispatched guard from the FR-324 approval guard so the refusal
+    # under test is the one that fires.
+    update_row("application_package", world["package_id"], {"status": "approved"})
+
+    with pytest.raises(SendRefused, match="already dispatched"):
+        send_package(
+            world["package_id"],
+            world["seeker_id"],
+            approved_by=world["seeker_id"],
+            now=datetime(2026, 9, 9, 7, 40, tzinfo=UTC),
+        )
 
 
 def test_an_unapproved_package_is_never_sent(world):
