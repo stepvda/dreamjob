@@ -41,7 +41,7 @@ def current_seeker(request: Request) -> CurrentSeeker:
     row = query_one(
         """
         SELECT s.job_seeker_id, s.expires_at, s.client_binding,
-               j.email, j.display_name, j.is_admin, j.locale
+               j.email, j.display_name, j.is_admin, j.locale, j.disabled
         FROM session s JOIN job_seeker j ON j.id = s.job_seeker_id
         WHERE s.token_hash = ?
         """,
@@ -49,6 +49,11 @@ def current_seeker(request: Request) -> CurrentSeeker:
     )
     if row is None or row["expires_at"] <= utcnow():
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
+
+    # A suspended account loses access at once, on every open tab, without
+    # waiting for its sessions to expire (FR-362).
+    if row["disabled"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been suspended")
 
     # NFR-202: sessions are bound to the client that created them.
     if row["client_binding"]:

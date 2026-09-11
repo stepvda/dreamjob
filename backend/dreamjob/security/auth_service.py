@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
+import string
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,24 @@ class WeakPassword(AuthError):
     pass
 
 
+class AccountDisabled(AuthError):
+    """The account has been suspended by an administrator.
+
+    Kept distinct from :class:`InvalidCredentials` so the sign-in screen can
+    say "this account is suspended" rather than the misleading "wrong
+    password", and so the HTTP layer answers 403 rather than 401.
+    """
+
+
+class LastAdministrator(AuthError):
+    """Refused: the change would leave the installation with no administrator.
+
+    An installation with no admin cannot reach the screens that appoint one,
+    so demoting, disabling or deleting the only remaining admin is blocked at
+    this layer rather than only in the interface.
+    """
+
+
 class MFAUnavailable(AuthError):
     """MFA needs the master key; encryption at rest is not negotiable (NFR-201)."""
 
@@ -129,6 +149,22 @@ def validate_password_strength(password: str) -> None:
         raise WeakPassword(
             "Password must combine at least three of: lower case, upper case, digits, symbols"
         )
+
+
+def suggest_password(length: int = 16) -> str:
+    """A random password that satisfies :func:`validate_password_strength`.
+
+    Used when an administrator resets an account without choosing a password:
+    the generated one is shown once, in the response, for the admin to pass on.
+    """
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_=+"
+    while True:
+        candidate = "".join(secrets.choice(alphabet) for _ in range(length))
+        try:
+            validate_password_strength(candidate)
+        except WeakPassword:
+            continue
+        return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +210,11 @@ def authenticate(email: str, password: str, totp_code: str | None = None) -> dic
         raise InvalidCredentials("Unknown e-mail address or password")
     if not crypto.verify_password(password, row["password_hash"]):
         raise InvalidCredentials("Unknown e-mail address or password")
+    # Suspension is disclosed only after the password is verified, so someone
+    # guessing addresses learns nothing; the account's own holder is told
+    # plainly that it is suspended rather than that its password is wrong.
+    if row.get("disabled"):
+        raise AccountDisabled("This account has been suspended")
 
     envelope = _totp_envelope(row)
     if envelope and envelope.get("active"):
@@ -420,3 +461,239 @@ def erase(seeker_id: str) -> dict[str, int]:
     repo.record_erasure_marker(counts, crypto.hash_token(f"erased:{seeker_id}")[:16])
     log.info("Erased job seeker %s: %s", seeker_id, counts)
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Administrator user management (FR-362, NFR-202)
+#
+# Every function here acts *on another account* and is reached only through
+# ``api.routers.admin``, which depends on ``current_admin``.  Two rules are
+# enforced here rather than in the interface, because the interface is not the
+# only caller:
+#   * the last remaining administrator can never be demoted, disabled or
+#     deleted - that would lock every operator out of the installation;
+#   * an administrator cannot disable or delete their own account through this
+#     surface, so a mistaken click cannot log them out mid-session.
+# ---------------------------------------------------------------------------
+
+
+def _require_seeker(seeker_id: str) -> dict:
+    row = repo.get_seeker(seeker_id)
+    if row is None:
+        raise InvalidCredentials("Unknown job seeker")
+    return row
+
+
+def _guard_not_last_admin(seeker_id: str, *, removing_admin: bool) -> None:
+    """Refuse a change that would remove the last usable administrator."""
+    if not removing_admin:
+        return
+    row = repo.get_seeker(seeker_id)
+    if row is None or not row["is_admin"] or row.get("disabled"):
+        return  # already not a usable admin, so nothing is being removed
+    if repo.count_admins(enabled_only=True) <= 1:
+        raise LastAdministrator(
+            "This is the only active administrator; the installation would be "
+            "left with no one able to reach the administration screens."
+        )
+
+
+def admin_create_user(
+    email: str,
+    display_name: str,
+    password: str,
+    *,
+    is_admin: bool = False,
+    locale: str = "en",
+    actor: str | None = None,
+) -> dict:
+    """Create an account on behalf of an administrator (FR-362).
+
+    Unlike :func:`register`, the administrator decides the role explicitly;
+    the first-account-becomes-admin rule does not apply to an account an admin
+    is deliberately creating.
+    """
+    validate_password_strength(password)
+    seeker_id = repo.create_seeker(
+        email,
+        display_name,
+        password_hash=crypto.hash_password(password),
+        is_admin=is_admin,
+        locale=locale,
+    )
+    record_audit(
+        "admin.user_created",
+        "job_seeker",
+        seeker_id,
+        seeker_id=actor,
+        actor=actor,
+        detail={"email": email.strip().lower(), "is_admin": bool(is_admin)},
+    )
+    return repo.get_seeker(seeker_id) or {}
+
+
+def admin_reset_password(
+    seeker_id: str, new_password: str, *, actor: str | None = None
+) -> None:
+    """Set a new password without knowing the old one, and revoke sessions.
+
+    The reset ends every session the account had, so a holder whose access is
+    being taken away cannot keep using a browser tab they already had open
+    (NFR-202).
+    """
+    _require_seeker(seeker_id)
+    validate_password_strength(new_password)
+    repo.set_password_hash(seeker_id, crypto.hash_password(new_password))
+    revoked = repo.delete_sessions_for(seeker_id)
+    record_audit(
+        "admin.password_reset",
+        "job_seeker",
+        seeker_id,
+        seeker_id=actor,
+        actor=actor,
+        detail={"sessions_revoked": revoked},
+    )
+
+
+def admin_set_disabled(
+    seeker_id: str, disabled: bool, *, actor: str | None = None
+) -> dict:
+    """Suspend or restore an account, keeping all of its data.
+
+    Suspension revokes every session immediately, so "disable" takes effect
+    now rather than at the next sign-in.
+    """
+    row = _require_seeker(seeker_id)
+    if disabled and row["is_admin"]:
+        _guard_not_last_admin(seeker_id, removing_admin=True)
+    repo.set_disabled(seeker_id, disabled)
+    revoked = repo.delete_sessions_for(seeker_id) if disabled else 0
+    record_audit(
+        "admin.user_disabled" if disabled else "admin.user_enabled",
+        "job_seeker",
+        seeker_id,
+        seeker_id=actor,
+        actor=actor,
+        detail={"sessions_revoked": revoked},
+    )
+    return repo.get_seeker(seeker_id) or {}
+
+
+def admin_set_admin(seeker_id: str, is_admin: bool, *, actor: str | None = None) -> dict:
+    """Grant or revoke the administrator role (FR-362)."""
+    _require_seeker(seeker_id)
+    if not is_admin:
+        _guard_not_last_admin(seeker_id, removing_admin=True)
+    repo.set_admin(seeker_id, is_admin)
+    record_audit(
+        "admin.role_granted" if is_admin else "admin.role_revoked",
+        "job_seeker",
+        seeker_id,
+        seeker_id=actor,
+        actor=actor,
+        detail={"is_admin": bool(is_admin)},
+    )
+    return repo.get_seeker(seeker_id) or {}
+
+
+def admin_logout(seeker_id: str, *, actor: str | None = None) -> int:
+    """End every session an account has open."""
+    _require_seeker(seeker_id)
+    revoked = repo.delete_sessions_for(seeker_id)
+    record_audit(
+        "admin.sessions_revoked",
+        "job_seeker",
+        seeker_id,
+        seeker_id=actor,
+        actor=actor,
+        detail={"sessions_revoked": revoked},
+    )
+    return revoked
+
+
+def admin_delete_user(seeker_id: str, *, actor: str | None = None) -> dict[str, int]:
+    """Delete an account and erase its private data (FR-108).
+
+    Deletion is the same erasure the account holder can perform on their own
+    data - irreversible, and it leaves the shared knowledge base intact.
+    """
+    _require_seeker(seeker_id)
+    _guard_not_last_admin(seeker_id, removing_admin=True)
+    counts = erase(seeker_id)
+    record_audit(
+        "admin.user_deleted",
+        "job_seeker",
+        seeker_id,
+        seeker_id=actor,
+        actor=actor,
+        detail={"counts": counts},
+    )
+    return counts
+
+
+def purge_users_without_sessions(
+    actor: str | None,
+    *,
+    exclude_admins: bool = True,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Delete every account that has no open session (FR-362, FR-101).
+
+    Built for clearing the accumulated throwaway accounts that an end-to-end
+    run leaves behind. Two things make it safe to run:
+
+    * ``dry_run`` returns the count and a sample without deleting anything, so
+      the caller can show exactly what would go before it goes;
+    * administrators are excluded by default, and the acting administrator is
+      always excluded, so the installation cannot lose the account running the
+      purge.
+
+    Each account is erased through the same FR-108 path as a single deletion -
+    private rows and files go, shared market data stays. One failing account is
+    logged and skipped rather than aborting the sweep.
+    """
+    candidates = [
+        row
+        for row in repo.list_users_without_sessions(
+            exclude_admins=exclude_admins, exclude_ids=(actor,) if actor else ()
+        )
+        if row["id"] != actor
+    ]
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "candidates": len(candidates),
+            "deleted": 0,
+            "failed": 0,
+            "sample": [row["email"] for row in candidates[:25]],
+            "excluded_admins": exclude_admins,
+        }
+
+    deleted = 0
+    failed = 0
+    for row in candidates:
+        try:
+            erase(row["id"])
+            deleted += 1
+        except Exception:  # noqa: BLE001 - one bad account must not stop the sweep
+            failed += 1
+            log.exception("Could not purge unused account %s", row["id"])
+
+    record_audit(
+        "admin.users_purged",
+        "job_seeker",
+        None,
+        seeker_id=actor,
+        actor=actor,
+        detail={"deleted": deleted, "failed": failed, "exclude_admins": exclude_admins},
+    )
+    return {
+        "dry_run": False,
+        "candidates": len(candidates),
+        "deleted": deleted,
+        "failed": failed,
+        "excluded_admins": exclude_admins,
+    }
+
+

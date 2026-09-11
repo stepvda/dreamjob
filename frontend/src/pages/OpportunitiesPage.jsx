@@ -117,12 +117,13 @@ function FilterBar({ facets, filters, onChange, onReset }) {
   )
   return (
     <div className="card" style={{ marginBottom: 14 }}>
-      <div className="row row-wrap" style={{ alignItems: 'flex-end', gap: 14 }}>
-        <div style={{ flex: '2 1 240px' }}>
-          <Field
-            label="Company or keyword"
-            hint="Matches the title, the description and the company name."
-          >
+      {/* Primary filters. A grid, not a wrapping flex row: with a flex row the
+          one field that carries helper text bottom-aligns against controls that
+          do not, which drops every other label and input to a different line.
+          Every control here is the same height and shares one baseline. */}
+      <div className="filter-grid">
+        <div className="filter-grid-wide">
+          <Field label="Company or keyword">
             <input
               type="text"
               value={filters.q}
@@ -132,122 +133,110 @@ function FilterBar({ facets, filters, onChange, onReset }) {
           </Field>
         </div>
 
-        <div style={{ flex: '1 1 170px' }}>
-          <div className="field">
-            <label>
-              Kind
-              <HelpTip term="speculative_opening" />
-            </label>
-            <select value={filters.kind} onChange={(e) => onChange('kind', e.target.value)}>
-              <option value="">Vacancies and speculative openings</option>
-              <option value="vacancy">Advertised vacancies only</option>
-              <option value="speculative">Speculative openings only</option>
-            </select>
-          </div>
+        <div className="field">
+          <label>
+            Kind
+            <HelpTip term="speculative_opening" />
+          </label>
+          <select value={filters.kind} onChange={(e) => onChange('kind', e.target.value)}>
+            <option value="">Vacancies and speculative openings</option>
+            <option value="vacancy">Advertised vacancies only</option>
+            <option value="speculative">Speculative openings only</option>
+          </select>
         </div>
 
-        <div style={{ flex: '1 1 170px' }}>
-          <div className="field">
-            <label>
-              Tag
-              <HelpTip term="stepping_stone" />
-            </label>
-            <select value={filters.tag} onChange={(e) => onChange('tag', e.target.value)}>
-              <option value="">Any tag</option>
-              {TAGS.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="field">
+          <label>
+            Tag
+            <HelpTip term="stepping_stone" />
+          </label>
+          <select value={filters.tag} onChange={(e) => onChange('tag', e.target.value)}>
+            <option value="">Any tag</option>
+            {TAGS.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
         </div>
 
-        <div style={{ flex: '1 1 170px' }}>
-          <div className="field">
-            <label>
-              Timing
-              <HelpTip term="timing_window" />
-            </label>
-            <select
-              value={filters.timing_flag}
-              onChange={(e) => onChange('timing_flag', e.target.value)}
-            >
-              <option value="">Any timing</option>
-              {(facets?.timing_flag || []).map((o) => (
-                <option key={o.value} value={o.value}>
-                  {TIMING_LABELS[o.value] || human(o.value)} ({o.count})
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div style={{ flex: '1 1 200px' }}>
-          <Field
-            label={`Minimum score: ${filters.min_score}`}
-            hint="The list has no upper score bound; sort descending to see the top."
+        <div className="field">
+          <label>
+            Timing
+            <HelpTip term="timing_window" />
+          </label>
+          <select
+            value={filters.timing_flag}
+            onChange={(e) => onChange('timing_flag', e.target.value)}
           >
-            <input
-              type="range"
-              min="0"
-              max="100"
-              step="5"
-              value={filters.min_score}
-              onChange={(e) => onChange('min_score', Number(e.target.value))}
-            />
-          </Field>
+            <option value="">Any timing</option>
+            {(facets?.timing_flag || []).map((o) => (
+              <option key={o.value} value={o.value}>
+                {TIMING_LABELS[o.value] || human(o.value)} ({o.count})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field">
+          <label>Minimum score: {filters.min_score}</label>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            value={filters.min_score}
+            onChange={(e) => onChange('min_score', Number(e.target.value))}
+          />
         </div>
       </div>
 
-      <div className="row row-wrap" style={{ alignItems: 'flex-end', gap: 14 }}>
-        <div style={{ flex: '1 1 170px' }}>
-          <FacetSelect
-            label="Work arrangement"
-            name="work_arrangement"
-            facet={facets?.work_arrangement}
-            value={filters.work_arrangement}
-            onChange={onChange}
-          />
-        </div>
-        <div style={{ flex: '1 1 170px' }}>
-          <FacetSelect
-            label="Contract"
-            name="contract_type"
-            facet={facets?.contract_type}
-            value={filters.contract_type}
-            onChange={onChange}
-          />
-        </div>
-        <div style={{ flex: '1 1 170px' }}>
-          <FacetSelect
-            label="Seniority"
-            name="seniority"
-            facet={facets?.seniority}
-            value={filters.seniority}
-            onChange={onChange}
-          />
-        </div>
-        <div style={{ flex: '1 1 170px' }}>
-          <FacetSelect
-            label="Function"
-            name="function_family"
-            facet={facets?.function_family}
-            value={filters.function_family}
-            onChange={onChange}
-          />
-        </div>
-        <div style={{ flex: '1 1 140px' }}>
-          <FacetSelect
-            label="Country"
-            name="country"
-            facet={facets?.country}
-            value={filters.country}
-            onChange={onChange}
-          />
-        </div>
+      <p className="filter-note small muted">
+        Keyword matches the title, the description and the company name. There is no
+        upper score bound — sort descending to see the strongest matches first.
+      </p>
 
-        <label className="checkline" style={{ marginBottom: 14 }}>
+      {/* Facet selects, in their own grid so they line up with each other. */}
+      <div className="filter-grid" style={{ marginTop: 12 }}>
+        <FacetSelect
+          label="Work arrangement"
+          name="work_arrangement"
+          facet={facets?.work_arrangement}
+          value={filters.work_arrangement}
+          onChange={onChange}
+        />
+        <FacetSelect
+          label="Contract"
+          name="contract_type"
+          facet={facets?.contract_type}
+          value={filters.contract_type}
+          onChange={onChange}
+        />
+        <FacetSelect
+          label="Seniority"
+          name="seniority"
+          facet={facets?.seniority}
+          value={filters.seniority}
+          onChange={onChange}
+        />
+        <FacetSelect
+          label="Function"
+          name="function_family"
+          facet={facets?.function_family}
+          value={filters.function_family}
+          onChange={onChange}
+        />
+        <FacetSelect
+          label="Country"
+          name="country"
+          facet={facets?.country}
+          value={filters.country}
+          onChange={onChange}
+        />
+      </div>
+
+      <div className="row row-wrap" style={{ marginTop: 12, gap: 14, alignItems: 'center' }}>
+        <label className="checkline">
           <input
             type="checkbox"
             checked={filters.exclude_not_interested}
@@ -255,10 +244,9 @@ function FilterBar({ facets, filters, onChange, onReset }) {
           />
           Hide the ones I rejected
         </label>
-
         <div className="spacer" />
         {active && (
-          <button className="btn btn-sm btn-ghost" style={{ marginBottom: 14 }} onClick={onReset}>
+          <button className="btn btn-sm btn-ghost" onClick={onReset}>
             Clear filters
           </button>
         )}
@@ -372,6 +360,11 @@ function OpportunityRow({
             />
             {item.location ? ` · ${item.location}` : ''}
             {item.work_arrangement ? ` · ${human(item.work_arrangement)}` : ''}
+            {/* FR-142/FR-144: the two fields that make a row obviously in or
+                out of scope.  Shown on the row so the list can be judged at a
+                glance rather than only through the filter bar. */}
+            {item.function_family ? ` · ${human(item.function_family)}` : ''}
+            {item.country ? ` · ${item.country}` : ''}
             {item.comp_max != null
               ? ` · ${formatMoney(item.comp_min, item.comp_currency || 'EUR')}–${formatMoney(
                   item.comp_max,
@@ -681,6 +674,20 @@ export default function OpportunitiesPage() {
   const campaigns = useFetch(() => api.get('/campaigns').catch(() => []))
   // The strip is orientation, not data the screen depends on: never block on it.
   const journey = useFetch(() => api.get('/overview/journey').catch(() => null))
+
+  // Open on the most recent campaign that finished, not on "every campaign".
+  // The union mixes separate searches - and the separate directives behind
+  // them - into one list, which is exactly the state in which an out-of-scope
+  // dump hides: it makes 43,000 rows look like the answer. The selector still
+  // offers the union for anyone who wants it.
+  useEffect(() => {
+    if (campaignId) return
+    const list = Array.isArray(campaigns.data) ? campaigns.data : []
+    if (!list.length) return
+    const finished = list.find((c) => c.status === 'completed')
+    setCampaignId((finished || list[0]).id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaigns.data])
 
   const facets = useFetch(
     () => api.get(`/opportunities/facets${campaignId ? `?campaign_id=${campaignId}` : ''}`),

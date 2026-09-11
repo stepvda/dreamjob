@@ -158,9 +158,17 @@ def login(payload: LoginIn, request: Request, response: Response) -> dict:
         ) from exc
     except auth.MFAUnavailable as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except auth.AccountDisabled as exc:
+        record_audit(
+            "session.login_refused_disabled", "job_seeker", None, detail={"email": payload.email}
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except auth.InvalidCredentials as exc:
         record_audit("session.login_failed", "job_seeker", None, detail={"email": payload.email})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+    # Stamped after a successful sign-in so the user list can show which
+    # accounts are actually used (FR-362).
+    repo.set_last_login(row["id"])
     session = _issue_session(response, row["id"], request)
     return {**_public(row), "session": session, "consent": auth.consent_state(row["id"])}
 

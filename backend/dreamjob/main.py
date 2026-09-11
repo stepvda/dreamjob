@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 # (module under dreamjob.api.routers, url prefix, tag, spec sections)
 ROUTERS: list[tuple[str, str, str]] = [
     ("auth",         "/api/auth",         "Authentication"),        # NFR-202
+    ("autopilot",    "/api/autopilot",    "Autopilot"),             # 3-step flow
     ("profile",      "/api/profile",      "Profile"),               # FR-101..109
     ("enrichment",   "/api/enrichment",   "Enrichment"),            # FR-121..128
     ("directives",   "/api/directives",   "Directives"),            # FR-141..149

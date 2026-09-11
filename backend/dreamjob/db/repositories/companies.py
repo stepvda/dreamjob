@@ -444,3 +444,37 @@ def add_to_watchlist(job_seeker_id: str, company_id: str) -> str:
             "created_at": utcnow(),
         },
     )
+
+
+def backfill_country_from_vacancies() -> int:
+    """Give each country-less company the country most of its postings are in.
+
+    The knowledge base records no country for 94% of companies, because ATS
+    discovery wrote them from a board without one.  That is what let a Brussels
+    search plan ATS boards for companies in Oslo, Illinois and Singapore - the
+    planner could not see that they were out of scope.  A company is where most
+    of its jobs are, so the vacancies already collected answer the question
+    without a single network call.
+
+    Only country-less companies are touched, so a value already established by
+    the registries or the website crawler is never overwritten (DR-101).
+    """
+    with write_tx() as conn:
+        cur = conn.execute(
+            """
+            UPDATE company SET country = (
+                SELECT v.country FROM vacancy v
+                WHERE v.company_id = company.id AND v.country IS NOT NULL AND v.country <> ''
+                GROUP BY v.country
+                ORDER BY COUNT(*) DESC, v.country
+                LIMIT 1
+            )
+            WHERE (country IS NULL OR country = '')
+              AND EXISTS (
+                  SELECT 1 FROM vacancy v2
+                  WHERE v2.company_id = company.id
+                    AND v2.country IS NOT NULL AND v2.country <> ''
+              )
+            """
+        )
+        return cur.rowcount

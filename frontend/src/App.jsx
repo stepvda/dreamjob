@@ -27,6 +27,7 @@ import SignIn from './pages/SignIn'
 // for load; the other twenty do not. Without this every visitor downloads
 // the company profile, the PDF previews and the whole administration area
 // before the profile page can paint.
+const HomePage = lazy(() => import('./pages/HomePage'))
 const OverviewPage = lazy(() => import('./pages/OverviewPage'))
 const ContactsPage = lazy(() => import('./pages/ContactsPage'))
 const ProfilePage = lazy(() => import('./pages/ProfilePage'))
@@ -52,49 +53,51 @@ const MailSettingsPage = lazy(() => import('./pages/MailSettingsPage'))
 const AdminPage = lazy(() => import('./pages/AdminPage'))
 
 
-// Each group carries a point on the spectrum. The hue is the phase, so a
-// violet screen is always about your profile and an amber one is always about
-// applying - see styles/theme.css.
-const NAV = [
+// Navigation follows the three things a job seeker actually does, not the
+// fifteen internal stages they do not think in. Every screen is still here; the
+// ones that are configuration rather than a step live under Advanced, folded
+// away by default. Nothing was removed.
+const STEPS = [
+  { to: '/home', icon: 'overview', label: 'Start here', phase: 'phase-0' },
+  { to: '/profile', icon: 'profile', label: '1 · Your profile', phase: 'phase-1' },
+  { to: '/opportunities', icon: 'opportunities', label: '2 · Opportunities', phase: 'phase-3' },
+  { to: '/applications', icon: 'send', label: '3 · Apply', phase: 'phase-4' },
+  { to: '/pipeline', icon: 'pipeline', label: 'Follow up', phase: 'phase-5' },
+]
+
+const ADVANCED = [
   {
-    label: 'Overview',
-    phase: 'phase-0',
-    items: [{ to: '/overview', icon: 'overview', label: 'Where I am' }],
-  },
-  {
-    label: 'Profile',
+    label: 'Profile detail',
     phase: 'phase-1',
     items: [
-      { to: '/profile', icon: 'profile', label: 'Profile' },
       { to: '/composite', icon: 'composite', label: 'Composite profile' },
       { to: '/dream-job', icon: 'dream', label: 'Dream job' },
     ],
   },
   {
-    label: 'Plan',
+    label: 'Search settings',
     phase: 'phase-2',
     items: [
       { to: '/directives', icon: 'directives', label: 'Directives' },
       { to: '/campaigns', icon: 'campaign', label: 'Campaigns' },
       { to: '/browser', icon: 'browser', label: 'Browser session' },
+      { to: '/overview', icon: 'overview', label: 'Full journey map' },
     ],
   },
   {
-    label: 'Discover',
+    label: 'Research',
     phase: 'phase-3',
     items: [
-      { to: '/opportunities', icon: 'opportunities', label: 'Opportunities' },
       { to: '/companies', icon: 'companies', label: 'Companies' },
       { to: '/intelligence', icon: 'intelligence', label: 'Dream-job gap' },
+      { to: '/contacts', icon: 'contacts', label: 'Contacts' },
     ],
   },
   {
-    label: 'Apply',
+    label: 'Applying',
     phase: 'phase-4',
     items: [
       { to: '/apply', icon: 'send', label: 'Apply browser' },
-      { to: '/contacts', icon: 'contacts', label: 'Contacts' },
-      { to: '/applications', icon: 'applications', label: 'Applications' },
       { to: '/networking', icon: 'networking', label: 'Networking' },
     ],
   },
@@ -102,7 +105,6 @@ const NAV = [
     label: 'Follow up',
     phase: 'phase-5',
     items: [
-      { to: '/pipeline', icon: 'pipeline', label: 'Pipeline' },
       { to: '/responses', icon: 'responses', label: 'Responses' },
       { to: '/insights', icon: 'insights', label: 'What works' },
     ],
@@ -118,6 +120,12 @@ const NAV = [
   },
 ]
 
+// Kept as one list for the header hue and icon lookups.
+const NAV = [
+  { label: 'Steps', phase: 'phase-0', items: STEPS },
+  ...ADVANCED,
+]
+
 // Which phase hue a route belongs to, for the header and page furniture.
 const ROUTE_PHASE = Object.fromEntries(
   NAV.flatMap((g) => g.items.map((i) => [i.to, g.phase])),
@@ -128,6 +136,7 @@ const ROUTE_ICON = Object.fromEntries(
 )
 
 const TITLES = {
+  '/home': 'Start here',
   '/overview': 'Where I am',
   '/responses': 'Responses received',
   '/insights': 'What works, and where to redirect',
@@ -171,21 +180,40 @@ function Shell({ session, onSignOut }) {
           </div>
           <p>{session.display_name}</p>
         </div>
-        {NAV.map((group) => (
-          <nav className={`nav-group ${group.phase}`} key={group.label}>
-            <div className="nav-label">{group.label}</div>
-            {group.items.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
-              >
-                <Icon name={item.icon} />
-                <span>{item.label}</span>
-              </NavLink>
-            ))}
-          </nav>
-        ))}
+        {/* The three steps, always visible. */}
+        <nav className="nav-group phase-0">
+          <div className="nav-label">Do this</div>
+          {STEPS.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+            >
+              <Icon name={item.icon} />
+              <span>{item.label}</span>
+            </NavLink>
+          ))}
+        </nav>
+
+        {/* Everything else, folded away: reachable, not in the way. */}
+        <details className="nav-advanced">
+          <summary className="nav-label">Advanced</summary>
+          {ADVANCED.map((group) => (
+            <nav className={`nav-group ${group.phase}`} key={group.label}>
+              <div className="nav-sub-label">{group.label}</div>
+              {group.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+                >
+                  <Icon name={item.icon} />
+                  <span>{item.label}</span>
+                </NavLink>
+              ))}
+            </nav>
+          ))}
+        </details>
       </aside>
 
       <div className={`main ${phase}`}>
@@ -221,7 +249,8 @@ function Shell({ session, onSignOut }) {
             }
           >
             <Routes>
-              <Route path="/" element={<Navigate to="/overview" replace />} />
+              <Route path="/" element={<Navigate to="/home" replace />} />
+              <Route path="/home" element={<HomePage />} />
               <Route path="/overview" element={<OverviewPage />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="/composite" element={<CompositePage />} />

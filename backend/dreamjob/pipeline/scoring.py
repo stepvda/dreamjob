@@ -57,7 +57,7 @@ import json
 import logging
 import math
 import re
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -1999,6 +1999,64 @@ def score_campaign(
 
     log.info("Scored campaign %s: %s", campaign_id, report.note())
     return report
+
+
+def score_unscored(
+    job_seeker_id: str,
+    campaign_id: str,
+    *,
+    llm: LLMClient | None = None,
+    limit: int | None = None,
+    page: int = 500,
+    only_ids: Collection[str] | None = None,
+) -> int:
+    """Score every opportunity in a campaign that has no score yet (FR-281).
+
+    Two callers need exactly this, and neither wants a full recomputation:
+
+    * the paths that *add* an opportunity outside a collection run - the
+      watchlist, most of all - so a new row is never left sitting unscored;
+    * the backfill for rows written before scoring was wired into collection.
+
+    It is the same arithmetic :func:`score_campaign` runs, on a bounded set, so
+    it is cheap and deterministic; passing ``llm`` only adds the semantic
+    dream-fit and rationale on top.  ``manual_rank`` is untouched, so a backfill
+    can never disturb an order the seeker set by hand (FR-284).
+
+    ``only_ids`` narrows it to a known set - the rows just added - so a caller
+    that has created two opportunities does not sweep a campaign's whole
+    backlog.
+    """
+    campaign = campaign_repo.get_campaign_any(campaign_id)
+    if campaign is None:
+        log.info("score_unscored: no campaign %s", campaign_id)
+        return 0
+
+    wanted = set(only_ids) if only_ids is not None else None
+    ctx = build_context(campaign)
+    report = ScoringReport(campaign_id=campaign_id)
+    scored = 0
+    while True:
+        rows = repo.list_unscored(job_seeker_id, campaign_id, limit=page)
+        if wanted is not None:
+            rows = [r for r in rows if str(r.get("id")) in wanted]
+        if not rows:
+            break
+        progressed = 0
+        for opportunity in rows:
+            if limit is not None and scored >= limit:
+                return scored
+            if _score_one(opportunity, ctx, llm, job_seeker_id, report) is not None:
+                scored += 1
+                progressed += 1
+        # ``score`` is what the query filters on, so scored rows drop out and
+        # the next read starts from the first page again.  If a page scores
+        # nothing - every row failed, or the only wanted ids are done - stop
+        # rather than read the same rows for ever.
+        if progressed == 0 or len(rows) < page:
+            break
+    log.info("Scored %d previously-unscored opportunity(ies) in campaign %s", scored, campaign_id)
+    return scored
 
 
 def _score_one(

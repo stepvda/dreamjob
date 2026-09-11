@@ -20,6 +20,7 @@ are what the ranked list means:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from dreamjob.db.connection import (
@@ -215,6 +216,84 @@ def count_opportunities(job_seeker_id: str, **filters: Any) -> int:
     )
     row = query_one(sql, tuple(params))
     return int(row["n"]) if row else 0
+
+
+def iter_for_relevance(
+    job_seeker_id: str, campaign_id: str | None = None, *, batch: int = 1000
+) -> Iterator[dict]:
+    """A lean walk over opportunities for a relevance clean-up (FR-142/144).
+
+    Only the columns the gate reads, and **keyset** pagination rather than
+    ``OFFSET``: an offset re-scans everything before it, so walking 50,000 rows
+    a page at a time is quadratic and took minutes.  Paging on ``id`` - which is
+    stable and never rewritten - makes it linear.
+
+    The wide list query is deliberately not used: it joins the employer-kind
+    badge and sorts in a temporary B-tree, neither of which the gate needs.
+    """
+    last = ""
+    while True:
+        sql = (
+            "SELECT id, title, function_family, country, description, work_arrangement, "
+            "       company_id, kind, latitude, longitude "
+            "FROM opportunity WHERE job_seeker_id = ?"
+        )
+        params: list[Any] = [job_seeker_id]
+        if campaign_id:
+            sql += " AND campaign_id = ?"
+            params.append(campaign_id)
+        sql += " AND id > ? ORDER BY id ASC LIMIT ?"
+        params += [last, int(batch)]
+        rows = query_all(sql, tuple(params))
+        if not rows:
+            return
+        for row in rows:
+            last = str(row["id"])
+            yield dict(row)
+        if len(rows) < batch:
+            return
+
+
+def list_unscored(
+    job_seeker_id: str, campaign_id: str, *, limit: int = 500, offset: int = 0
+) -> list[dict]:
+    """Opportunities in a campaign that carry no score yet (FR-281).
+
+    The immediate-scoring path and the backfill both need exactly this set, and
+    both need it bounded: a campaign can hold tens of thousands of rows, so this
+    pages rather than reading them all into memory at once.
+    """
+    sql = (
+        f"{_LIST_SELECT} WHERE o.job_seeker_id = ? AND o.campaign_id = ? "
+        "AND o.score IS NULL ORDER BY o.created_at ASC LIMIT ? OFFSET ?"
+    )
+    rows = query_all(sql, (job_seeker_id, campaign_id, int(limit), int(offset)))
+    return [decode(r) for r in rows]  # type: ignore[misc]
+
+
+def count_unscored(job_seeker_id: str, campaign_id: str | None = None) -> int:
+    sql = "SELECT COUNT(*) AS n FROM opportunity WHERE job_seeker_id = ? AND score IS NULL"
+    params: list[Any] = [job_seeker_id]
+    if campaign_id:
+        sql += " AND campaign_id = ?"
+        params.append(campaign_id)
+    row = query_one(sql, tuple(params))
+    return int(row["n"]) if row else 0
+
+
+def campaign_ids_with_unscored(job_seeker_id: str) -> list[str]:
+    """Campaigns that still hold unscored opportunities (FR-281).
+
+    Read from the opportunities themselves rather than from a campaign list:
+    ``list_campaigns`` is bounded and ordered, so a backfill built on it silently
+    skipped a campaign that had 241 unscored rows in it.
+    """
+    rows = query_all(
+        "SELECT DISTINCT campaign_id FROM opportunity "
+        "WHERE job_seeker_id = ? AND score IS NULL AND campaign_id IS NOT NULL",
+        (job_seeker_id,),
+    )
+    return [str(r["campaign_id"]) for r in rows]
 
 
 def facets(job_seeker_id: str, campaign_id: str | None = None) -> dict[str, Any]:
@@ -420,6 +499,62 @@ def delete_campaign_opportunities(job_seeker_id: str, campaign_id: str) -> int:
             (job_seeker_id, campaign_id),
         )
         return cur.rowcount
+
+
+def delete_opportunities(job_seeker_id: str, opportunity_ids: list[str]) -> int:
+    """Delete named opportunities, filtered on their owner (FR-344).
+
+    Chunked so a large clean-up never builds a statement past SQLite's
+    parameter limit, and so the single writer is released between batches
+    (CR-408, NFR-102).
+    """
+    if not opportunity_ids:
+        return 0
+    deleted = 0
+    for start in range(0, len(opportunity_ids), 400):
+        chunk = opportunity_ids[start : start + 400]
+        marks = ",".join("?" for _ in chunk)
+        with write_tx() as conn:
+            cur = conn.execute(
+                f"DELETE FROM opportunity WHERE job_seeker_id = ? AND id IN ({marks})",
+                (job_seeker_id, *chunk),
+            )
+            deleted += cur.rowcount
+    return deleted
+
+
+def ids_touching_user_decisions(job_seeker_id: str, opportunity_ids: list[str]) -> set[str]:
+    """Of these opportunities, the ones a person has already acted on.
+
+    A clean-up must never remove a row the seeker pinned, selected, ranked,
+    rejected, applied to, or has a pipeline card for: their decision outranks a
+    later verdict about relevance (NFR-305).
+    """
+    if not opportunity_ids:
+        return set()
+    protected: set[str] = set()
+    for start in range(0, len(opportunity_ids), 400):
+        chunk = opportunity_ids[start : start + 400]
+        marks = ",".join("?" for _ in chunk)
+        rows = query_all(
+            f"""
+            SELECT id FROM opportunity
+            WHERE job_seeker_id = ? AND id IN ({marks})
+              AND (pinned = 1 OR selected = 1 OR manual_rank IS NOT NULL
+                   OR user_status <> 'new' OR tags IS NOT NULL)
+            """,
+            (job_seeker_id, *chunk),
+        )
+        protected.update(str(r["id"]) for r in rows)
+        for table in ("application_package", "pipeline_card"):
+            for row in query_all(
+                f"SELECT DISTINCT opportunity_id FROM {table} "
+                f"WHERE job_seeker_id = ? AND opportunity_id IN ({marks})",
+                (job_seeker_id, *chunk),
+            ):
+                protected.add(str(row["opportunity_id"]))
+    return protected
+
 
 
 # ---------------------------------------------------------------------------

@@ -914,41 +914,140 @@ def allowed_source_types(directive_set: DirectiveSetLike) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+_ROLE_WORD_RE = re.compile(r"[a-z0-9+#.]{3,}")
+_ROLE_STOPWORDS = frozenset(
+    {
+        "and", "the", "with", "for", "from", "into", "our", "you", "your", "are", "will",
+        "who", "that", "this", "have", "has", "not", "all", "can", "new", "job", "role",
+        "team", "work", "working", "years", "experience", "company", "about", "een",
+        "van", "met", "voor", "les", "des", "pour", "dans", "nous", "vous", "und", "der",
+    }
+)
+
+
+def _role_tokens(text: str) -> set[str]:
+    return {w for w in _ROLE_WORD_RE.findall(text.lower()) if w not in _ROLE_STOPWORDS}
+
+
+def role_relevance(
+    directive_set: DirectiveSetLike,
+    title: str | None,
+    function_family: str | None,
+    description: str | None = None,
+) -> str | None:
+    """Why a role is out of scope by job content, or ``None`` to keep it (FR-142).
+
+    A hard gate applied when a vacancy becomes an opportunity.  Without it a
+    campaign turned *every* vacancy a scraped board held into a ranked
+    opportunity - a Norwegian waiting job, an Italian electrician, a childcare
+    tutor - because synthesis only checked hard exclusions and location.
+
+    It is deliberately coarse: **one** recognisable signal is enough to keep a
+    role, so a difference in seniority or wording never hides a real match.
+    Anything not clearly in scope is left to the directive-fit sub-score
+    (FR-281), which ranks a soft mismatch low rather than hiding it (NFR-305).
+    Returns ``None`` when the directives name no titles and no function
+    families, because then there is nothing to judge by.
+    """
+    content = coerce_directive_set(directive_set).job_content
+    titles = [t.strip() for t in content.all_titles() if t.strip()]
+    families = [f.strip() for f in content.function_families if f.strip()]
+    if not titles and not families:
+        return None
+
+    title_l = (title or "").lower()
+    family_l = (function_family or "").lower()
+    title_tokens = _role_tokens(title_l)
+    body = f"{title_l} {(description or '')[:400].lower()}"
+
+    # A target title appears verbatim.
+    for wanted in titles:
+        if wanted.lower() in title_l:
+            return None
+    # ...or enough of its words appear in the title.
+    for wanted in titles:
+        wanted_tokens = _role_tokens(wanted)
+        if wanted_tokens and len(wanted_tokens & title_tokens) / len(wanted_tokens) >= 0.5:
+            return None
+    # ...or the function family matches.
+    for family in families:
+        family_l_cmp = family.lower()
+        if family_l and (family_l_cmp in family_l or family_l in family_l_cmp):
+            return None
+    # ...or the posting names a must-have subject, which is how an oddly titled
+    # role ("Founding Engineer", "Member of Technical Staff") is still caught.
+    for skill in content.must_have_skills:
+        needle = skill.strip().lower()
+        if needle and needle in body:
+            return None
+
+    return "role_out_of_scope"
+
+
 def location_matches(
     directive_set: DirectiveSetLike,
     latitude: float | None,
     longitude: float | None,
     country: str | None = None,
+    *,
+    remote: bool = False,
 ) -> bool:
     """Post-filter for records from sources without radius search (FR-144).
 
-    A record passes when it is in a listed country/relocation country, inside
-    one of the areas, or within the commute tolerance of the home location.
-    With no location directives at all, everything passes.
+    A record passes when it is fully remote and remote work is accepted, when it
+    is in a listed country/relocation country, inside one of the areas, or
+    within the commute tolerance of the home location.  With no location
+    directives at all, everything passes.
+
+    The hard case is a record with *neither* a country nor coordinates - which
+    is what most ATS board dumps look like.  An earlier version returned "pass"
+    for those whenever the country list was empty, and since a directive set
+    built from a geocoded area often carries no country list, that accepted
+    every unplaceable job on earth.  One campaign collected 43,400 jobs from
+    around the world on the strength of it.  A record that cannot be shown to be
+    in scope is now rejected; only a known in-scope country, a coordinate inside
+    an area, or an accepted remote role passes.
     """
-    directives = coerce_directive_set(directive_set).location
+    full = coerce_directive_set(directive_set)
+    directives = full.location
+
+    # A fully-remote role has no location to be wrong about, provided the seeker
+    # accepts remote work.  This is what keeps "Brussels or remote" usable for
+    # the remote roles that carry no place at all.
+    arrangements = {a.value for a in full.work_arrangement.arrangements}
+    if remote and "remote" in arrangements:
+        return True
+
     countries = {c.upper() for c in directives.countries}
     if directives.willing_to_relocate:
         countries |= {c.upper() for c in directives.relocation_countries}
-    if not countries and not directives.areas and directives.home_location is None:
-        return True
-    if country and countries and country.upper() in countries:
-        return True
-    if latitude is None or longitude is None:
-        # Unplaceable record: accept it on the country rule alone, so that a
-        # source with coarse location data is not silently dropped.
-        return not countries
-    for area in directives.areas:
-        if area.is_geocoded:
-            distance = haversine_km(area.latitude, area.longitude, latitude, longitude)
-            if distance <= area.radius_km:
-                return True
+
+    areas = [a for a in directives.areas if a.is_geocoded]
     home = directives.home_location
-    if home is not None and home.is_geocoded and directives.max_commute_minutes is not None:
-        distance = haversine_km(home.latitude, home.longitude, latitude, longitude)
-        minutes = commute_minutes(distance, directives.commute_mode.value)
-        if minutes <= directives.max_commute_minutes:
-            return True
+
+    if not countries and not areas and home is None:
+        return True
+
+    # A known country decides it outright, before the coordinate checks, so that
+    # "we know it is in Germany" is never softened into "unplaceable, accept".
+    if country:
+        return country.upper() in countries
+
+    # Country unknown: coordinates decide.
+    if latitude is not None and longitude is not None:
+        for area in areas:
+            if haversine_km(area.latitude, area.longitude, latitude, longitude) <= area.radius_km:
+                return True
+        if home is not None and home.is_geocoded and directives.max_commute_minutes is not None:
+            minutes = commute_minutes(
+                haversine_km(home.latitude, home.longitude, latitude, longitude),
+                directives.commute_mode.value,
+            )
+            if minutes <= directives.max_commute_minutes:
+                return True
+        return False
+
+    # Neither a country nor coordinates: it cannot be shown to be in scope.
     return False
 
 
@@ -981,6 +1080,19 @@ async def resolve_locations(
             # A commute tolerance is a tighter statement than a default radius.
             if area.radius_km in (0, 25.0):
                 area.radius_km = round(implied, 1)
+
+    # Back-fill the country list from what the areas geocoded to.  Without this
+    # the only geographic constraint is a radius, and ``location_matches`` then
+    # cannot reject a record whose country is simply outside the seeker's - a
+    # job in Germany was accepted because the directive named no countries.
+    if not resolved.countries:
+        codes: list[str] = []
+        for area in [*resolved.areas, resolved.home_location]:
+            if area is not None and area.country_code:
+                code = area.country_code.upper()
+                if code not in codes:
+                    codes.append(code)
+        resolved.countries = codes
     return resolved
 
 
@@ -1051,6 +1163,21 @@ def _texts(node: Any, depth: int = 0) -> list[str]:
 _ROLE_NAME_KEYS: tuple[str, ...] = ("title", "role", "name", "example_titles")
 
 
+def _content_texts(node: Any) -> list[str]:
+    """The substance of a composite block: its ``text`` values, not its metadata.
+
+    A competency is ``{id, text, depth, evidence}``.  Reading the block with
+    :func:`_texts` returns the id ("core_competencies:1"), the depth rating
+    ("expert") and the evidence sentence as if they were skills.  Only ``text``
+    is the thing itself; a bare list of strings is read as-is, because then
+    there is no metadata to mistake for content.
+    """
+    labelled = _labelled_strings(node, ("text",))
+    if labelled:
+        return labelled
+    return _texts(node)
+
+
 def _role_names(node: Any) -> list[str]:
     """Role names out of either shape ``target_roles`` is stored in.
 
@@ -1105,6 +1232,90 @@ def _infer_seniority(texts: Sequence[str]) -> Seniority | None:
             if pattern.search(text):
                 return level
     return None
+
+
+#: Words that mean the seeker wants to build things themselves rather than run
+#: the people who do.  It is the antidote to reading a seniority level off a
+#: career history and searching for the management track the seeker left.
+_HANDS_ON_RE = re.compile(
+    r"\b(hands[- ]on|individual contributor|write code|writing code|"
+    r"still code|coding|technical contributor|no pure management|"
+    r"not .{0,24}management|avoid .{0,24}management|shaping the architecture)\b",
+    re.I,
+)
+
+
+#: A country named in a location label, so a proposal carries a country before
+#: it is geocoded.  Deliberately small - the geocoder is authoritative, and this
+#: only has to cover the common case a profile states in prose.
+_LABEL_COUNTRY: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(belgium|belgi[eë]|belgique)\b", re.I), "BE"),
+    (re.compile(r"\b(netherlands|nederland|holland)\b", re.I), "NL"),
+    (re.compile(r"\b(germany|deutschland|duitsland|allemagne)\b", re.I), "DE"),
+    (re.compile(r"\b(france|frankrijk|frankreich)\b", re.I), "FR"),
+    (re.compile(r"\b(united kingdom|uk|england|scotland|wales)\b", re.I), "GB"),
+    (re.compile(r"\b(ireland|ierland|irlande)\b", re.I), "IE"),
+    (re.compile(r"\b(luxembourg|luxemburg)\b", re.I), "LU"),
+    (re.compile(r"\b(spain|spanje|espagne|espa[nñ]a)\b", re.I), "ES"),
+    (re.compile(r"\b(italy|itali[eë]|italie)\b", re.I), "IT"),
+    (re.compile(r"\b(portugal)\b", re.I), "PT"),
+    (re.compile(r"\b(sweden|zweden|su[eè]de)\b", re.I), "SE"),
+    (re.compile(r"\b(denmark|denemarken|danemark)\b", re.I), "DK"),
+    (re.compile(r"\b(norway|noorwegen|norv[eè]ge)\b", re.I), "NO"),
+    (re.compile(r"\b(united states|usa|u\.s\.a?\.?)\b", re.I), "US"),
+)
+
+
+def _country_from_label(label: str | None) -> str | None:
+    if not label:
+        return None
+    for pattern, code in _LABEL_COUNTRY:
+        if pattern.search(label):
+            return code
+    return None
+
+
+def _dream_job_intent(
+    dream_job_model: Mapping[str, Any] | None,
+) -> tuple[Seniority | None, ManagementScope | None]:
+    """The level and scope the seeker *asked for* (FR-128), not the one they had.
+
+    The composite profile records the level a career reached; the dream-job
+    model records the level the seeker wants next, and the two disagree exactly
+    when someone is changing direction.  In this installation the composite read
+    "director" off a sixteen-year corporate history while the dream job asked
+    for hands-on individual-contributor engineering - so the proposed directives
+    searched for manager-to-VP roles, the inverse of the request, and the
+    ranking dutifully surfaced management jobs the seeker had ruled out.
+
+    Returns ``(level, scope)``, either of which may be ``None`` when the model
+    says nothing about it.
+    """
+    if not dream_job_model:
+        return None, None
+
+    texts: list[str] = []
+    for column in (
+        "target_roles",
+        "role_families",
+        "responsibilities",
+        "company_characteristics",
+        "culture_values",
+        "deal_breakers",
+        "implicit_preferences",
+    ):
+        texts.extend(_texts(_block(dream_job_model, column)))
+    texts.extend(_texts(_block(dream_job_model, "statement")))
+
+    if not texts:
+        return None, None
+
+    level = _infer_seniority(texts)
+    if any(_HANDS_ON_RE.search(t) for t in texts):
+        scope = ManagementScope.INDIVIDUAL_CONTRIBUTOR
+    else:
+        scope = next((s for pattern, s in _MANAGEMENT_HINTS for t in texts if pattern.search(t)), None)
+    return level, scope
 
 
 def _shift(level: Seniority, delta: int) -> Seniority:
@@ -1192,33 +1403,57 @@ def propose_directives(
         unresolved.append("job_content.target_titles")
 
     # --- seniority range (FR-142) ------------------------------------------
-    seniority_texts = [
+    # The dream-job model is the statement of intent; the composite profile
+    # records the level a career reached.  Preferring the history is how a
+    # hands-on request became a manager-to-VP search.
+    dream_level, dream_scope = _dream_job_intent(dream_job_model)
+    history_texts = [
         *_texts(_block(composite_profile, "seniority")),
         *titles,
         *_texts(_block(composite_profile, "career_trajectory"))[:3],
     ]
-    level = _infer_seniority(seniority_texts)
+    level = dream_level or _infer_seniority(history_texts)
     if level:
         payload.job_content.seniority_min = _shift(level, -1)
-        payload.job_content.seniority_max = _shift(level, 1)
-        provenance["job_content.seniority_min"] = "composite_profile.seniority (inferred)"
-        provenance["job_content.seniority_max"] = "composite_profile.seniority (inferred)"
+        top = _shift(level, 1)
+        # A hands-on request must not let the *history* widen the range back
+        # into the management track: the ceiling becomes the senior
+        # individual-contributor rung.
+        if dream_scope is ManagementScope.INDIVIDUAL_CONTRIBUTOR and (
+            SENIORITY_RANK[top] > SENIORITY_RANK[Seniority.PRINCIPAL]
+        ):
+            top = Seniority.PRINCIPAL
+        payload.job_content.seniority_max = top
+        source = "dream_job_model.target_roles (stated intent)" if dream_level else (
+            "composite_profile.seniority (inferred)"
+        )
+        provenance["job_content.seniority_min"] = source
+        provenance["job_content.seniority_max"] = source
     else:
         unresolved.append("job_content.seniority_min")
 
-    scope = next(
-        (s for pattern, s in _MANAGEMENT_HINTS for t in seniority_texts if pattern.search(t)),
+    scope = dream_scope or next(
+        (s for pattern, s in _MANAGEMENT_HINTS for t in history_texts if pattern.search(t)),
         None,
     )
     if scope:
         payload.job_content.management_scope = scope
-        provenance["job_content.management_scope"] = "composite_profile.seniority (inferred)"
+        provenance["job_content.management_scope"] = (
+            "dream_job_model (hands-on intent)"
+            if dream_scope
+            else "composite_profile.seniority (inferred)"
+        )
 
     # --- skills and domains (FR-142) ---------------------------------------
-    core = [t for t in _texts(_block(composite_profile, "core_competencies")) if len(t) < 60]
+    # Only the ``text`` of each competency.  ``_texts`` flattens *every* string
+    # in the block, which also yields the entry's own ``id`` and its ``depth``
+    # rating, so a directive set came to carry "core_competencies:1" and
+    # "expert" as must-have skills - noise that the relevance gate and the
+    # title score both then matched against real postings.
+    core = [t for t in _content_texts(_block(composite_profile, "core_competencies")) if len(t) < 60]
     adjacent_block = _block(composite_profile, "adjacent_competencies")
-    adjacent = [t for t in _texts(adjacent_block) if len(t) < 60]
-    domains = [t for t in _texts(_block(composite_profile, "domains")) if len(t) < 60]
+    adjacent = [t for t in _content_texts(adjacent_block) if len(t) < 60]
+    domains = [t for t in _content_texts(_block(composite_profile, "domains")) if len(t) < 60]
     payload.job_content.must_have_skills = list(dict.fromkeys(core))[:8]
     payload.job_content.nice_to_have_skills = list(dict.fromkeys(adjacent))[:8]
     payload.job_content.industries_include = list(dict.fromkeys(domains))[:6]
@@ -1241,6 +1476,11 @@ def propose_directives(
         payload.location.areas = [LocationArea(label=home, radius_km=35.0)]
         payload.location.max_commute_minutes = 45
         payload.location.commute_mode = CommuteMode.CAR
+        # Name the country straight away when the label does, so the country
+        # rule is decisive even before the geocoder fills in the rest.
+        code = _country_from_label(home)
+        if code:
+            payload.location.countries = [code]
         provenance["location.home_location"] = "profile_version.sections (location)"
         unresolved.append("location.areas[0].coordinates")
     else:

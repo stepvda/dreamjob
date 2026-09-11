@@ -18,6 +18,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker
+from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import directives as repo
 from dreamjob.pipeline import geocode as geo
 from dreamjob.pipeline.directives import (
@@ -39,6 +40,7 @@ from dreamjob.pipeline.directives import (
     suggest_titles,
     vocabulary,
 )
+from dreamjob.security.audit import record_audit
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +55,14 @@ router = APIRouter()
 class ProposeIn(BaseModel):
     persona_id: str | None = None
     name: str = "Proposed directives"
+    geocode: bool = True
+
+
+class RebuildIn(BaseModel):
+    """FR-147: rebuild and save, in one step.  Name is derived when omitted."""
+
+    persona_id: str | None = None
+    name: str | None = None
     geocode: bool = True
 
 
@@ -197,6 +207,67 @@ async def propose(
                 u for u in proposal.unresolved if u != "location.areas[0].coordinates"
             ]
     return proposal
+
+
+@router.post("/rebuild", status_code=status.HTTP_201_CREATED)
+async def rebuild(
+    body: RebuildIn = Body(default_factory=lambda: RebuildIn()),
+    seeker: CurrentSeeker = Depends(current_seeker),
+) -> dict:
+    """Rebuild the search from the current profile in one step (FR-147).
+
+    Proposes a fresh directive set from the composite profile and the dream-job
+    model, geocodes it, and **saves it as a new version** rather than asking the
+    seeker to review a form first.  This is the repair path for a search that
+    has drifted: the directives behind it were proposed once, from an older
+    profile, and every campaign planned since has inherited whatever they said.
+
+    Saving a new version is deliberate - the previous set is untouched, so a
+    campaign that ran under it stays explainable and the change can be reverted
+    by loading the older version (FR-148).
+    """
+    composite = repo.latest_composite_profile(seeker.id, body.persona_id)
+    dream = repo.latest_dream_job_model(seeker.id, body.persona_id)
+    profile = repo.latest_profile_version(seeker.id)
+    if composite is None and profile is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No profile to rebuild from yet; upload a profile first (FR-102).",
+        )
+
+    name = body.name or f"Rebuilt from profile {utcnow()[:10]}"
+    proposal = propose_directives(composite, dream, profile, name=name)
+    if body.persona_id:
+        proposal.directives.persona_id = body.persona_id
+    if body.geocode:
+        proposal.directives.location = await resolve_locations(
+            proposal.directives.location, language=seeker.locale
+        )
+        if any(a.is_geocoded for a in proposal.directives.location.areas):
+            proposal.unresolved = [
+                u for u in proposal.unresolved if u != "location.areas[0].coordinates"
+            ]
+
+    saved = repo.create(seeker.id, proposal.directives)
+    record_audit(
+        "directives.rebuilt",
+        "directive_set",
+        saved,
+        seeker_id=seeker.id,
+        detail={
+            "titles": proposal.directives.job_content.target_titles[:6],
+            "seniority": [
+                str(proposal.directives.job_content.seniority_min),
+                str(proposal.directives.job_content.seniority_max),
+            ],
+            "countries": proposal.directives.location.countries,
+        },
+    )
+    return {
+        "directive_set": repo.get(saved, seeker.id),
+        "provenance": proposal.provenance,
+        "unresolved": proposal.unresolved,
+    }
 
 
 @router.post("/estimate")

@@ -17,6 +17,24 @@
  */
 
 export const PAGE_HELP = {
+  '/home': {
+    title: 'Start here',
+    purpose:
+      'Three steps: set up your profile, let Dream Job search and rank the market for you, then choose who to write to. Everything in between runs on its own.',
+    steps: [
+      'Create your profile — import your LinkedIn export or your CV, and write a few lines about the job you actually want. That is the only input the search needs.',
+      'Press "Find my opportunities". Dream Job works out what to search for, picks the sources that fit, collects from them and ranks everything it found. It runs in the background, so you can close the page.',
+      'Review and select. Open the ranked list, read why each role is there, and tick the ones worth pursuing.',
+      'Apply. Dream Job writes a tailored CV, a briefing and a motivation document for each, and an email — all for you to read, edit and send.',
+    ],
+    tips: [
+      'Nothing is ever sent on its own. Every message waits for you to approve it.',
+      'The search is tunable: the directives, campaigns and sources behind it are under Advanced in the sidebar.',
+      'A speculative opening is a role Dream Job thinks a company may need, not one it has advertised. They are labelled everywhere so an email never claims a vacancy exists.',
+      'The full fifteen-stage picture is still available under Advanced → Full journey map.',
+    ],
+  },
+
   '/overview': {
     title: 'Where I am',
     purpose:
@@ -396,8 +414,9 @@ export const PAGE_HELP = {
   '/admin': {
     title: 'Administration',
     purpose:
-      'How this installation is configured and what it has actually done: which model handles which task and what that costs, which sources may be used and on what terms, the run history, the audit trail, and the AI call log with its retention control.',
+      'How this installation is configured and what it has actually done: the accounts on it, which model handles which task and what that costs, which sources may be used and on what terms, the run history, the audit trail, and the AI call log with its retention control.',
     steps: [
+      'Users: create accounts, grant or revoke administrator access, reset a password, sign someone out everywhere, suspend or restore an account, and delete one. Search by e-mail or name.',
       'Models: choose the provider and the model each task uses, set the default token budget and the prices the cost figures are computed from, and route the privacy-sensitive steps to a local endpoint if you have one.',
       'Sources: enable the adapters you want and cap their pace. A source whose terms prohibit automated access cannot be switched on until an administrator acknowledges that in writing, and switching it on afterwards is a second, separate decision.',
       'Activity: job runs, records per source, errors, and tokens and cost over time — for the whole installation or for one campaign.',
@@ -406,6 +425,9 @@ export const PAGE_HELP = {
       'Data: browse the AI call log, run the redaction sweep, export everything held about you, or erase your account.',
     ],
     tips: [
+      'Users: the last remaining administrator cannot be demoted, suspended or deleted, and an administrator cannot suspend or delete their own account from here — both would end the session they are working in. Grant the role to a second person before removing it from yourself.',
+      'A suspended account is signed out everywhere immediately and cannot sign in again until restored. Its data is untouched, so restoring it puts everything back.',
+      'Deleting an account erases its private data for good; the shared company knowledge base stays because it belongs to no one.',
       'Every setting shows its effective value: the .env default with your override on top. An overridden field says so and can be reset to the default in one click.',
       'Only three steps are privacy-sensitive enough to route to a local model — the composite profile, the tailored CV and the motivation document. Naming any other task has no effect.',
       'Sources whose terms prohibit automated access are disabled until an administrator explicitly acknowledges the risk, and withdrawing that acknowledgement disables the source again.',
