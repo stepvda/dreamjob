@@ -782,12 +782,14 @@ def vacancies_with_contact() -> dict[str, int]:
     """
     row = query_one(
         """
+        WITH covered AS MATERIALIZED (
+            SELECT DISTINCT company_id
+              FROM usable_contact
+             WHERE email IS NOT NULL AND email <> '' AND company_id IS NOT NULL
+        )
         SELECT COUNT(*) AS total,
-               SUM(CASE WHEN EXISTS (
-                     SELECT 1 FROM usable_contact u
-                      WHERE u.company_id = v.company_id
-                        AND u.email IS NOT NULL AND u.email != ''
-                   ) THEN 1 ELSE 0 END) AS with_contact
+               SUM(CASE WHEN v.company_id IN (SELECT company_id FROM covered)
+                        THEN 1 ELSE 0 END) AS with_contact
           FROM vacancy v
          WHERE v.company_id IS NOT NULL
         """
@@ -862,14 +864,16 @@ def coverage_by_method() -> dict[str, Any]:
     """
     rows = query_all(
         """
-        WITH best AS (
-            SELECT v.id AS vacancy_id,
-                   (SELECT u.id FROM usable_contact u
-                     WHERE u.company_id = v.company_id
-                       AND u.email IS NOT NULL AND u.email != ''
-                     ORDER BY u.confidence DESC LIMIT 1) AS contact_id
+        WITH ranked AS (
+            SELECT company_id, id, email_source_method, is_generic_mailbox, email_validation,
+                   ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY confidence DESC) AS rn
+              FROM usable_contact
+             WHERE email IS NOT NULL AND email != '' AND company_id IS NOT NULL
+        ),
+        best AS (
+            SELECT v.id AS vacancy_id, r.id AS contact_id
               FROM vacancy v
-             WHERE v.company_id IS NOT NULL
+              JOIN ranked r ON r.company_id = v.company_id AND r.rn = 1
         )
         SELECT CASE WHEN ct.email_source_method = 'pattern_inference'
                           AND ct.is_generic_mailbox = 1 THEN 'conventional_mailbox'

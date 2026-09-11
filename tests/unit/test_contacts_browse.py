@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from dreamjob.config import get_settings
-from dreamjob.db.connection import insert_row, query_one, utcnow
+from dreamjob.db.connection import insert_row, query_all, query_one, utcnow
 from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as repo
 from dreamjob.pipeline import apply_contacts as apply_pipeline
@@ -183,6 +183,8 @@ def _add_contact(
     uncertain: int | None = None,
     shareable: int = 1,
     owning_campaign_id: str | None = None,
+    confidence: float | None = None,
+    is_generic: int | None = None,
 ) -> str:
     values: dict = {
         "company_id": company_id,
@@ -194,6 +196,10 @@ def _add_contact(
         "shareable": shareable,
         "owning_campaign_id": owning_campaign_id,
     }
+    if confidence is not None:
+        values["confidence"] = confidence
+    if is_generic is not None:
+        values["is_generic_mailbox"] = is_generic
     if validation is not None:
         values["email_validation"] = validation
     if uncertain is not None:
@@ -655,3 +661,162 @@ def test_scope_all_visits_every_company_without_early_stop(
     assert report.requested == len(seen)
     # The zero-vacancy company was visited: ``all`` does not stop on coverage.
     assert set(seen) == {ids["company_id"], ids["empty_company_id"]}
+
+
+# ---------------------------------------------------------------------------
+# FR-303/FR-304: the materialised coverage figures match a brute-force scan
+# ---------------------------------------------------------------------------
+
+
+def _add_vacancy(company_id: str, title: str) -> str:
+    return insert_row(
+        "vacancy",
+        {"company_id": company_id, "title": title, "collected_at": utcnow()},
+    )
+
+
+def _new_company(name: str) -> str:
+    return insert_row(
+        "company",
+        {
+            "name": name,
+            "normalised_name": name.lower(),
+            "country": "BE",
+            "collected_at": utcnow(),
+        },
+    )
+
+
+def _brute_force_coverage() -> tuple[int, int, dict[str, dict]]:
+    """Recompute both figures row by row, with no correlated SQL.
+
+    ``usable_contact`` stays the source of truth for what counts as an address
+    (NFR-302, FR-304); the point of the test is that the per-company ranking and
+    the ``vacancy`` join produce exactly what a plain Python pass produces.
+    """
+    vacancies = query_all("SELECT id, company_id FROM vacancy WHERE company_id IS NOT NULL")
+    usable = query_all(
+        "SELECT id, company_id, email_source_method, email_validation, "
+        "       is_generic_mailbox, confidence "
+        "  FROM usable_contact "
+        " WHERE email IS NOT NULL AND email <> '' AND company_id IS NOT NULL"
+    )
+    covered = {row["company_id"] for row in usable}
+    with_contact = sum(1 for row in vacancies if row["company_id"] in covered)
+
+    best: dict[str, dict] = {}
+    for row in usable:
+        current = best.get(row["company_id"])
+        if current is None or float(row["confidence"]) > float(current["confidence"]):
+            best[row["company_id"]] = row
+
+    grouped: dict[tuple[str, str], dict] = {}
+    for vacancy in vacancies:
+        contact = best.get(vacancy["company_id"])
+        if contact is None:
+            continue
+        method = contact["email_source_method"] or "unknown"
+        if method == "pattern_inference" and contact["is_generic_mailbox"] == 1:
+            method = "conventional_mailbox"
+        validation = contact["email_validation"] or "unknown"
+        entry = grouped.setdefault((method, validation), {"vacancies": 0, "companies": set()})
+        entry["vacancies"] += 1
+        entry["companies"].add(contact["company_id"])
+
+    by_method: dict[str, dict] = {}
+    for (method, validation), entry in grouped.items():
+        bucket = by_method.setdefault(
+            method, {"vacancies": 0, "companies": 0, "by_validation": {}}
+        )
+        bucket["vacancies"] += entry["vacancies"]
+        bucket["companies"] += len(entry["companies"])
+        bucket["by_validation"][validation] = entry["vacancies"]
+
+    return len(vacancies), with_contact, by_method
+
+
+def test_materialised_coverage_matches_a_brute_force_scan() -> None:
+    ids = _seed()
+
+    # Acme: two vacancies share one published contact, and it also carries an
+    # objecting and an invalid address that ``usable_contact`` must exclude.
+    _add_vacancy(ids["company_id"], "Data Engineer")
+    _add_vacancy(ids["company_id"], "Analyst")
+    _add_contact(
+        ids["company_id"], "hr@acme-data.example",
+        method=patterns.METHOD_WEBSITE, validation="valid", confidence=0.8,
+    )
+    _add_contact(
+        ids["company_id"], "objected@acme-data.example",
+        method=patterns.METHOD_WEBSITE, validation="valid",
+    )
+    repo.record_objection("objected@acme-data.example", source="unsubscribe")
+    _add_contact(
+        ids["company_id"], "invalid@acme-data.example",
+        method=patterns.METHOD_WEBSITE, validation="invalid",
+    )
+
+    # Two Vac: two vacancies but only an objecting address -> no usable contact.
+    two_vac = _new_company("Two Vac BV")
+    _add_vacancy(two_vac, "First")
+    _add_vacancy(two_vac, "Second")
+    _add_contact(
+        two_vac, "blocked@two-vac.example",
+        method=patterns.METHOD_WEBSITE, validation="valid",
+    )
+    repo.record_objection("blocked@two-vac.example", source="unsubscribe")
+
+    # Ranked: two usable contacts; the higher-confidence one decides the bucket,
+    # so the generic inferred address must not surface.
+    ranked = _new_company("Ranked BV")
+    _add_vacancy(ranked, "Only")
+    _add_contact(
+        ranked, "info@ranked.example",
+        method=patterns.METHOD_PATTERN, validation="unknown",
+        confidence=0.3, is_generic=1,
+    )
+    _add_contact(
+        ranked, "jobs@ranked.example",
+        method=patterns.METHOD_WEBSITE, validation="valid", confidence=0.9,
+    )
+
+    # Generic: the inferred generic mailbox is the only address, and it buckets
+    # as a conventional mailbox rather than a published one.
+    generic = _new_company("Generic BV")
+    _add_vacancy(generic, "Uncovered")
+    _add_contact(
+        generic, "info@generic.example",
+        method=patterns.METHOD_PATTERN, validation="unknown", is_generic=1,
+    )
+
+    # No Contact: a vacancy with nobody to write to.
+    no_contact = _new_company("No Contact BV")
+    _add_vacancy(no_contact, "Nobody")
+
+    # The seeded company with no vacancy still contributes a usable contact,
+    # which must not move the vacancy coverage figures.
+    _add_contact(
+        ids["empty_company_id"], "dave@no-vacancy.example",
+        method=patterns.METHOD_WEBSITE, validation="risky",
+    )
+
+    total, with_contact, by_method = _brute_force_coverage()
+    assert (total, with_contact) == (7, 4)
+
+    assert apply_repo.vacancies_with_contact() == {
+        "vacancies": total,
+        "with_contact": with_contact,
+    }
+
+    coverage = apply_repo.coverage_by_method()
+    assert coverage["vacancies"] == total
+    assert coverage["vacancies_with_contact"] == with_contact
+    assert coverage["by_method"] == by_method
+
+    # Acme's two and Ranked's one make the published bucket; Ranked's generic
+    # contact was outranked, so no conventional mailbox appears for it.
+    assert coverage["by_method"]["website"]["vacancies"] == 3
+    assert coverage["by_method"]["website"]["by_validation"]["valid"] == 3
+    assert coverage["by_method"]["website"]["companies"] == 2
+    assert coverage["by_method"]["conventional_mailbox"]["vacancies"] == 1
+    assert coverage["by_method"]["conventional_mailbox"]["by_validation"]["unknown"] == 1

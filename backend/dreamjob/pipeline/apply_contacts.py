@@ -1167,6 +1167,13 @@ async def ensure_apply_contacts(
     a different domain, so the concurrency costs no single site anything.
     """
     sweep_all = scope == "all"
+    # The corpus figures below used to be read before any progress was emitted,
+    # and the corpus queries could take minutes; the screen sat blank for the
+    # whole of it.  Say what is happening first, with no total yet.
+    _notify(
+        on_progress,
+        {"phase": "preparing", "done": 0, "total": None, "report": {}},
+    )
     covered_now = await asyncio.to_thread(repo.vacancies_with_contact)
     report = ApplyContactsReport(
         job_seeker_id=job_seeker_id,

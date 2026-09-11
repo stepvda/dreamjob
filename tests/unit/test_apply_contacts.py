@@ -1020,8 +1020,11 @@ def test_the_pass_reports_a_terminal_done_when_there_is_nothing_to_do(
         )
     )
     assert report.shortfall == 0
-    assert [event["phase"] for event in events] == ["done"]
-    assert events[0]["done"] == 1 and events[0]["total"] == 1
+    # The "preparing" tick now precedes the corpus pre-scan, even when it turns
+    # out there is nothing to do; the terminal "done" is still last.
+    assert [event["phase"] for event in events] == ["preparing", "done"]
+    assert events[0]["total"] is None
+    assert events[-1]["done"] == 1 and events[-1]["total"] == 1
 
 
 def test_the_discovery_worker_drives_the_bar_from_the_callback(
