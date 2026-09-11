@@ -1727,6 +1727,15 @@ async def collection_worker(ctx: JobContext) -> None:
     # Last: the counters and the bar are exact at rest, whatever cadence they
     # were written on while the run was in flight.
     books.flush()
+    # A campaign writes tens of thousands of rows; folding the log back now
+    # keeps the WAL from growing for the length of the next run (NFR-102).
+    # PASSIVE never blocks, so it is safe while readers are attached.
+    try:
+        from dreamjob.db.connection import checkpoint  # noqa: PLC0415
+
+        checkpoint("PASSIVE")
+    except Exception:  # noqa: BLE001 - storage hygiene never fails a campaign
+        log.debug("WAL checkpoint after collection failed", exc_info=True)
     ctx.save_checkpoint(
         completed=completed,
         stats=stats.to_dict(),

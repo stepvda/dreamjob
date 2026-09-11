@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from dreamjob.config import REPO_ROOT, get_settings
+from dreamjob.db.connection import checkpoint
 from dreamjob.db.migrator import migrate
 from dreamjob.observability import RequestLogMiddleware, setup_logging
 
@@ -100,6 +101,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 log.info("Resumed %d interrupted job(s)", resumed)
     except Exception:  # noqa: BLE001
         log.exception("Could not reconcile interrupted jobs")
+
+    # Storage hygiene: at boot nothing else holds the log open, so a TRUNCATE
+    # collapses a WAL a long-running reader may have pinned for days.
+    try:
+        result = checkpoint("TRUNCATE")
+        if result.get("checkpointed"):
+            log.info("WAL checkpointed at boot: %s frame(s)", result["checkpointed"])
+    except Exception:  # noqa: BLE001 - a checkpoint is never worth a failed boot
+        log.exception("Could not checkpoint the WAL at boot")
 
     yield
 

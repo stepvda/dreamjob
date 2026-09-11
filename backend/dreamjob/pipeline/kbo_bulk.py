@@ -39,6 +39,14 @@ log = logging.getLogger(__name__)
 
 SOURCE = "kbo_bulk"
 
+#: Which register's identifier a staged row carries, by staging source.  The
+#: seed table is shared by every bulk register importer, so the promotion has to
+#: read the type off the source rather than assume Belgium (DR-101).
+LEGAL_ID_TYPE_BY_SOURCE: dict[str, str] = {
+    "kbo_bulk": "kbo",
+    "companies_house_bulk": "companies_house",
+}
+
 #: Enterprise status codes in the register.  0 is active; the rest are stopped
 #: or being wound up, and a stopped company is not a place anyone will be hired.
 ACTIVE_STATUS = "AC"
@@ -292,8 +300,10 @@ def materialise(seed: dict[str, Any]) -> str:
     from dreamjob.db.connection import update_row  # noqa: PLC0415
 
     number = str(seed["entity_number"])
+    legal_type = LEGAL_ID_TYPE_BY_SOURCE.get(str(seed.get("source") or SOURCE), "kbo")
+    stage_source = str(seed.get("source") or SOURCE)
     existing = query_one(
-        "SELECT id FROM company WHERE legal_id = ? AND legal_id_type = 'kbo'", (number,)
+        "SELECT id FROM company WHERE legal_id = ? AND legal_id_type = ?", (number, legal_type)
     )
     codes = seed.get("nace_codes")
     if isinstance(codes, str):
@@ -302,14 +312,14 @@ def materialise(seed: dict[str, Any]) -> str:
         codes = from_json(codes, []) or []
     values: dict[str, Any] = {
         "legal_id": number,
-        "legal_id_type": "kbo",
+        "legal_id_type": legal_type,
         "name": seed["name"],
         "normalised_name": seed["normalised_name"],
         "country": seed.get("country") or "BE",
         "sector_codes": to_json(
-            [{"code": c, "source": "kbo"} for c in (codes or [])]
+            [{"code": c, "source": stage_source} for c in (codes or [])]
         ),
-        "source": f"{SOURCE}:{number}",
+        "source": f"{stage_source}:{number}",
         "access_method": "registry",
         "collected_at": utcnow(),
     }

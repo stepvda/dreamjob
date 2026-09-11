@@ -282,8 +282,17 @@ def generate(
         }
     )
     if dispatchable:
-        # Regenerating what goes out withdraws any approval it already had.
-        values.update({"status": "draft", "approved_at": None, "approved_by": None})
+        # Regenerating what goes out withdraws any approval it already had, and
+        # with it any override that approval carried: a fresh CV is a fresh
+        # FR-322 check, and the old reason does not answer for the new text.
+        values.update(
+            {
+                "status": "draft",
+                "approved_at": None,
+                "approved_by": None,
+                "consistency_override": None,
+            }
+        )
     notes.setdefault("history", []).append(
         {
             "at": utcnow(),
@@ -516,7 +525,9 @@ def approve(
             continue
         approvable.append(package["id"])
 
-    approved = repo.approve_packages(job_seeker_id, approvable, actor)
+    approved = repo.approve_packages(
+        job_seeker_id, approvable, actor, override_reason=override_reason
+    )
     if approved:
         repo.record_audit(
             job_seeker_id,

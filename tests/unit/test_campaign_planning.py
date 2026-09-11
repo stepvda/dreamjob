@@ -632,6 +632,57 @@ def test_reuse_assesses_per_target_not_per_adapter(db):
     assert by_slug["initech"]["estimated_pages"] == 1
 
 
+def test_reuse_headline_is_capped_by_what_the_knowledge_base_holds(db):
+    """FR-342: the claimed saving can never exceed the corpus it comes from.
+
+    Every per-target item added its whole expected page yield, so a campaign
+    over thousands of boards reported hundreds of thousands of reused records
+    against a corpus of tens of thousands.
+    """
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue(
+        "ats.greenhouse",
+        source_type="ats",
+        query_capabilities={"max_results_per_query": 100, "pagination": False},
+    )
+    for slug in ("acme", "globex", "initech"):
+        campaign_repo.insert_plan_item(
+            campaign_id,
+            {
+                "adapter_key": "ats.greenhouse",
+                "native_query": {"slug": slug},
+                "caps": {"planned_pages": 1, "records_per_page": 100},
+                "estimated_pages": 1,
+                "estimated_seconds": 8,
+                "estimated_cost_eur": 0.0,
+            },
+        )
+        egress_client.record_fetch(
+            "ats.greenhouse",
+            f"greenhouse/{slug}",
+            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
+            http_status=200,
+            record_count=100,
+        )
+    # Three boards look fresh (300 expected), but only 50 rows exist.
+    for n in range(50):
+        vacancy_id = kb_repo.insert_vacancy(
+            {
+                "title": f"Engineer {n}",
+                "company_name_raw": "Acme NV",
+                "country": "BE",
+                "source_adapter": "ats.greenhouse",
+                "collected_at": _iso(1),
+            }
+        )
+        kb_repo.record_provenance("vacancy", vacancy_id, adapter_key="ats.greenhouse")
+
+    report = knowledge_base.assess_reuse(campaign_id, countries=["BE", "NL"])
+    assert report.per_entity["vacancy"]["reused"] == report.fresh_in_knowledge_base["vacancy"]
+    assert report.per_entity["vacancy"]["reused"] <= 50
+
+
 def test_reuse_per_target_key_matches_the_ledger_key_collection_writes(db):
     """The two sides of N4 must agree, or per-target reuse silently reverts."""
     assert planning.target_key("ats.greenhouse", {"slug": "acme"}) == "greenhouse/acme"

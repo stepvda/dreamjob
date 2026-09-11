@@ -110,8 +110,23 @@ def _fresh_connection_cache() -> Iterator[None]:
             except Exception:  # noqa: BLE001 - a connection still in use is not ours to break
                 pass
 
+    # The LLM response cache is process-global; an answer one test cached must
+    # not satisfy the next test's identical-looking call.
+    try:
+        from dreamjob.llm.client import clear_response_cache
+
+        clear_response_cache()
+    except Exception:  # noqa: BLE001 - the cache is an optimisation, never a dependency
+        pass
+
     _forget()
     yield
+    try:
+        from dreamjob.llm.client import clear_response_cache
+
+        clear_response_cache()
+    except Exception:  # noqa: BLE001
+        pass
     _forget()
 
 

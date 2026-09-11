@@ -144,8 +144,8 @@ _PROSE_WORDS = {
     "pijplijn", "gegevens", "data-gedreven", "talen",
     # French
     "et", "de", "des", "du", "pour", "avec", "expérience", "compétences",
-    "connaissances", "gestion", "développement", "ingénierie", "architecture",
-    "sécurité", "technique", "gestionnaire", "données", "produit", "langues",
+    "connaissances", "gestion", "développement", "ingénierie", "sécurité",
+    "technique", "gestionnaire", "données", "produit", "langues",
     # German
     "und", "der", "die", "das", "für", "mit", "erfahrung", "kenntnisse",
     "kompetenzen", "führung", "entwicklung", "technik", "architektur",

@@ -48,6 +48,11 @@ KIND_SPECULATIVE = "speculative"
 #: this campaign itself.  Matches the default vacancy staleness policy (FR-343).
 DEFAULT_REUSE_WINDOW_DAYS = 45
 
+#: FR-186 ceiling on a campaign's ranked list.  Mirrors
+#: ``planning.DEFAULT_CAPS["max_opportunities"]`` so the bound applies to
+#: campaigns created before the cap existed, which stored no such key.
+DEFAULT_MAX_OPPORTUNITIES = 25_000
+
 
 # ---------------------------------------------------------------------------
 # Field inference (FR-261)
@@ -390,6 +395,9 @@ class SynthesisReport:
     rejected: int = 0
     rejections: dict[str, int] = field(default_factory=dict)
     opportunity_ids: list[str] = field(default_factory=list)
+    #: FR-186: synthesis stopped at the campaign's opportunity cap.  Reported
+    #: rather than silent, because a capped corpus is a smaller shortlist.
+    dropped_over_cap: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -400,6 +408,8 @@ class SynthesisReport:
             "rejected": self.rejected,
             "rejections": self.rejections,
             "opportunity_ids": self.opportunity_ids,
+            "dropped_over_cap": self.dropped_over_cap,
+            "capped": self.dropped_over_cap > 0,
         }
 
 
@@ -448,10 +458,29 @@ def synthesise_campaign(
     directive_row = inputs.get("directives")
     directive_set = dir_mod.coerce_directive_set(directive_row) if directive_row else None
 
-    companies: dict[str, dict] = {}
-    for vacancy in campaign_vacancy_pool(
+    # FR-186: an unbounded synthesis is how one campaign came to hold 48,269
+    # opportunity rows, all of which the ranking pass then had to walk.  The cap
+    # is the campaign's own, so the user controls it; freshest first, so the
+    # rows most likely to be live survive it.
+    caps = campaign.get("caps")
+    if isinstance(caps, str):
+        caps = from_json(caps, {}) or {}
+    if not isinstance(caps, dict):
+        caps = {}
+    max_opportunities = int(
+        caps.get("max_opportunities") or DEFAULT_MAX_OPPORTUNITIES or 0
+    ) or None
+    pool = campaign_vacancy_pool(
         campaign_id, include_knowledge_base=include_knowledge_base, window_days=window_days
-    ):
+    )
+    if max_opportunities:
+        pool.sort(
+            key=lambda v: str(v.get("posted_at") or v.get("collected_at") or ""),
+            reverse=True,
+        )
+
+    companies: dict[str, dict] = {}
+    for vacancy in pool:
         report.considered += 1
         company_id = vacancy.get("company_id")
         if company_id and company_id not in companies:
@@ -469,6 +498,12 @@ def synthesise_campaign(
             record["timing_flag"] = signals_mod.timing_flag_for(company_id)
 
         existing = repo.find_by_vacancy(campaign_id, vacancy["id"], job_seeker_id=seeker_id)
+        if existing is None and max_opportunities and report.created >= max_opportunities:
+            # The corpus is larger than the campaign asked to hold.  Count it so
+            # the screen can say the shortlist was bounded, and keep going only
+            # to refresh rows that already exist.
+            report.dropped_over_cap += 1
+            continue
         opportunity_id, created = repo.upsert_synthesised(
             seeker_id, campaign_id, record, existing
         )

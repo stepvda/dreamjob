@@ -774,19 +774,34 @@ def estimate(
 
 
 def fit_against_directives(
-    estimate_result: CompensationEstimate, directive_set: dir_mod.DirectiveSetLike | None
+    estimate_result: CompensationEstimate,
+    directive_set: dir_mod.DirectiveSetLike | None,
+    *,
+    opportunity: dict | None = None,
 ) -> dict[str, Any]:
     """How the estimated range sits against the seeker's minimum (FR-146, FR-281).
 
     Returns the compensation sub-score input: ``score`` in 0..1 plus the reason,
     so the ranked list can explain it without recomputing anything.
+
+    When no minimum package is stated - which is the normal case, because FR-146
+    is deliberately never guessed - the component used to be left unassessed, so
+    ten per cent of every score was permanently missing.  Passing the
+    ``opportunity`` lets the estimate be scored against the market band for the
+    role instead: still advisory, still never a filter (NFR-305).
     """
-    if directive_set is None:
-        return {"score": None, "reason": "no compensation directive set"}
-    comp = dir_mod.coerce_directive_set(directive_set).compensation
-    minimum = comp.minimum_package
+    comp = dir_mod.coerce_directive_set(directive_set).compensation if directive_set else None
+    minimum = comp.minimum_package if comp else None
     if minimum is None:
-        return {"score": None, "reason": "no minimum package stated"}
+        market = market_fit(estimate_result, opportunity) if opportunity is not None else None
+        if market is not None:
+            return market
+        return {
+            "score": None,
+            "reason": (
+                "no minimum package stated" if comp else "no compensation directive set"
+            ),
+        }
     factor = PERIOD_FACTORS.get(comp.period.value, 1.0)
     target = minimum * factor
     if estimate_result.comp_max is None:
@@ -816,6 +831,48 @@ def fit_against_directives(
         "score": max(0.0, min(1.0, score)),
         "reason": reason,
         "target": target,
+        "confidence": estimate_result.confidence,
+        "is_stated": estimate_result.is_stated,
+    }
+
+
+def market_fit(
+    estimate_result: CompensationEstimate, opportunity: dict | None
+) -> dict[str, Any] | None:
+    """Compensation fit against the market band, for a seeker with no minimum.
+
+    FR-146 does not guess a salary floor, so the compensation component was
+    never assessed and a tenth of every score was silently renormalised away.
+    This scores the estimated range against the built-in band for the role's
+    seniority, function family and country: at or above the midpoint is good,
+    below it is worse.  It is advisory only, and it never filters an
+    opportunity - the floor that could do that stays the job seeker's to state.
+    """
+    if opportunity is None or estimate_result.comp_max is None:
+        return None
+    currency = estimate_result.currency or "EUR"
+    band = builtin_prior(opportunity, currency=currency)
+    if band is None:
+        return None
+    midpoint = (band.low + band.high) / 2
+    low = estimate_result.comp_min if estimate_result.comp_min is not None else band.high
+    high = estimate_result.comp_max
+    if low >= midpoint:
+        score = 1.0
+        reason = "the estimated range sits at or above the market midpoint for this role"
+    elif high >= midpoint:
+        span = max(high - low, 1.0)
+        score = round(0.55 + 0.4 * ((high - midpoint) / span), 3)
+        reason = "the upper part of the estimated range reaches the market midpoint for this role"
+    else:
+        shortfall = (midpoint - high) / midpoint
+        score = round(max(0.0, 0.5 - shortfall), 3)
+        reason = f"the estimate falls about {shortfall:.0%} short of the market midpoint"
+    return {
+        "score": max(0.0, min(1.0, score)),
+        "reason": reason,
+        "target": midpoint,
+        "benchmark": "builtin_prior",
         "confidence": estimate_result.confidence,
         "is_stated": estimate_result.is_stated,
     }

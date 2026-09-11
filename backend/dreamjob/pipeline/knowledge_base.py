@@ -725,6 +725,17 @@ def assess_reuse(
                 values["status"] = "planned"
             campaign_repo.update_plan_item(item["id"], values)
 
+    # FR-342: the headline "reused" figure is bounded by what the knowledge base
+    # actually holds.  A per-target plan item used to add its whole expected page
+    # yield to the total, so one campaign over 4,500 boards reported 526,595
+    # reused vacancies against a 55,057-row corpus - a claimed saving larger than
+    # the entire knowledge base.  Capping the aggregate at the measured fresh
+    # count keeps the headline one a person can check.
+    for entity_type, bucket in report.per_entity.items():
+        cap = int(report.fresh_in_knowledge_base.get(entity_type) or 0)
+        if cap and bucket.get("reused", 0) > cap:
+            bucket["reused"] = cap
+
     if apply_decisions:
         campaign_repo.update_campaign(campaign_id, {"reuse_report": report.to_dict()})
     return report

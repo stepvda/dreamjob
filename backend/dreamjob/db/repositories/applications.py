@@ -47,7 +47,8 @@ _UPDATABLE = frozenset(
         "contact_id", "language", "cv_template", "cv_docx_path", "cv_pdf_path",
         "briefing_pdf_path", "motivation_pdf_path", "email_subject", "email_body",
         "consistency_status", "consistency_report", "leak_scan_status", "status",
-        "approved_at", "approved_by", "profile_version_id", "company_snapshot_at",
+        "approved_at", "approved_by", "consistency_override",
+        "profile_version_id", "company_snapshot_at",
         "generation_notes", "updated_at",
     }
 )
@@ -191,8 +192,15 @@ def update_package(package_id: str, job_seeker_id: str, values: dict[str, Any]) 
     return get_package(package_id, job_seeker_id)
 
 
-def approve_packages(job_seeker_id: str, package_ids: list[str], actor: str) -> list[str]:
-    """Mark packages approved for dispatch (FR-324, NFR-702 audit trail)."""
+def approve_packages(
+    job_seeker_id: str, package_ids: list[str], actor: str, *, override_reason: str | None = None
+) -> list[str]:
+    """Mark packages approved for dispatch (FR-324, NFR-702 audit trail).
+
+    ``override_reason`` is stored on the row, not only in the audit trail, so
+    the send paths can tell an overridden FR-322 failure from one nobody has
+    accepted (migration 146).
+    """
     if not package_ids:
         return []
     stamp = utcnow()
@@ -201,9 +209,9 @@ def approve_packages(job_seeker_id: str, package_ids: list[str], actor: str) -> 
         for package_id in package_ids:
             cur = conn.execute(
                 "UPDATE application_package SET status = 'approved', approved_at = ?, "
-                "approved_by = ?, updated_at = ? "
+                "approved_by = ?, consistency_override = ?, updated_at = ? "
                 "WHERE id = ? AND job_seeker_id = ? AND status = 'draft'",
-                (stamp, actor, stamp, package_id, job_seeker_id),
+                (stamp, actor, override_reason, stamp, package_id, job_seeker_id),
             )
             if cur.rowcount:
                 approved.append(package_id)

@@ -58,6 +58,7 @@ deadlocking on our own gate (tests/unit/test_runner_isolation.py pins this).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -71,6 +72,8 @@ from typing import Any
 
 from dreamjob.config import get_settings
 from dreamjob.observability import db_logging
+
+log = logging.getLogger(__name__)
 
 # -- lanes -------------------------------------------------------------------
 #: Serving a person.  The default, so that code which knows nothing about
@@ -302,6 +305,37 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
         db_logging.attach(conn)
         setattr(_local, key, conn)
     return conn
+
+
+def checkpoint(mode: str = "PASSIVE") -> dict[str, int]:
+    """Collapse the write-ahead log back into the database.
+
+    A WAL that never checkpoints grows without bound - one installation reached
+    3.3 GB of WAL against a 1.85 GB database, which slows every reader and
+    inflates every backup.  SQLite checkpoints automatically, but only when no
+    other connection holds a read transaction open; a long-lived reader can pin
+    the WAL indefinitely.  ``PASSIVE`` never blocks and is safe while the API is
+    serving; ``TRUNCATE`` is for boot, when nothing else is attached.
+
+    Returns ``{busy, log, checkpointed}`` in frames; ``busy`` non-zero means a
+    reader pinned the log and the next call should try again.
+    """
+    mode = (mode or "PASSIVE").upper()
+    if mode not in {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}:
+        mode = "PASSIVE"
+    try:
+        row = get_connection().execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+    except Exception:  # noqa: BLE001 - storage hygiene must never crash a caller
+        log.exception("WAL checkpoint (%s) failed", mode)
+        return {"busy": -1, "log": -1, "checkpointed": -1}
+    if row is None:
+        return {"busy": -1, "log": -1, "checkpointed": -1}
+    result = {"busy": int(row[0]), "log": int(row[1]), "checkpointed": int(row[2])}
+    if result["busy"]:
+        log.info(
+            "WAL checkpoint (%s) was busy: %d frame(s) still in the log", mode, result["log"]
+        )
+    return result
 
 
 def close_thread_connections() -> None:

@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker
+from dreamjob.config import get_settings
 from dreamjob.db.repositories import applications as repo
 from dreamjob.documents import briefing as briefing_module
 from dreamjob.documents import motivation as motivation_module
@@ -333,9 +334,24 @@ def edit_package(
 
 @router.post("/{package_id}/consistency")
 def recheck(package_id: str, seeker: CurrentSeeker = Depends(current_seeker)) -> dict[str, Any]:
-    """Re-run the FR-322 check and the NFR-206 scan over the current text."""
+    """Re-run the FR-322 check and the NFR-206 scan over the current text.
+
+    The judge runs here too.  It did not before: the router called
+    ``run_consistency`` without a client, so the re-check silently reported the
+    deterministic half alone and could turn a fully-failed package green - the
+    screen then showed "pass" for a check that had skipped half its work
+    (E2E_1500, section 8.6).  A missing key or an exhausted budget still
+    degrades gracefully, and the stored report says ``judge_ran`` so the screen
+    can say which check it actually ran.
+    """
+    from dreamjob.llm.client import LLMClient  # noqa: PLC0415
+
     package = _owned(package_id, seeker.id)
-    updated = package_module.run_consistency(seeker.id, package)
+    settings = get_settings()
+    llm = None
+    if settings.deepseek_api_key or settings.local_llm_base_url:
+        llm = LLMClient(campaign_id=package.get("campaign_id"), job_seeker_id=seeker.id)
+    updated = package_module.run_consistency(seeker.id, package, llm=llm)
     return package_module.preview(updated)
 
 

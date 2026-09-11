@@ -59,6 +59,7 @@ class EnrichmentReport:
     employer_kind: dict[str, Any] = field(default_factory=dict)
     profiles: dict[str, Any] = field(default_factory=dict)
     signals: dict[str, Any] = field(default_factory=dict)
+    reviews: dict[str, Any] = field(default_factory=dict)
     financials: dict[str, Any] = field(default_factory=dict)
     skipped: list[str] = field(default_factory=list)
 
@@ -70,6 +71,7 @@ class EnrichmentReport:
             "employer_kind": self.employer_kind,
             "profiles": self.profiles,
             "signals": self.signals,
+            "reviews": self.reviews,
             "financials": self.financials,
             "skipped": self.skipped,
         }
@@ -84,6 +86,7 @@ async def enrich_campaign(
     do_domains: bool = True,
     do_profiles: bool = True,
     do_signals: bool = True,
+    do_reviews: bool = True,
     do_financials: bool = True,
 ) -> EnrichmentReport:
     """Run the company-enrichment passes for one campaign's companies.
@@ -127,6 +130,17 @@ async def enrich_campaign(
         report.signals = await _guarded(
             "signals",
             _refresh_signals(company_ids),
+            report,
+        )
+
+    if do_reviews:
+        # FR-265/FR-384: reviews the company publishes about itself, read from
+        # the pages the crawl just stored.  Purchased review corpora are
+        # prohibited (IR-101), so this is the permitted source; it is a weaker
+        # signal and is recorded at self-published confidence.
+        report.reviews = await _guarded(
+            "reviews",
+            _refresh_reviews(company_ids),
             report,
         )
 
@@ -249,3 +263,24 @@ async def _refresh_signals(company_ids: list[str]) -> dict:
             with_signals += 1
         total += found
     return {"signals": total, "companies_with_signals": with_signals}
+
+
+def _refresh_reviews(company_ids: list[str]) -> dict:
+    """Record the aggregate rating each company publishes about itself (FR-265).
+
+    Pure corpus work: the pages are already stored by the profile crawl, so this
+    costs no request.  A company with no published rating is simply not recorded,
+    which the compensation block reports as "no employer rating".
+    """
+    from dreamjob.pipeline import employer_reviews  # noqa: PLC0415
+
+    rated = 0
+    for company_id in company_ids:
+        try:
+            result = employer_reviews.build_for_company(company_id)
+        except Exception:  # noqa: BLE001 - one company must not stop the rest
+            log.debug("Employer-review extraction failed for %s", company_id, exc_info=True)
+            continue
+        if result.get("rating") is not None:
+            rated += 1
+    return {"rated": rated, "companies": len(company_ids)}

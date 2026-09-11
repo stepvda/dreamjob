@@ -97,6 +97,9 @@ DEFAULT_CAPS_OVERRIDE: dict[str, int] = {
     "max_pages": 150,
     "max_pages_per_source": 8,
     "max_duration_seconds": 45 * 60,
+    # An unattended run ranks what one press of a button asked for; a corpus of
+    # tens of thousands is neither reviewable nor the point of a shortlist.
+    "max_opportunities": 5_000,
 }
 
 #: A collection run is expected to take minutes; the autopilot waits for it so

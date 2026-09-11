@@ -389,11 +389,15 @@ def _prepare_only(
             f"Package {package_id} is {package.get('status')!r}. FR-324 requires the job seeker "
             "to approve generated material before it is sent."
         )
-    # FR-322: a CV that failed the factual-consistency gate is never assembled.
-    if package.get("consistency_status") == "fail":
+    # FR-322: a CV that failed the factual-consistency gate is never assembled
+    # unless the job seeker approved it with a recorded override (FR-324,
+    # migration 146).  That decision is on the row, so it survives to here.
+    if package.get("consistency_status") == "fail" and not (
+        package.get("consistency_override") or ""
+    ).strip():
         raise SendRefused(
-            "The factual-consistency check on this CV failed (FR-322); fix or regenerate it "
-            "before sending."
+            "The factual-consistency check on this CV failed (FR-322); fix or regenerate it, "
+            "or approve it with a recorded override, before sending."
         )
     # A previous *dry run* must not look like a send: only a dispatch that
     # actually left counts as "already dispatched", so the job seeker can

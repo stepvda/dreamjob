@@ -342,6 +342,25 @@ def test_synthesis_is_idempotent_and_respects_directives(db):
     assert rows[0]["required_skills"]
 
 
+def test_synthesis_stops_at_the_campaign_opportunity_cap(db):
+    """FR-186: one campaign's 48,269 rows are a corpus, not a shortlist."""
+    from dreamjob.db.connection import to_json, update_row
+
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+    update_row("campaign", campaign["id"], {"caps": to_json({"max_opportunities": 1})})
+    campaign = query_one("SELECT * FROM campaign WHERE id = ?", (campaign["id"],))
+    company_id = _company("Portex NV")
+    for n in range(3):
+        _collected_vacancy(campaign["id"], company_id, source_url=f"https://x/cap-{n}")
+
+    report = synth.synthesise_campaign(campaign)
+    assert report.created == 1
+    assert report.dropped_over_cap == 2
+    assert report.as_dict()["capped"] is True
+    assert len(repo.list_opportunities(seeker_id, campaign_id=campaign["id"])) == 1
+
+
 # ---------------------------------------------------------------------------
 # FR-263 / CR-405: speculative openings are never presented as vacancies
 # ---------------------------------------------------------------------------
@@ -598,6 +617,33 @@ def test_compensation_fit_against_the_minimum_package(db):
     )
     assert comp_mod.fit_against_directives(clears, ctx.directives)["score"] == 1.0
     assert comp_mod.fit_against_directives(short, ctx.directives)["score"] < 0.4
+
+
+def test_compensation_is_scored_against_the_market_when_no_floor_is_stated(db):
+    """FR-281: a tenth of every score was unassessed without a stated minimum.
+
+    FR-146 never guesses a salary floor, so a directive set with
+    ``minimum_package = null`` made the compensation component permanently
+    null.  Given the opportunity, it is scored against the market band instead.
+    """
+    from dreamjob.pipeline import directives as dir_mod
+
+    opportunity = {
+        "seniority": "senior",
+        "function_family": "software engineering",
+        "country": "BE",
+    }
+    estimate = comp_mod.CompensationEstimate(
+        currency="EUR", comp_min=70_000, comp_max=90_000, confidence=0.6
+    )
+    no_floor = dir_mod.DirectiveSetPayload()
+
+    scored = comp_mod.fit_against_directives(estimate, no_floor, opportunity=opportunity)
+    assert scored["score"] is not None
+    assert scored["benchmark"] == "builtin_prior"
+
+    # Without the opportunity there is nothing to compare the range against.
+    assert comp_mod.fit_against_directives(estimate, no_floor)["score"] is None
 
 
 # ---------------------------------------------------------------------------

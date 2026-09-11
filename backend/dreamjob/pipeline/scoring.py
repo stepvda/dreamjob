@@ -942,7 +942,7 @@ def _estimate_from_columns(opportunity: dict) -> comp_mod.CompensationEstimate:
 def compensation_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
     """FR-281 compensation fit, against the FR-146 minimum package."""
     estimate = _estimate_from_columns(opportunity)
-    result = comp_mod.fit_against_directives(estimate, ctx.directives)
+    result = comp_mod.fit_against_directives(estimate, ctx.directives, opportunity=opportunity)
     value = result.get("score")
     if value is not None:
         # A guess that the range clears the minimum is worth less than a stated

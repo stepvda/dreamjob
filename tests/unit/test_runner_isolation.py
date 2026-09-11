@@ -62,6 +62,7 @@ from dreamjob.db.connection import (
     insert_row,
     query_all,
     query_one,
+    update_row,
     utcnow,
     write_tx,
 )
@@ -708,3 +709,61 @@ def test_a_stalled_writer_is_bounded_by_the_busy_timeout_times_the_queue(db: Non
     assert query_one(
         "SELECT COUNT(*) AS n FROM audit_event WHERE action = 'after'"
     )["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Recovery: mark *and* start (NFR-401)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failed_but_resumable_job_is_requeued_and_redispatched(db: None) -> None:
+    """NFR-401: the boot path must start what it marks resumable.
+
+    A worker that raised because the process was going down leaves the row
+    ``failed`` with a last_error that says resumable.  ``resume_orphans`` used
+    to ignore those, and nothing ever started a ``pending`` row - so a campaign
+    whose ranking passes were cut short stayed cut short, with 48,269 scored
+    opportunities missing.
+    """
+    job_id = runner.create("test.recovery", total=1)
+    update_row(
+        "job_run",
+        job_id,
+        {"status": "failed", "last_error": "interrupted by restart; resumable"},
+    )
+
+    async def worker(ctx: JobContext) -> None:
+        ctx.save_checkpoint(ran=True)
+
+    runner.register_worker("test.recovery", worker)
+    try:
+        assert await runner.resume_orphans() >= 1
+        assert job_status(job_id) == "pending"
+
+        started = await runner.dispatch_recoverable()
+        assert started >= 1
+        await wait_for(lambda: job_status(job_id) == "done", timeout=10)
+        assert job_status(job_id) == "done"
+    finally:
+        runner._workers.pop("test.recovery", None)
+
+
+async def test_a_genuine_failure_is_not_requeued(db: None) -> None:
+    """Only the resumable marker is honoured; a real failure stays failed."""
+    job_id = runner.create("test.not_resumable", total=1)
+    update_row("job_run", job_id, {"status": "failed", "last_error": "ValueError: bad data"})
+
+    await runner.resume_orphans()
+    assert job_status(job_id) == "failed"
+
+
+def test_checkpoint_collapses_the_wal(db: None) -> None:
+    """A WAL that never checkpoints grows without bound (NFR-102)."""
+    from dreamjob.db.connection import checkpoint
+
+    for n in range(50):
+        _write_one(f"wal-{n}")
+    result = checkpoint("TRUNCATE")
+    assert result["busy"] == 0, "no reader is attached in this test, so it must not be busy"
+    assert result["checkpointed"] >= 0
+

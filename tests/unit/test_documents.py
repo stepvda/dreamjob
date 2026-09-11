@@ -777,6 +777,46 @@ def test_consistency_failure_blocks_approval_until_overridden() -> None:
     assert repo.get_package(package["id"], ids["seeker"])["status"] == "approved"
 
 
+def test_an_approved_override_survives_to_the_send_paths() -> None:
+    """FR-322/FR-324: the recorded reason is on the row, not only in the audit.
+
+    Approval offered an override and both send paths refused it, so an
+    overridden package could never actually be sent (E2E_1500 section 8.7).
+    """
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.documents import package as package_module
+    from dreamjob.documents.package import GenerationOptions
+
+    ids = seed()
+    package = package_module.generate(ids["seeker"], ids["opportunity"], actor="test")
+    notes = dict(package["generation_notes"])
+    notes["cv_document"]["experience"][0]["company"] = "Globex International"
+    repo.update_package(package["id"], ids["seeker"], {"generation_notes": notes})
+    package = package_module.run_consistency(
+        ids["seeker"], repo.get_package(package["id"], ids["seeker"])
+    )
+    assert package["consistency_status"] == "fail"
+
+    package_module.approve(
+        ids["seeker"], [package["id"]], actor="t", override_reason="Checked by hand"
+    )
+    approved = repo.get_package(package["id"], ids["seeker"])
+    assert approved["status"] == "approved"
+    assert approved["consistency_override"] == "Checked by hand"
+
+    # A regeneration is a fresh check, and the old reason does not answer it.
+    package_module.generate(
+        ids["seeker"],
+        ids["opportunity"],
+        GenerationOptions(instructions="redo"),
+        package_id=package["id"],
+        actor="t",
+    )
+    regenerated = repo.get_package(package["id"], ids["seeker"])
+    assert regenerated["status"] == "draft"
+    assert not regenerated.get("consistency_override")
+
+
 def test_leak_failure_cannot_be_overridden() -> None:
     """NFR-206: a leak is never a judgement call."""
     from dreamjob.db.repositories import applications as repo

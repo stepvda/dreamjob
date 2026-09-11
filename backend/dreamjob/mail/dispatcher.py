@@ -404,10 +404,14 @@ def send_package(
             f"Package {package_id} is {package.get('status')!r}. FR-324 requires the job seeker "
             "to approve generated material before it is sent."
         )
-    if package.get("consistency_status") == "fail":
+    # FR-322 with the FR-324 override: a failed consistency check blocks the
+    # send unless the job seeker approved it with a recorded reason.
+    if package.get("consistency_status") == "fail" and not (
+        package.get("consistency_override") or ""
+    ).strip():
         raise SendRefused(
-            "The factual-consistency check on this CV failed (FR-322); fix or regenerate it "
-            "before sending."
+            "The factual-consistency check on this CV failed (FR-322); fix or regenerate it, "
+            "or approve it with a recorded override, before sending."
         )
 
     existing = repo.already_sent_to(

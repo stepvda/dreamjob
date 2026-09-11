@@ -22,10 +22,13 @@ requirements enforceable rather than aspirational:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,12 +49,72 @@ TASK_CHEAP = {
     "extract.vacancy", "extract.company", "extract.contact", "extract.table",
     "classify.reply", "normalise.skill", "summarise.page",
     "classify.employer_kind",
+    # FR-363 / E2E_1500 section 8.9: the generation tasks are prose writing, not
+    # reasoning, and the reasoning model consumed its whole token budget on
+    # private reasoning and returned nothing for them often enough that over
+    # half the generation spend produced no usable document.  The chat model is
+    # the right tool and the cheaper one; an administrator can still pin any of
+    # these to the strong model through the per-task override.
+    "generate.cv", "generate.email", "generate.motivation", "generate.briefing",
 }
 TASK_STRONG = {
     "profile.composite", "profile.dreamjob", "plan.campaign", "company.speculative",
-    "score.opportunity", "generate.cv", "generate.email", "generate.motivation",
-    "generate.briefing", "analysis.financial", "analysis.gap", "interview.mock",
+    "score.opportunity", "analysis.financial", "analysis.gap", "interview.mock",
 }
+
+#: Tasks whose answer is a property of their input, not of the moment.  The same
+#: company page or vacancy text extracts to the same record whichever campaign
+#: asks, so a repeat answer is fetched from the cache instead of paid for again.
+#: Generation tasks are deliberately absent: a CV is asked for once, and a cached
+#: one would be a stale one.
+CACHEABLE_TASKS = {
+    "extract.vacancy", "extract.company", "extract.contact", "extract.table",
+    "summarise.page", "normalise.skill", "classify.reply", "classify.employer_kind",
+}
+
+_RESPONSE_CACHE_MAX = 256
+_RESPONSE_CACHE: OrderedDict[str, tuple[str, Any]] = OrderedDict()
+_RESPONSE_CACHE_LOCK = threading.Lock()
+
+
+def _response_cache_key(
+    task: str,
+    model: str,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool,
+) -> str:
+    blob = json.dumps(
+        [task, model, system, user, round(float(temperature), 3), max_tokens, bool(json_mode)],
+        sort_keys=True,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _response_cache_get(key: str) -> tuple[str, Any] | None:
+    with _RESPONSE_CACHE_LOCK:
+        cached = _RESPONSE_CACHE.get(key)
+        if cached is not None:
+            _RESPONSE_CACHE.move_to_end(key)
+        return cached
+
+
+def _response_cache_put(key: str, text: str, usage: Any) -> None:
+    with _RESPONSE_CACHE_LOCK:
+        _RESPONSE_CACHE[key] = (text, usage)
+        _RESPONSE_CACHE.move_to_end(key)
+        while len(_RESPONSE_CACHE) > _RESPONSE_CACHE_MAX:
+            _RESPONSE_CACHE.popitem(last=False)
+
+
+def clear_response_cache() -> None:
+    """Drop the in-process response cache (used by tests and the admin screen)."""
+    with _RESPONSE_CACHE_LOCK:
+        _RESPONSE_CACHE.clear()
+
+
 # The steps NFR-306 names as privacy-sensitive, by task group and by task
 # suffix, since the ids are "profile.composite", "generate.cv" and
 # "generate.motivation".
@@ -412,6 +475,28 @@ class LLMClient:
             blocks = "\n\n".join(wrap_untrusted(v, k) for k, v in untrusted.items())
             user = f"{user}\n\n{blocks}"
 
+        started = time.monotonic()
+        # The same page extracts to the same record in every campaign that reads
+        # it.  A cached answer is logged as a `cached` call with no tokens, so
+        # FR-364 still shows the call and the saving is visible rather than
+        # silent.
+        cache_key: str | None = None
+        if task in CACHEABLE_TASKS:
+            cache_key = _response_cache_key(
+                task, model, system, user, temperature, max_tokens, json_mode
+            )
+            cached = _response_cache_get(cache_key)
+            if cached is not None:
+                text, _cached_usage = cached
+                self._log_call(
+                    task, system, user, text, model, provider, Usage(), entity_type, entity_id,
+                    prompt_template, prompt_version,
+                    int((time.monotonic() - started) * 1000), status="cached",
+                )
+                return LLMResult(
+                    text=text, usage=Usage(), model=model, provider=provider, raw={}
+                )
+
         # NFR-104: rough pre-flight estimate at ~4 characters per token.
         estimate = (len(system) + len(user)) // 4 + max_tokens
         self.budget.check(estimate)
@@ -429,7 +514,6 @@ class LLMClient:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        started = time.monotonic()
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
@@ -519,6 +603,8 @@ class LLMClient:
             task, system, user, text, model, provider, usage, entity_type, entity_id,
             prompt_template, prompt_version, latency_ms,
         )
+        if cache_key is not None:
+            _response_cache_put(cache_key, text, usage)
         return LLMResult(text=text, usage=usage, model=model, provider=provider, raw=data)
 
     def complete_json(

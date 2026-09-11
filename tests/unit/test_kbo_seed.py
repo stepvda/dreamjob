@@ -12,8 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from dreamjob.db.connection import query_all, query_one
+from dreamjob.db.connection import query_one
 from dreamjob.pipeline import kbo_bulk, sectors
 
 # The published column names, so a renamed column in the fixture is a real

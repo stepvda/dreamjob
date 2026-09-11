@@ -80,6 +80,11 @@ DEFAULT_CAPS: dict[str, int] = {
     "max_companies": 8_000,         # was 200
     "max_people": 100,              # unchanged; not exercised in the first phase
     "max_duration_seconds": 4 * 3600,  # unchanged (NFR-103)
+    # A ceiling on the ranked list, not a target.  One campaign synthesised
+    # 48,269 opportunity rows and every later pass walked all of them; keeping
+    # the cap in the schema makes it visible and adjustable rather than implicit
+    # in whatever the sources returned.
+    "max_opportunities": 25_000,
 }
 
 # FR-165: the network crawl is slow and intrusive, so it is capped hard.
