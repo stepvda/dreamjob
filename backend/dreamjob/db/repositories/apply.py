@@ -523,9 +523,11 @@ def all_companies_for_contact(
     re-check them.  ``limit`` is therefore the only ceiling besides
     ``max_companies`` in the caller.
 
-    The row shape and ``_HAS_USABLE_CONTACT`` reuse are deliberately identical to
+    The row shape and the usable-contact predicate are deliberately identical to
     :func:`companies_needing_contact`, so the ladder receives the same company
-    dict from either work list.
+    dict from either work list.  The predicate is materialised once here rather
+    than evaluated per company: the sweep asks it of the whole company table, and
+    a per-row ``EXISTS`` on the ``usable_contact`` view made that seven seconds.
     """
     seeker_join = (
         "LEFT JOIN opportunity o ON o.company_id = co.id AND o.job_seeker_id = ?"
@@ -535,11 +537,30 @@ def all_companies_for_contact(
     seeker_rank = "MAX(CASE WHEN o.id IS NOT NULL THEN 1 ELSE 0 END)" if job_seeker_id else "0"
     params: list[Any] = [job_seeker_id] if job_seeker_id else []
 
+    # The eligible-company set, evaluated once rather than once per company.
+    # ``_HAS_USABLE_CONTACT`` asks the ``usable_contact`` view - which itself
+    # reads ``contact_objection`` - for every row of ``company``; on the live
+    # corpus that is 5,960 view evaluations before the sweep can report its
+    # first tick.  The predicate below is exactly ``_HAS_USABLE_CONTACT``'s
+    # (the view already excludes FR-304 ``invalid`` and NFR-302 objections), so
+    # the materialised answer is the same set the per-row ``EXISTS`` produced.
+    # The ``DISTINCT`` keeps the ``IN`` a membership test.
+    covered_cte = """
+        WITH covered AS MATERIALIZED (
+            SELECT DISTINCT u.company_id
+              FROM usable_contact u
+             WHERE u.email IS NOT NULL AND u.email != ''
+               AND u.company_id IS NOT NULL
+        )
+    """
     # No resolution-freshness predicate: a company without a contact is always
     # worth another walk, however recently the ladder last said so.
-    covered = "" if include_covered else f" AND NOT EXISTS ({_HAS_USABLE_CONTACT})"
+    covered = "" if include_covered else (
+        " AND co.id NOT IN (SELECT company_id FROM covered)"
+    )
 
     sql = f"""
+        {covered_cte}
         SELECT co.id                        AS company_id,
                co.name                      AS company_name,
                co.domain                    AS company_domain,
@@ -550,7 +571,8 @@ def all_companies_for_contact(
                (SELECT MAX(COALESCE(v.posted_at, v.collected_at)) FROM vacancy v
                  WHERE v.company_id = co.id) AS latest_vacancy_at,
                {seeker_rank}                AS backs_opportunity,
-               EXISTS ({_HAS_USABLE_CONTACT}) AS has_contact,
+               CASE WHEN co.id IN (SELECT company_id FROM covered)
+                    THEN 1 ELSE 0 END       AS has_contact,
                r.status                     AS resolution_status,
                r.resolved_at                AS resolved_at
           FROM company co

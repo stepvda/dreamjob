@@ -820,3 +820,76 @@ def test_materialised_coverage_matches_a_brute_force_scan() -> None:
     assert coverage["by_method"]["website"]["companies"] == 2
     assert coverage["by_method"]["conventional_mailbox"]["vacancies"] == 1
     assert coverage["by_method"]["conventional_mailbox"]["by_validation"]["unknown"] == 1
+
+
+def test_materialised_work_list_matches_the_per_row_predicate() -> None:
+    """The sweep's materialised eligible set is the old per-row ``EXISTS``.
+
+    ``all_companies_for_contact`` used to evaluate ``_HAS_USABLE_CONTACT`` once
+    per company (the ~7 s the materialised CTE removes); the answer has to stay
+    the same for every classification ``usable_contact`` can produce - an
+    objection (NFR-302), an FR-304 ``invalid`` verdict, an empty address, and a
+    LinkedIn-only contact, which has no address to write to and is therefore
+    *not* a usable contact however the view reports it.
+    """
+    ids = _seed()
+    _add_contact(
+        ids["company_id"], "hr@acme-data.example",
+        method=patterns.METHOD_WEBSITE, validation="valid",
+    )
+
+    objected = _new_company("Objected BV")
+    _add_contact(
+        objected, "blocked@objected.example",
+        method=patterns.METHOD_WEBSITE, validation="valid",
+    )
+    repo.record_objection("blocked@objected.example", source="unsubscribe")
+
+    invalid = _new_company("Invalid BV")
+    _add_contact(
+        invalid, "bad@invalid.example",
+        method=patterns.METHOD_PATTERN, validation="invalid",
+    )
+
+    empty = _new_company("Empty BV")
+    _add_contact(empty, "", method=patterns.METHOD_WEBSITE, validation="valid")
+
+    linkedin = _new_company("LinkedIn Only BV")
+    insert_row(
+        "contact",
+        {
+            "company_id": linkedin,
+            "full_name": "No Mail",
+            "linkedin_url": "https://www.linkedin.com/in/no-mail",
+            "source": "test",
+            "collected_at": utcnow(),
+        },
+    )
+
+    rows = apply_repo.all_companies_for_contact(500, include_covered=True)
+    materialised = {row["company_id"]: int(row["has_contact"]) for row in rows}
+
+    # The old form, written directly: one correlated ``EXISTS`` per company.
+    per_row = {
+        row["company_id"]: int(row["has_contact"])
+        for row in query_all(
+            "SELECT co.id AS company_id,"
+            "       EXISTS (SELECT 1 FROM usable_contact u"
+            "                WHERE u.company_id = co.id"
+            "                  AND u.email IS NOT NULL AND u.email != '') AS has_contact"
+            "  FROM company co"
+            " WHERE co.name IS NOT NULL AND co.name != ''"
+        )
+    }
+    assert materialised == per_row
+
+    # The default sweep is exactly the rows the predicate calls uncovered.
+    default = {row["company_id"] for row in apply_repo.all_companies_for_contact(500)}
+    assert default == {c for c, has in materialised.items() if not has}
+
+    assert materialised[ids["company_id"]] == 1
+    assert materialised[ids["empty_company_id"]] == 0
+    assert materialised[objected] == 0
+    assert materialised[invalid] == 0
+    assert materialised[empty] == 0
+    assert materialised[linkedin] == 0
