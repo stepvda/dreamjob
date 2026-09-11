@@ -32,7 +32,7 @@ from dreamjob.db.connection import from_json, insert_row, update_row, utcnow
 from dreamjob.db.repositories import directives as directive_repo
 from dreamjob.db.repositories import learning as repo
 from dreamjob.llm.client import LLMClient, TruncatedResponse
-from dreamjob.pipeline.directives import DirectiveSetPayload
+from dreamjob.pipeline.directives import DirectiveSetPayload, coerce_directive_payload
 from dreamjob.postapp.segments import (
     DIMENSIONS,
     MIN_SEGMENT_TO_ADVISE,
@@ -469,4 +469,4 @@ def _patched_payload(
     marker = f"Redirected from outcome data: {headline}"
     data["notes_to_ai"] = f"{note}\n{marker}".strip() if note else marker
 
-    return DirectiveSetPayload.model_validate(data)
+    return coerce_directive_payload(data)

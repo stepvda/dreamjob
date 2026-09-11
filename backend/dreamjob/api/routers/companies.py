@@ -17,6 +17,7 @@ pass the job seeker id explicitly.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -332,7 +333,8 @@ async def refresh_profile(
             ctx.save_checkpoint(stage="competitors", competitors=len(suggested))
 
     await runner.start(job_id, worker)
-    record_audit(
+    await asyncio.to_thread(
+        record_audit,
         "company.refresh_started",
         "company",
         company_id,

@@ -275,7 +275,12 @@ def test_a_configured_channel_is_used_as_is(log_file: Path, tmp_path: Path) -> N
     channel.addHandler(shared)
     channel.setLevel(logging.INFO)
     try:
-        assert db_logging.get_db_logger().handlers == [shared]
+        files = [
+            handler
+            for handler in db_logging.get_db_logger().handlers
+            if isinstance(handler, logging.FileHandler)
+        ]
+        assert files == [shared]
         db_logging.record_migration("099", "example", 12.5)
         assert "migration applied version=099" in (tmp_path / "shared.log").read_text()
         assert len(_read(log_file)) == before  # nothing opened database.log again

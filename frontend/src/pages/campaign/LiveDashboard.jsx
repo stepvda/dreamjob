@@ -137,8 +137,17 @@ export default function LiveDashboard({ live, campaign, busy, onPause, onResume,
       />
 
       {/* FR-162, FR-166: one line per adapter, one row per distinct target
-          inside it, named by what the item's own query asked for. */}
-      <SourceList sources={live.sources} />
+          inside it, named by what the item's own query asked for.
+
+          The status poll carries only a bounded page of rows; `source_groups`
+          is the exact per-adapter shape over the whole plan, and the list
+          fetches the rest per adapter from `/campaigns/{id}/sources`. */}
+      <SourceList
+        sources={live.sources}
+        groups={live.source_groups}
+        total={live.sources_total}
+        campaignId={campaign.id}
+      />
 
       {live.jobs?.length > 1 && (
         <SectionCard icon="clock" title="Job history" phase="phase-2">

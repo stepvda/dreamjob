@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import importlib
 import inspect
 import json
@@ -108,6 +109,7 @@ from dreamjob.egress import client as egress_client
 from dreamjob.egress.client import EgressClient, FetchResult, RobotsDisallowed
 from dreamjob.jobs.runner import JobCancelled, JobContext, runner
 from dreamjob.pipeline import board_registry, knowledge_base, planning
+from dreamjob.pipeline import outcomes as outcome_rules
 
 
 def _is_ats(adapter: Any) -> bool:
@@ -2750,8 +2752,244 @@ async def resume_job(campaign_id: str, job_seeker_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def status(campaign_id: str, job_seeker_id: str) -> dict:
-    """Per-adapter progress, errors, cost and remaining time for one campaign."""
+#: How many per-source rows one status poll carries by default.  The installed
+#: database held 84,041 ``source_plan_item`` rows, and embedding one row per item
+#: made a ~7 MB response that the dashboard asked for every four seconds: 6,749
+#: calls delivered ~46 GB, 2,580 of them slower than a second.  The per-adapter
+#: aggregates below stay exact whatever page is sent, and the full list is
+#: reachable through ``sources_limit``/``sources_offset``.
+DEFAULT_SOURCES_LIMIT = 100
+#: Upper bound on a caller-requested page, so ``?sources_limit=999999999`` cannot
+#: rebuild the payload this exists to remove.
+MAX_SOURCES_LIMIT = 2000
+
+#: Longest error/reason string one per-source row carries.  A row's error is a
+#: one-line summary and a tooltip; 2,000-character stack traces are not what a
+#: status poll is for.
+SOURCE_TEXT_LIMIT = 400
+
+
+def _compact_source(item: dict, entry: dict) -> dict:
+    """One per-source row carrying only what the dashboard renders.
+
+    The plan item's raw query, ``caps`` blob and rationale stay behind: they are
+    never read from the status payload, and repeating them per row is what made
+    the response scale with the plan.  Long error text is clipped, not dropped -
+    the operator still sees the failure, at tooltip length.
+    """
+    item_caps = item.get("caps") if isinstance(item.get("caps"), dict) else {}
+    outcome = (item_caps or {}).get("outcome") or {}
+    label, label_detail = planning.plan_item_label(
+        item["adapter_key"], item.get("native_query")
+    )
+    return {
+        "plan_item_id": item["id"],
+        "adapter_key": item["adapter_key"],
+        "display_name": entry.get("display_name") or item["adapter_key"],
+        # FR-162: ``display_name`` belongs to the adapter, so a plan with 2,417
+        # Personio boards in it draws 2,417 rows all reading "Personio".
+        # ``label`` is what this particular item asked for.
+        "label": label,
+        "label_detail": outcome_rules._shorten(label_detail, SOURCE_TEXT_LIMIT),
+        # Two plan items with one target read the identical thing.  The reuse
+        # assessment leaves a 'skipped' twin beside 1,426 running items in one
+        # campaign, and no label can separate rows that are the same row - so
+        # the screen is given the key that says so instead (FR-166, FR-342).
+        "target_key": planning.target_key(item["adapter_key"], item.get("native_query")),
+        "status": item["status"],
+        # FR-185: what the source actually did, not just whether the worker
+        # reached the end of its page loop.
+        "outcome": outcome.get("state"),
+        "requests_issued": outcome.get("requests"),
+        # FR-185: how much of what it asked for was turned down, which a source
+        # that collected something used to be able to hide.
+        "requests_refused": outcome.get("refused"),
+        # FR-185: of those, what was a decision, what was a dead target and what
+        # actually failed.  The three add up to the refusals, and only the last
+        # is an error.
+        "requests_blocked": outcome.get("blocked"),
+        "requests_gone": outcome.get("gone"),
+        "outcome_state": item.get("outcome_state"),
+        "outcome_reason": outcome_rules._shorten(item.get("outcome_reason"), SOURCE_TEXT_LIMIT),
+        "blocked_count": item.get("blocked_count") or 0,
+        "gone_count": item.get("gone_count") or 0,
+        "failed_count": item.get("failed_count") or 0,
+        "records_dropped": outcome.get("dropped"),
+        "excluded_by_user": bool(item["excluded_by_user"]),
+        "records_collected": item["records_collected"],
+        "error_count": item["error_count"],
+        "last_error": outcome_rules._shorten(item.get("last_error"), SOURCE_TEXT_LIMIT),
+        "estimated_pages": item["estimated_pages"],
+        # FR-185: the two numbers the per-source bar is drawn from.  The screen
+        # used to join them from ``/plan``, which returns one page of 100 items,
+        # so 6,424 rows of a 6,524-item plan drew their bar against a guess.
+        "estimated_seconds": item["estimated_seconds"],
+        "records_per_page": (item_caps or {}).get("records_per_page"),
+        "extraction_success_rate": entry.get("extraction_success_rate"),
+        "activity_at": item.get("activity_at"),
+        "activity_kind": item.get("activity_kind"),
+    }
+
+
+def _source_row_key(source: dict) -> str:
+    """The key the per-source table collapses duplicate targets on (FR-342).
+
+    Mirrors ``SourceList.rowKey``: the fetch ledger's target key and the label
+    the reader sees.  Two rows with the same target *and* the same label are one
+    row, so the aggregate's ``targets`` is a count of what the screen draws.
+    """
+    target = source.get("target_key") or source.get("plan_item_id")
+    return f"{target}\u0000{str(source.get('label') or '').lower()}"
+
+
+def _interleave_by_adapter(sources: list[dict]) -> list[dict]:
+    """Round-robin one row per adapter, active rows first inside each.
+
+    A fixed page that simply took the plan's first N rows would name one adapter
+    and hide the other seventeen.  Interleaving keeps every adapter represented
+    in a small page; within an adapter the running and recently-active rows come
+    first, which is what a person watching a run is looking for.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for source in sources:
+        buckets.setdefault(source["adapter_key"], []).append(source)
+    for rows in buckets.values():
+        rows.sort(key=lambda s: s.get("activity_at") or "", reverse=True)
+        rows.sort(key=lambda s: 0 if s.get("status") == "running" else 1)
+    page: list[dict] = []
+    while buckets:
+        for adapter in list(buckets):
+            rows = buckets[adapter]
+            page.append(rows.pop(0))
+            if not rows:
+                del buckets[adapter]
+    return page
+
+
+def _source_groups(sources: list[dict]) -> list[dict]:
+    """Exact per-adapter aggregates, computed over *every* plan item.
+
+    The response carries a bounded page of rows, so the client cannot count the
+    groups from what it receives.  These are the numbers the group heads show -
+    plan items, distinct targets, records and the status chips - and they are
+    correct whatever page ``sources`` happens to be.
+    """
+    groups: dict[str, dict] = {}
+    for source in sources:
+        key = source["adapter_key"]
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = {
+                "adapter_key": key,
+                "display_name": source.get("display_name") or key,
+                "plan_items": 0,
+                "records": 0,
+                "counts": {},
+                "_targets": set(),
+            }
+        group["plan_items"] += 1
+        group["records"] += source.get("records_collected") or 0
+        status = source.get("status") or "planned"
+        group["counts"][status] = group["counts"].get(status, 0) + 1
+        group["_targets"].add(_source_row_key(source))
+    return [
+        {
+            "adapter_key": group["adapter_key"],
+            "display_name": group["display_name"],
+            "plan_items": group["plan_items"],
+            "targets": len(group["_targets"]),
+            "records": group["records"],
+            "counts": group["counts"],
+        }
+        for group in groups.values()
+    ]
+
+
+#: The ``job_run`` columns the dashboard renders.  ``checkpoint`` is deliberately
+#: absent: the collection worker keeps every completed plan-item id in it, which
+#: measured 159 KB for one campaign and was sent twice (as ``job`` and inside
+#: ``jobs``) on every poll.  Only the lightweight ``report`` copy the progress
+#: card reads is carried through by :func:`_compact_job`.
+_JOB_FIELDS = (
+    "id",
+    "campaign_id",
+    "job_seeker_id",
+    "kind",
+    "status",
+    "adapter_key",
+    "progress_done",
+    "progress_total",
+    "error_count",
+    "last_error",
+    "estimated_seconds",
+    "started_at",
+    "finished_at",
+    "created_at",
+)
+
+
+def _compact_job(job: dict | None) -> dict | None:
+    """A job row without its checkpoint, which is a list of every id it finished."""
+    if not job:
+        return None
+    compact = {key: job.get(key) for key in _JOB_FIELDS}
+    checkpoint = job.get("checkpoint")
+    if isinstance(checkpoint, str):
+        try:
+            checkpoint = json.loads(checkpoint)
+        except ValueError:
+            checkpoint = None
+    report = checkpoint.get("report") if isinstance(checkpoint, dict) else None
+    if report is not None:
+        compact["checkpoint"] = {"report": report}
+    return compact
+
+
+def _status_rev(campaign: dict, items: list[dict], job: dict | None) -> str:
+    """A cheap fingerprint of everything the dashboard renders (NFR-401).
+
+    The campaign row has no ``updated_at``, so the revision is built from the
+    fields that do move: the campaign's own state, the plan's size and newest
+    activity stamp, and the collection job's progress.  Two polls that see the
+    same tuple have the same dashboard, so the second can be answered ``304``.
+    """
+    last_activity = ""
+    for item in items:
+        activity = item.get("activity_at") or ""
+        if activity > last_activity:
+            last_activity = activity
+    parts = (
+        str(campaign.get("status") or ""),
+        str(campaign.get("stage") or ""),
+        str(campaign.get("started_at") or ""),
+        str(campaign.get("finished_at") or ""),
+        str(campaign.get("tokens_used") or 0),
+        str(campaign.get("cost_eur") or 0),
+        str(len(items)),
+        last_activity,
+        str((job or {}).get("progress_done") or 0),
+        str((job or {}).get("progress_total") or ""),
+        str((job or {}).get("status") or ""),
+        str((job or {}).get("finished_at") or ""),
+    )
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def status(
+    campaign_id: str,
+    job_seeker_id: str,
+    *,
+    sources_limit: int | None = None,
+    sources_offset: int = 0,
+) -> dict:
+    """Per-adapter progress, errors, cost and remaining time for one campaign.
+
+    The ledger is computed over the whole plan; the ``sources`` list is a page
+    of it (:data:`DEFAULT_SOURCES_LIMIT` rows by default) so the poll stays
+    cheap on a plan of tens of thousands of items.  ``source_groups`` carries
+    the exact per-adapter counts, and ``sources_total`` says how much is not in
+    this page.  ``rev`` is the change signal the router turns into an ETag.
+    """
     campaign = repo.get_campaign(campaign_id, job_seeker_id)
     if campaign is None:
         raise LookupError(f"No campaign {campaign_id} for this job seeker")
@@ -2759,6 +2997,10 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
     catalogue = {c["adapter_key"]: c for c in repo.list_catalogue(enabled_only=False)}
     jobs = repo.list_jobs(campaign_id)
     job = next((j for j in jobs if j["kind"] == JOB_KIND), None)
+
+    limit = DEFAULT_SOURCES_LIMIT if sources_limit is None else int(sources_limit)
+    limit = max(0, min(limit, MAX_SOURCES_LIMIT))
+    offset = max(0, int(sources_offset))
 
     sources = []
     #: NFR-403 is a property of the *adapter*, not of each plan item that used
@@ -2768,7 +3010,7 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
     #: banner that renders them buried the failure list this screen exists to
     #: show.  Keyed by adapter, so each broken adapter is named once.
     breakage: dict[str, dict] = {}
-    outcomes: dict[str, int] = {}
+    outcome_states: dict[str, int] = {}
     remaining_seconds = 0
     for item in items:
         entry = catalogue.get(item["adapter_key"], {})
@@ -2780,69 +3022,16 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
             remaining_seconds += int(item["estimated_seconds"] or 0)
         state = item.get("outcome_state") or None
         if state:
-            outcomes[str(state)] = outcomes.get(str(state), 0) + 1
-        item_caps = item.get("caps") if isinstance(item.get("caps"), dict) else {}
-        outcome = (item_caps or {}).get("outcome") or {}
-        label, label_detail = planning.plan_item_label(
-            item["adapter_key"], item.get("native_query")
-        )
-        sources.append(
-            {
-                "plan_item_id": item["id"],
-                "adapter_key": item["adapter_key"],
-                "display_name": entry.get("display_name") or item["adapter_key"],
-                # FR-162: ``display_name`` belongs to the adapter, so a plan
-                # with 2,417 Personio boards in it draws 2,417 rows all reading
-                # "Personio".  ``label`` is what this particular item asked for.
-                "label": label,
-                "label_detail": label_detail,
-                # Two plan items with one target read the identical thing.  The
-                # reuse assessment leaves a 'skipped' twin beside 1,426 running
-                # items in one campaign, and no label can separate rows that are
-                # the same row - so the screen is given the key that says so
-                # instead (FR-166, FR-342).
-                "target_key": planning.target_key(
-                    item["adapter_key"], item.get("native_query")
-                ),
-                "status": item["status"],
-                # FR-185: what the source actually did, not just whether the
-                # worker reached the end of its page loop.
-                "outcome": outcome.get("state"),
-                "requests_issued": outcome.get("requests"),
-                # FR-185: how much of what it asked for was turned down, which
-                # a source that collected something used to be able to hide.
-                "requests_refused": outcome.get("refused"),
-                # FR-185: of those, what was a decision, what was a dead target
-                # and what actually failed.  The three add up to the refusals,
-                # and only the last is an error.
-                "requests_blocked": outcome.get("blocked"),
-                "requests_gone": outcome.get("gone"),
-                "outcome_state": item.get("outcome_state"),
-                "outcome_reason": item.get("outcome_reason"),
-                "blocked_count": item.get("blocked_count") or 0,
-                "gone_count": item.get("gone_count") or 0,
-                "failed_count": item.get("failed_count") or 0,
-                "records_dropped": outcome.get("dropped"),
-                "excluded_by_user": bool(item["excluded_by_user"]),
-                "records_collected": item["records_collected"],
-                "error_count": item["error_count"],
-                "last_error": item["last_error"],
-                "estimated_pages": item["estimated_pages"],
-                # FR-185: the two numbers the per-source bar is drawn from.  The
-                # screen used to join them from ``/plan``, which returns one
-                # page of 100 items, so 6,424 rows of a 6,524-item plan drew
-                # their bar against a hard-coded guess.
-                "estimated_seconds": item["estimated_seconds"],
-                "records_per_page": (item_caps or {}).get("records_per_page"),
-                "extraction_success_rate": rate,
-            }
-        )
+            outcome_states[str(state)] = outcome_states.get(str(state), 0) + 1
+        sources.append(_compact_source(item, entry))
         if rate is not None and rate < BREAKAGE_RATE:
             breakage[item["adapter_key"]] = {
                 "adapter_key": item["adapter_key"],
                 "extraction_success_rate": rate,
             }
 
+    ordered = _interleave_by_adapter(sources)
+    page = ordered[offset : offset + limit] if limit else []
     return {
         "campaign_id": campaign_id,
         "status": campaign.get("status"),
@@ -2850,20 +3039,32 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
         "caps": Caps.from_campaign(campaign).to_dict(),
         "started_at": campaign.get("started_at"),
         "finished_at": campaign.get("finished_at"),
-        "job": job,
-        "jobs": jobs,
+        # The collection job's progress and the raw query/rationale it carries
+        # are small; the job history is bounded by ``list_jobs``'s own limit.
+        # ``checkpoint`` is stripped of its completed-id list - see _compact_job.
+        "job": _compact_job(job),
+        "jobs": [_compact_job(row) for row in jobs],
         "progress": {
             "pages_done": (job or {}).get("progress_done") or 0,
             "pages_total": (job or {}).get("progress_total"),
             "estimated_seconds_remaining": remaining_seconds,
         },
-        "sources": sources,
+        # A page of the plan, not the plan.  ``source_groups`` and
+        # ``sources_total`` carry the exact shape of what was left out.
+        "sources": page,
+        "sources_total": len(sources),
+        "sources_returned": len(page),
+        "sources_limit": limit,
+        "sources_offset": offset,
+        "sources_truncated": offset + len(page) < len(sources),
+        "source_groups": _source_groups(sources),
         # How the plan ended, counted by state.  The number an operator is
         # asked to act on is ``outcome_states['failed']``; the rest are
         # expected outcomes and are reported as such rather than as 538
-        # collection errors.  Named apart from the API layer's own richer
+        # collection errors.  Named apart from the API layer's richer
         # ``outcomes`` block, which groups the same items and adds the reasons.
-        "outcome_states": outcomes,
+        "outcome_states": outcome_states,
+        "outcomes": outcome_rules.collection_outcomes(sources, catalogue),
         "collected": repo.collected_counts(campaign_id),
         "llm": repo.llm_totals(campaign_id),
         "budget": {
@@ -2871,9 +3072,56 @@ def status(campaign_id: str, job_seeker_id: str) -> dict:
             "tokens_used": campaign.get("tokens_used"),
             "cost_eur": campaign.get("cost_eur"),
         },
-        "reuse_report": campaign.get("reuse_report"),
         "adapter_breakage": sorted(breakage.values(), key=lambda r: r["extraction_success_rate"]),
+        "rev": _status_rev(campaign, items, job),
     }
+
+
+def source_rows(
+    campaign_id: str,
+    job_seeker_id: str,
+    *,
+    adapter_key: str | None = None,
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """The full per-source list, paginated, for the dashboard's table.
+
+    The status poll sends a bounded page to stay cheap; a reader who expands an
+    adapter (or searches) fetches the rows from here.  Rows are the same compact
+    shape the status page carries, so the two cannot disagree.
+    """
+    campaign = repo.get_campaign(campaign_id, job_seeker_id)
+    if campaign is None:
+        raise LookupError(f"No campaign {campaign_id} for this job seeker")
+    catalogue = {c["adapter_key"]: c for c in repo.list_catalogue(enabled_only=False)}
+    items = repo.list_plan_items(campaign_id)
+    rows = [_compact_source(item, catalogue.get(item["adapter_key"], {})) for item in items]
+    if adapter_key:
+        rows = [row for row in rows if row["adapter_key"] == adapter_key]
+    needle = (query or "").strip().lower()
+    if needle:
+        rows = [
+            row
+            for row in rows
+            if needle
+            in f"{row.get('label') or ''} {row.get('label_detail') or ''} "
+            f"{row.get('adapter_key') or ''}".lower()
+        ]
+    limit = max(1, min(int(limit), MAX_SOURCES_LIMIT))
+    offset = max(0, int(offset))
+    page = rows[offset : offset + limit]
+    return {
+        "campaign_id": campaign_id,
+        "adapter_key": adapter_key,
+        "items": page,
+        "total": len(rows),
+        "limit": limit,
+        "offset": offset,
+        "truncated": offset + len(page) < len(rows),
+    }
+
 
 
 # ---------------------------------------------------------------------------

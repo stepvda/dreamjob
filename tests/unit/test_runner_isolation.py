@@ -58,7 +58,6 @@ from collections.abc import Iterator
 import pytest
 from dreamjob.config import get_settings
 from dreamjob.db.connection import (
-    get_connection,
     insert_row,
     query_all,
     query_one,
@@ -639,22 +638,27 @@ def test_a_transaction_may_not_be_opened_inside_another_one(db: None) -> None:
     assert query_one("SELECT COUNT(*) AS n FROM audit_event")["n"] == 0
 
 
-def test_a_stalled_writer_is_bounded_by_the_busy_timeout_times_the_queue(db: None) -> None:
-    """What ``busy_timeout=15000`` plus an in-process lock really costs.
+def test_a_stalled_writer_is_bounded_by_the_busy_timeout_times_the_queue(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a cross-process lock plus an in-process gate really costs.
 
-    ``write_tx`` takes ``_write_lock`` and only then issues ``BEGIN
-    IMMEDIATE``, so a thread that is waiting on SQLite is also holding the
-    lock every other writer in the process needs.  When the database is held
-    by something outside this process - a second uvicorn on the same file, a
-    ``sqlite3`` shell, a backup - the queue does not share one timeout: each
-    waiter pays its own in turn.
+    ``write_tx`` takes the gate and only then issues ``BEGIN IMMEDIATE``, so a
+    thread that is waiting on SQLite is also holding the gate every other
+    writer in the process needs.  When the database is held by something
+    outside this process - a second uvicorn on the same file, a ``sqlite3``
+    shell, a backup - the queue does not share one timeout: each waiter pays
+    its own budget in turn.
 
-    The timeout is shortened to 200 ms here so the shape can be measured in
-    under a second.  At the shipped 15,000 ms the same shape means a pool of
-    W writers can make the last of them wait W x 15 s, which is longer than
-    any request timeout - so the property that has to hold is that the wait is
-    bounded and the process recovers, and the pool that spends it stays small.
+    The busy timeout and the lane budget are shortened to a few hundred
+    milliseconds here so the shape can be measured in under a second.  At the
+    shipped 15 s the same shape means a pool of W writers can make the last of
+    them wait W x 15 s, which is longer than any request timeout - so the
+    property that has to hold is that the wait is bounded and the process
+    recovers, and that the pool that spends it stays small.
     """
+    from dreamjob.db import connection as connection_module
+
     settings = get_settings()
     outsider = sqlite3.connect(str(settings.abs_db_path), timeout=30.0)
     outsider.execute("PRAGMA journal_mode=WAL")
@@ -665,18 +669,23 @@ def test_a_stalled_writer_is_bounded_by_the_busy_timeout_times_the_queue(db: Non
     )
 
     short_timeout_ms = 200
+    short_budget_s = 0.5
     queue = 4
+    # Both the SQLite wait and our own retry budget are the shipped values in
+    # production; below they are the same shape, just faster to measure.
+    monkeypatch.setattr(connection_module, "BUSY_TIMEOUT_MS", short_timeout_ms)
+    monkeypatch.setattr(connection_module, "_wait_budget", lambda lane: short_budget_s)
     waits: dict[int, float] = {}
     errors: dict[int, str] = {}
 
     def writer(n: int) -> None:
-        get_connection().execute(f"PRAGMA busy_timeout={short_timeout_ms}")
         started = time.perf_counter()
         try:
             _write_one(f"queued-{n}")
-        except sqlite3.OperationalError as exc:
+        except (sqlite3.OperationalError, connection_module.WriteLockTimeout) as exc:
             errors[n] = str(exc)
-        waits[n] = (time.perf_counter() - started) * 1000
+        finally:
+            waits[n] = (time.perf_counter() - started) * 1000
 
     threads = [threading.Thread(target=writer, args=(n,)) for n in range(queue)]
     try:
@@ -693,15 +702,16 @@ def test_a_stalled_writer_is_bounded_by_the_busy_timeout_times_the_queue(db: Non
         "must not deadlock when the database is held elsewhere"
     )
     worst = max(waits.values())
-    assert worst <= queue * short_timeout_ms + 1_000, (
+    bound_ms = queue * short_budget_s * 1000
+    assert worst <= bound_ms + 1_000, (
         f"the slowest queued writer waited {worst:.0f} ms behind {queue} others, more than "
-        f"the {queue} x {short_timeout_ms} ms this arrangement can cost.  Whatever the pool "
-        f"does, one writer's wait must stay bounded by the queue times PRAGMA busy_timeout "
-        f"({BUSY_TIMEOUT_MS} ms in db/connection.py)."
+        f"the {queue} x {bound_ms:.0f} ms this arrangement can cost.  Whatever the pool "
+        f"does, one writer's wait must stay bounded by the queue times the lane budget "
+        f"({BUSY_TIMEOUT_MS} ms busy_timeout in db/connection.py)."
     )
     assert errors, (
         "every writer got through while the database was held by another connection - "
-        "the shortened busy_timeout did not take effect, so this test proved nothing"
+        "the shortened budget did not take effect, so this test proved nothing"
     )
 
     # The database is released: the process recovers and writes again.

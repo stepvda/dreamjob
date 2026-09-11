@@ -21,13 +21,19 @@
  *
  * Grouping by adapter on top of that is the same answer `plan_summary()` gives
  * on the plan screen and `CollectionOutcomes` gives above: 17 rows that expand,
- * rather than 6,524 that do not. It is also what makes the screen affordable -
- * the flat list reconciled roughly 117,000 DOM elements on every four-second
- * poll, and no amount of memoisation fixes rendering a list nobody can read.
+ * rather than 6,524 that do not.
+ *
+ * What changed with the compact status payload: the poll now carries only a
+ * bounded page of `sources`, because embedding all 84,041 rows made a ~7 MB
+ * response every four seconds. The exact counts the group heads draw come from
+ * `groups` (the server's `source_groups`, computed over the whole plan), and a
+ * group's rows are fetched from `/campaigns/{id}/sources` when it is opened -
+ * or searched server-side, so the filter still reaches rows the page omits.
  */
 
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 
+import { api } from '../../api/client'
 import { HelpTip } from '../../components/Help'
 import Icon from '../../components/Icon'
 import { Badge, JobProgress, SectionCard } from '../../components/ui'
@@ -39,6 +45,9 @@ const MAX_ROWS = 100
 
 /** One array, so a payload without sources does not rebuild the grouping memo. */
 const NONE = []
+
+/** How many rows one adapter fetch pulls for the expanded table. */
+const ADAPTER_PAGE = 500
 
 /** Status chips in a fixed order, so a group's shape does not shuffle per poll. */
 const STATUS_ORDER = ['failed', 'running', 'done', 'blocked', 'gone', 'capped', 'planned', 'skipped']
@@ -102,72 +111,156 @@ function rowKey(source) {
   return `${source.target_key}\u0000${String(source.label || '').toLowerCase()}`
 }
 
-/**
- * One row per adapter, one row per distinct target inside it.
- */
-function buildGroups(sources) {
-  const byAdapter = new Map()
-
-  for (const source of sources) {
-    const adapterKey = source.adapter_key || 'unknown'
-    let group = byAdapter.get(adapterKey)
-    if (!group) {
-      group = {
-        adapter_key: adapterKey,
-        display_name: source.display_name || adapterKey,
-        targets: new Map(),
-        records: 0,
-        planItems: 0,
-        counts: {},
-      }
-      byAdapter.set(adapterKey, group)
-    }
-
-    group.planItems += 1
-    group.records += source.records_collected || 0
-    const status = source.status || 'planned'
-    group.counts[status] = (group.counts[status] || 0) + 1
-
-    const key = rowKey(source)
-    const held = group.targets.get(key)
-    if (!held) {
-      group.targets.set(key, { key, source, items: 1 })
-    } else {
-      held.items += 1
-      if (preferred(source, held.source)) held.source = source
-    }
-  }
-
-  return [...byAdapter.values()].map((group) => ({
-    adapter_key: group.adapter_key,
-    display_name: group.display_name,
-    rows: [...group.targets.values()],
-    total: group.targets.size,
-    planItems: group.planItems,
-    records: group.records,
-    counts: group.counts,
-  }))
-}
-
 /** Everything the filter box is allowed to match on. */
 function haystack(source) {
   return `${source.label || ''} ${source.label_detail || ''} ${source.adapter_key || ''}`.toLowerCase()
 }
 
-export default function SourceList({ sources }) {
+/**
+ * Group rows by adapter, collapsing duplicate targets inside each.
+ *
+ * `aggregates` is the server's exact `source_groups` (over the whole plan) and
+ * wins for the counts; when it is absent - a search result, or a backend that
+ * predates the field - the counts are recomputed from the rows on hand, which
+ * is the old behaviour and the honest answer when nothing better is available.
+ */
+function buildGroups(rows, aggregates, extra) {
+  const byAdapter = new Map()
+  const ensure = (adapterKey, displayName, aggregate) => {
+    let group = byAdapter.get(adapterKey)
+    if (!group) {
+      group = {
+        adapter_key: adapterKey,
+        display_name: displayName || adapterKey,
+        _rows: [],
+        _aggregate: aggregate || null,
+      }
+      byAdapter.set(adapterKey, group)
+    }
+    return group
+  }
+
+  for (const aggregate of aggregates || []) {
+    ensure(aggregate.adapter_key, aggregate.display_name, aggregate)
+  }
+  for (const source of rows) {
+    const key = source.adapter_key || 'unknown'
+    ensure(key, source.display_name)._rows.push(source)
+  }
+  for (const [adapterKey, bundle] of Object.entries(extra || {})) {
+    for (const source of bundle.rows || []) {
+      ensure(adapterKey, source.display_name)._rows.push(source)
+    }
+  }
+
+  return [...byAdapter.values()].map((group) => {
+    const targets = new Map()
+    let records = 0
+    let planItems = 0
+    const counts = {}
+    for (const source of group._rows) {
+      planItems += 1
+      records += source.records_collected || 0
+      const status = source.status || 'planned'
+      counts[status] = (counts[status] || 0) + 1
+      const key = rowKey(source)
+      const held = targets.get(key)
+      if (!held) {
+        targets.set(key, { key, source, items: 1 })
+      } else {
+        held.items += 1
+        if (preferred(source, held.source)) held.source = source
+      }
+    }
+    const aggregate = group._aggregate
+    return {
+      adapter_key: group.adapter_key,
+      display_name: group.display_name,
+      rows: [...targets.values()],
+      total: aggregate ? aggregate.targets : targets.size,
+      planItems: aggregate ? aggregate.plan_items : planItems,
+      records: aggregate ? aggregate.records : records,
+      counts: aggregate ? aggregate.counts || {} : counts,
+    }
+  })
+}
+
+export default function SourceList({ sources, groups: aggregates, total, campaignId }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(() => new Set())
+  const [extra, setExtra] = useState({})
+  const [search, setSearch] = useState(null)
 
   const rows = sources || NONE
-  const groups = useMemo(() => buildGroups(rows), [rows])
-
   const needle = query.trim().toLowerCase()
+
+  // Search server-side, because the poll's page is a sample: a filter that only
+  // searched what happened to be loaded would miss the very rows it exists to
+  // find. Debounced, and only while there is something to search for.
+  useEffect(() => {
+    if (!needle || !campaignId) {
+      setSearch(null)
+      return undefined
+    }
+    let alive = true
+    const timer = setTimeout(async () => {
+      try {
+        const data = await api.get(
+          `/campaigns/${campaignId}/sources?q=${encodeURIComponent(query.trim())}&limit=200`,
+        )
+        if (alive) setSearch({ rows: data?.items || [], query: query.trim() })
+      } catch {
+        if (alive) setSearch({ rows: null, query: query.trim() })
+      }
+    }, 250)
+    return () => {
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [needle, query, campaignId])
+
+  // A different campaign has different sources and no loaded extras.
+  useEffect(() => {
+    setExtra({})
+    setSearch(null)
+    setOpen(new Set())
+  }, [campaignId])
+
+  const searching = Boolean(needle && search && search.query === query.trim())
+  const activeRows = searching ? search.rows || NONE : rows
+  const groups = useMemo(
+    () => buildGroups(activeRows, searching ? null : aggregates, searching ? null : extra),
+    [activeRows, aggregates, extra, searching],
+  )
+
+  const loadAdapter = useCallback(
+    async (adapterKey) => {
+      if (!campaignId || extra[adapterKey]?.loading || extra[adapterKey]?.loaded) return
+      setExtra((previous) => ({ ...previous, [adapterKey]: { rows: [], loading: true } }))
+      try {
+        const data = await api.get(
+          `/campaigns/${campaignId}/sources?adapter_key=${encodeURIComponent(adapterKey)}&limit=${ADAPTER_PAGE}`,
+        )
+        setExtra((previous) => ({
+          ...previous,
+          [adapterKey]: { rows: data?.items || [], loading: false, loaded: true },
+        }))
+      } catch {
+        setExtra((previous) => ({
+          ...previous,
+          [adapterKey]: { rows: [], loading: false, loaded: true },
+        }))
+      }
+    },
+    [campaignId, extra],
+  )
+
   const shown = useMemo(() => {
-    if (!needle) return groups
+    if (!needle || searching) return groups
+    // While the server search is in flight, filter what is loaded so the box
+    // feels immediate; the exact answer replaces it a moment later.
     return groups
       .map((group) => {
-        // Matching the adapter itself keeps the whole group, so that "personio"
-        // answers with every Personio board rather than with none of them.
         if (
           group.adapter_key.toLowerCase().includes(needle) ||
           group.display_name.toLowerCase().includes(needle)
@@ -178,7 +271,7 @@ export default function SourceList({ sources }) {
         return matched.length ? { ...group, rows: matched } : null
       })
       .filter(Boolean)
-  }, [groups, needle])
+  }, [groups, needle, searching])
 
   const targets = groups.reduce((sum, group) => sum + group.total, 0)
   const collapsed = groups.reduce((sum, group) => sum + (group.planItems - group.total), 0)
@@ -207,11 +300,11 @@ export default function SourceList({ sources }) {
       phase="phase-2"
       actions={
         <span className="small muted">
-          {/* This used to read "6524 adapters" over the plan-item array. Those
-              are plan items across 17 adapters; the count is taken from the
-              grouping rather than from the length of the payload. */}
+          {/* The count is the whole plan, from the server's aggregates - not the
+              sample the poll happened to carry. */}
           {num(groups.length)} {groups.length === 1 ? 'adapter' : 'adapters'} · {num(targets)}{' '}
           {targets === 1 ? 'target' : 'targets'}
+          {total > 0 ? ` · ${num(total)} plan items` : ''}
         </span>
       }
     >
@@ -241,12 +334,14 @@ export default function SourceList({ sources }) {
             key={group.adapter_key}
             group={group}
             expanded={Boolean(needle) || open.has(group.adapter_key)}
+            loading={Boolean(extra[group.adapter_key]?.loading)}
             onToggle={toggle}
+            onLoad={loadAdapter}
           />
         ))}
       </div>
 
-      {!rows.length && (
+      {!rows.length && !needle && (
         <p className="small muted" style={{ margin: 0 }}>
           No source plan items.
         </p>
@@ -265,7 +360,7 @@ export default function SourceList({ sources }) {
  * the outcomes ledger above uses, for the same reason: nobody reviews 2,417
  * boards item by item, but everybody wants to find one of them.
  */
-const SourceGroup = memo(function SourceGroup({ group, expanded, onToggle }) {
+const SourceGroup = memo(function SourceGroup({ group, expanded, loading, onToggle, onLoad }) {
   const visible = group.rows.slice(0, MAX_ROWS)
 
   return (
@@ -274,7 +369,10 @@ const SourceGroup = memo(function SourceGroup({ group, expanded, onToggle }) {
         type="button"
         className="cmp-group-head"
         aria-expanded={expanded}
-        onClick={() => onToggle(group.adapter_key)}
+        onClick={() => {
+          onToggle(group.adapter_key)
+          if (!expanded && group.rows.length < group.total) onLoad(group.adapter_key)
+        }}
       >
         <span className="dir-caret" aria-hidden>
           {expanded ? '▾' : '▸'}
@@ -302,7 +400,12 @@ const SourceGroup = memo(function SourceGroup({ group, expanded, onToggle }) {
           {visible.map((row) => (
             <SourceProgress key={row.source.plan_item_id} source={row.source} items={row.items} />
           ))}
-          {group.rows.length > MAX_ROWS && (
+          {loading && (
+            <p className="small muted" style={{ margin: 0 }}>
+              Loading the rest of this adapter…
+            </p>
+          )}
+          {!loading && group.rows.length > MAX_ROWS && (
             <p className="small muted" style={{ margin: 0 }}>
               Showing the first {num(MAX_ROWS)} of {num(group.rows.length)} targets. Use the filter
               above to reach the rest.

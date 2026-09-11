@@ -566,16 +566,25 @@ def all_companies_for_contact(
                co.domain                    AS company_domain,
                co.careers_url               AS careers_url,
                co.country                   AS company_country,
-               (SELECT COUNT(*) FROM vacancy v WHERE v.company_id = co.id)
-                                            AS vacancy_count,
-               (SELECT MAX(COALESCE(v.posted_at, v.collected_at)) FROM vacancy v
-                 WHERE v.company_id = co.id) AS latest_vacancy_at,
+               COALESCE(vac.vacancy_count, 0) AS vacancy_count,
+               vac.latest_vacancy_at        AS latest_vacancy_at,
                {seeker_rank}                AS backs_opportunity,
                CASE WHEN co.id IN (SELECT company_id FROM covered)
                     THEN 1 ELSE 0 END       AS has_contact,
                r.status                     AS resolution_status,
                r.resolved_at                AS resolved_at
           FROM company co
+          -- One grouped pass over ``vacancy`` answers both per-company
+          -- aggregates.  The correlated subqueries this replaces asked the two
+          -- questions once per company (78,875,000 steps measured on the live
+          -- corpus, 68.9 s); ``COALESCE`` keeps the no-vacancy company at 0.
+          LEFT JOIN (
+                SELECT company_id,
+                       COUNT(*)                               AS vacancy_count,
+                       MAX(COALESCE(posted_at, collected_at)) AS latest_vacancy_at
+                  FROM vacancy
+                 GROUP BY company_id
+          ) vac ON vac.company_id = co.id
           LEFT JOIN apply_contact_resolution r ON r.company_id = co.id
           {seeker_join}
          WHERE co.name IS NOT NULL AND co.name != ''{covered}

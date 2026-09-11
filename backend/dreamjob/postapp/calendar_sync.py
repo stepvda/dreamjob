@@ -40,6 +40,7 @@ by the tests.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -848,7 +849,8 @@ async def exchange_code(
 
     payload = json.loads(result.text)
     expires = datetime.now(UTC) + timedelta(seconds=int(payload.get("expires_in") or 3300))
-    account_id = repo.save_calendar_account(
+    account_id = await asyncio.to_thread(
+        repo.save_calendar_account,
         job_seeker_id,
         {
             "provider": provider,
@@ -862,7 +864,8 @@ async def exchange_code(
             "is_active": 1,
         },
     )
-    record_audit(
+    await asyncio.to_thread(
+        record_audit,
         "calendar.connected", "calendar_account", account_id, seeker_id=job_seeker_id,
         detail={"provider": provider, "scopes": payload.get("scope")},
     )
@@ -1308,7 +1311,8 @@ async def confirm(
             error = str(exc)[:500]
             log.info("Calendar entry not created, .ics written instead: %s", exc)
 
-    repo.update_appointment(
+    await asyncio.to_thread(
+        repo.update_appointment,
         appointment_id,
         {
             "chosen_start": start_dt.isoformat(timespec="seconds"),
@@ -1323,7 +1327,8 @@ async def confirm(
             "last_error": error,
         },
     )
-    record_audit(
+    await asyncio.to_thread(
+        record_audit,
         "interview.confirmed",
         "interview_appointment",
         appointment_id,

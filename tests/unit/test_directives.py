@@ -7,6 +7,7 @@ distance/commute model and the bundled catalogues.
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from dreamjob.config import get_settings
@@ -27,7 +28,11 @@ from dreamjob.pipeline.directives import (
     JobContentDirectives,
     LocationArea,
     LocationDirectives,
+    Ownership,
     Seniority,
+    SizeBand,
+    Stage,
+    Trajectory,
     WorkArrangement,
     WorkArrangementDirectives,
     allowed_source_types,
@@ -46,6 +51,7 @@ from dreamjob.pipeline.directives import (
     to_columns,
     vocabulary,
 )
+from pydantic import ValidationError
 
 BE_JOB_BOARD = {
     "adapter_key": "vdab",
@@ -232,6 +238,124 @@ def test_helpers_accept_a_database_row(discreet: DirectiveSetPayload) -> None:
     assert coerce_directive_set(row).version == 3
     assert is_excluded(row, {"name": "Acme Digital Services"})
     assert is_excluded_contact(row, {"email": "someone@acme.be"})
+
+
+# --- Legacy stored values must never 500 a read (FR-143, NFR-501) -----------
+
+
+def _legacy_row(**company_type_overrides: object) -> dict:
+    """A directive row as stored before the canonical vocabulary existed.
+
+    The observed offending values are the human size bands "50-250" and
+    ">1000"; the other groups carry label spellings too, to prove the whole
+    persisted structure is coerced and not just the field that was reported.
+    """
+    company_type: dict[str, object] = {
+        "size_bands": ["50-250", ">1000"],
+        "stages": ["Scale-up"],
+        "trajectories": ["Growing"],
+        "ownerships": ["PE-backed"],
+    }
+    company_type.update(company_type_overrides)
+    return {
+        "id": "d-legacy",
+        "job_seeker_id": "js1",
+        "name": "Legacy set",
+        "version": 2,
+        "created_at": utcnow(),
+        "job_content": json.dumps(
+            {
+                "target_titles": ["Head of Data"],
+                "seniority_min": "Senior",
+                "seniority_max": "Director",
+            }
+        ),
+        "company_type": json.dumps(company_type),
+        "location": json.dumps({"commute_mode": "Car"}),
+        "work_arrangement": json.dumps(
+            {"arrangements": ["Hybrid"], "contract_types": ["Permanent"]}
+        ),
+        "compensation": json.dumps({}),
+        "spontaneous_only": 0,
+        "discretion_mode": 0,
+        "discretion_excluded_companies": json.dumps([]),
+        "discretion_excluded_contacts": json.dumps([]),
+    }
+
+
+def test_legacy_labels_coerce_to_canonical_values() -> None:
+    result = coerce_directive_set(_legacy_row())
+    assert result.company_type.size_bands == [SizeBand.B50_250, SizeBand.GT1000]
+    assert result.company_type.stages == [Stage.SCALEUP]
+    assert result.company_type.trajectories == [Trajectory.GROWING]
+    assert result.company_type.ownerships == [Ownership.PE_BACKED]
+    assert result.job_content.seniority_min is Seniority.SENIOR
+    assert result.job_content.seniority_max is Seniority.DIRECTOR
+    assert result.work_arrangement.arrangements == [WorkArrangement.HYBRID]
+    assert result.work_arrangement.contract_types == [ContractType.PERMANENT]
+    assert result.location.commute_mode is CommuteMode.CAR
+
+
+def test_numeric_ranges_are_parsed_into_the_matching_bucket() -> None:
+    row = _legacy_row(size_bands=["10-50", "250 - 1000", "1000+", "<10"])
+    assert coerce_directive_set(row).company_type.size_bands == [
+        SizeBand.B10_50,
+        SizeBand.B250_1000,
+        SizeBand.GT1000,
+        SizeBand.LT10,
+    ]
+    # A thousands separator is read as one number, not two.
+    thousands = _legacy_row(size_bands=["1.000"])
+    assert coerce_directive_set(thousands).company_type.size_bands == [SizeBand.B250_1000]
+
+
+def test_unknown_enum_values_are_dropped_not_raised(caplog) -> None:
+    row = _legacy_row(size_bands=["50-250", "enormous"], stages=["Scale-up", "mystery"])
+    with caplog.at_level(logging.WARNING):
+        result = coerce_directive_set(row)
+    assert result.company_type.size_bands == [SizeBand.B50_250]
+    assert result.company_type.stages == [Stage.SCALEUP]
+    assert "enormous" in caplog.text
+    assert "mystery" in caplog.text
+
+
+def test_a_canonical_set_is_unchanged_by_coercion() -> None:
+    payload = DirectiveSetPayload(
+        name="Canonical",
+        job_content=JobContentDirectives(
+            seniority_min=Seniority.SENIOR, seniority_max=Seniority.DIRECTOR
+        ),
+        company_type=CompanyTypeDirectives(
+            size_bands=[SizeBand.B50_250, SizeBand.GT1000],
+            stages=[Stage.SCALEUP],
+            ownerships=[Ownership.PE_BACKED],
+        ),
+        work_arrangement=WorkArrangementDirectives(
+            arrangements=[WorkArrangement.HYBRID], contract_types=[ContractType.PERMANENT]
+        ),
+    )
+    result = coerce_directive_set(_as_row(payload))
+    assert result.model_dump(exclude={"id", "job_seeker_id", "version", "created_at"}) == (
+        payload.model_dump()
+    )
+
+
+def test_structural_errors_still_raise() -> None:
+    row = _legacy_row()
+    row["company_type"] = json.dumps({"size_bands": "50-250"})  # a scalar, not a list
+    with pytest.raises(ValidationError):
+        coerce_directive_set(row)
+
+
+def test_export_shaped_payload_with_legacy_bands_does_not_raise() -> None:
+    """The exact shape that 500'd the networking export: a stale stored row."""
+    row = _legacy_row()
+    row["discretion_mode"] = 1
+    row["discretion_excluded_companies"] = json.dumps(
+        [{"name": "Acme NV", "reason": "Current employer"}]
+    )
+    assert exclusion_reason(row, {"name": "Acme NV"}) == "current_employer"
+    assert coerce_directive_set(row).company_type.size_bands == [SizeBand.B50_250, SizeBand.GT1000]
 
 
 # --- FR-149: spontaneous applications ---------------------------------------

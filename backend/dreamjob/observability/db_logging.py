@@ -150,14 +150,16 @@ def _log_path() -> Path:
 
 
 def _channel_configured(log: logging.Logger) -> bool:
-    """Has something already given the database channel its own destination?
+    """Has something already given the database channel its own file?
 
     Handlers on the logger itself, not on its ancestors: ``setup_logging()``
     attaches database.log directly to this logger, while whatever happens to be
     on the root - a test runner's capture handler, for instance - is not a home
-    for database evidence.
+    for database evidence.  Only a *file* handler counts: a capture handler is a
+    legitimate thing to have on the logger, but it keeps nothing, and counting
+    it stopped the fallback file from attaching after the first test in a file.
     """
-    return bool(log.handlers)
+    return any(isinstance(handler, logging.FileHandler) for handler in log.handlers)
 
 
 def _attach_fallback(log: logging.Logger) -> None:

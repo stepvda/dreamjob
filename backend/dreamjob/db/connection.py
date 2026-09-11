@@ -95,6 +95,26 @@ BULK = "bulk"
 INTERACTIVE_WAIT_SECONDS = 15.0
 BULK_WAIT_SECONDS = 600.0
 
+#: How long SQLite itself waits for a database held by another *process*.
+#: This is the budget a single ``BEGIN IMMEDIATE`` spends before it reports
+#: ``database is locked``; the retry loop below then spends what is left of the
+#: lane budget.  Kept as a module constant so the suite can prove the retry by
+#: shortening it rather than by mutating a live connection behind the API.
+BUSY_TIMEOUT_MS = 15_000
+
+#: ``BEGIN IMMEDIATE`` lock-retry backoff.  SQLite's busy handler already waits
+#: ``BUSY_TIMEOUT_MS``; this covers the ``SQLITE_BUSY`` it returns without
+#: consulting the handler - a lock that changed hands, or a connection whose
+#: timeout was shortened under it.  Retries run until the lane's budget is
+#: spent, so a transient lock costs a retry and not the write.
+LOCK_RETRY_INITIAL_MS = 25.0
+LOCK_RETRY_MAX_MS = 500.0
+
+#: Memory map for reads (NFR-101).  The knowledge base is read far more than it
+#: is written and a mapped read avoids a page copy; 256 MiB covers the hot
+#: indexes without reserving address space the process cannot use.
+MMAP_SIZE_BYTES = 256 * 1024 * 1024
+
 #: Consecutive interactive grants before a queued bulk writer is let through.
 _BULK_RELIEF_EVERY = 8
 
@@ -286,10 +306,85 @@ def _configure(conn: sqlite3.Connection) -> None:
     # How long SQLite itself waits for a database held by another *process*.
     # The in-process gate above is what stops threads of this process from
     # queueing on it; this is for the second uvicorn, the script, the shell.
-    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA synchronous=NORMAL")
     # 64 MB page cache; the knowledge base is read-heavy (NFR-101).
     conn.execute("PRAGMA cache_size=-64000")
+    # Memory-mapped reads (NFR-101).  Reads dominate writes, and a mapped read
+    # avoids copying each page through the page cache.
+    conn.execute(f"PRAGMA mmap_size={MMAP_SIZE_BYTES}")
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """True for SQLite's two "somebody else has the writer" errors."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _ensure_write_pragmas(conn: sqlite3.Connection) -> None:
+    """Re-assert the pragmas a writer depends on before it takes the lock.
+
+    ``busy_timeout`` is per-connection and mutable at run time; anything that
+    shortens it - the lock tests, a script, an older helper - makes the next
+    writer give up in a fraction of the configured budget, which is exactly
+    how 296 audit inserts failed in under a second while the configured value
+    was 15 s.  Reading the pragma costs a few microseconds and turns a dropped
+    write into a wait.
+    """
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+        current = int(row[0]) if row is not None else 0
+    except sqlite3.Error:  # pragma: no cover - a closed connection fails later anyway
+        return
+    if current != BUSY_TIMEOUT_MS:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    # WAL is persistent, but a connection opened against a copy that was not
+    # yet in WAL (or switched underneath us) would serialise readers too.
+    try:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()
+        if mode is not None and str(mode[0]).lower() != "wal":
+            conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error:  # pragma: no cover - the begin below will surface it
+        pass
+
+
+def _begin_immediate(conn: sqlite3.Connection, budget: float, lane: str) -> None:
+    """``BEGIN IMMEDIATE``, retrying a lock until ``budget`` seconds are spent.
+
+    SQLite's busy handler already waits ``BUSY_TIMEOUT_MS`` for us, and the
+    in-process gate keeps this process's writers apart.  What is left is the
+    ``SQLITE_BUSY`` SQLite returns *without* consulting the handler - a
+    deadlock it will not resolve by waiting, or a timeout shortened under the
+    connection.  Those are retried with exponential backoff so that a brief
+    lock costs a retry; a lock that outlives the lane's budget still fails,
+    and still says so.
+    """
+    deadline = time.monotonic() + budget
+    delay = LOCK_RETRY_INITIAL_MS / 1000.0
+    attempt = 0
+    while True:
+        _ensure_write_pragmas(conn)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_lock_error(exc):
+                # Includes "cannot start a transaction within a transaction":
+                # a nested write is a defect, not contention, and is not retried.
+                raise
+            attempt += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            sleep_for = min(delay, remaining)
+            log.warning(
+                "write lock retry lane=%s attempt=%d wait_ms=%.0f remaining_ms=%.0f error=%s",
+                lane, attempt, sleep_for * 1000.0, remaining * 1000.0, exc,
+            )
+            time.sleep(sleep_for)
+            delay = min(delay * 2.0, LOCK_RETRY_MAX_MS / 1000.0)
 
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
@@ -299,7 +394,9 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn = getattr(_local, key, None)
     if conn is None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(path), check_same_thread=False, timeout=15.0)
+        conn = sqlite3.connect(
+            str(path), check_same_thread=False, timeout=BUSY_TIMEOUT_MS / 1000.0
+        )
         _configure(conn)
         # NFR-701: statement visibility.  No-op unless DREAMJOB_LOG_SQL is on.
         db_logging.attach(conn)
@@ -394,7 +491,10 @@ def write_tx(
         raise
     try:
         try:
-            conn.execute("BEGIN IMMEDIATE")
+            # Retry a cross-process lock for the whole lane budget with
+            # backoff, rather than letting SQLite's first "database is
+            # locked" end the write.
+            _begin_immediate(conn, budget, lane)
             # Both halves of the wait, separately: ``gate`` is this process
             # queueing behind its own writers, ``begin`` is SQLite waiting for
             # somebody else's.  Reporting one number for the two is how a

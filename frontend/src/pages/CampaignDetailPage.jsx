@@ -16,7 +16,7 @@
  *           persisted, without repeating the whole campaign.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { api } from '../api/client'
@@ -36,6 +36,11 @@ const POLL_MS = 4000
 export default function CampaignDetailPage() {
   const { id } = useParams()
 
+  // The status endpoint is conditional: `since=<rev>` says nothing the
+  // dashboard renders has changed, so a quiet poll costs a few bytes instead of
+  // the page of sources (the plan can hold tens of thousands of items).
+  const revRef = useRef('')
+
   const { data, error, loading, reload, setData } = useFetch(async () => {
     const [campaign, plan, live, stages, ack] = await Promise.all([
       api.get(`/campaigns/${id}`),
@@ -45,6 +50,7 @@ export default function CampaignDetailPage() {
       // CR-401 lives on the browser screen; this page only reads and records it.
       api.get('/browser/acknowledgement').catch(() => null),
     ])
+    revRef.current = live?.rev || ''
     return { campaign, plan, live, stages: stages || [], ack }
   }, [id])
 
@@ -74,6 +80,12 @@ export default function CampaignDetailPage() {
     !running && status !== 'paused' && doneSoFar > 0 &&
     ['pending', 'paused', 'running'].includes(String(job?.status ?? status))
 
+  // A different campaign is a different revision; a stale `since` would ask the
+  // new endpoint about the old one's state.
+  useEffect(() => {
+    revRef.current = ''
+  }, [id])
+
   // FR-361: poll only while there is something moving, and stop the moment it
   // stops - a completed campaign that keeps polling is just wasted requests.
   useEffect(() => {
@@ -81,8 +93,15 @@ export default function CampaignDetailPage() {
     let alive = true
     const timer = setInterval(async () => {
       try {
-        const next = await api.get(`/campaigns/${id}/status`)
-        if (alive) setData((d) => (d ? { ...d, live: next } : d))
+        // Conditional poll: the server answers `unchanged` (or 304) when the
+        // revision has not moved, so a quiet tick costs almost nothing.
+        const since = revRef.current
+        const query = since ? `?since=${encodeURIComponent(since)}` : ''
+        const next = await api.get(`/campaigns/${id}/status${query}`)
+        if (!alive) return
+        if (next?.unchanged) return
+        revRef.current = next?.rev || revRef.current
+        setData((d) => (d ? { ...d, live: next } : d))
       } catch {
         // A dropped poll is not an error state; the next tick retries.
       }
@@ -101,6 +120,7 @@ export default function CampaignDetailPage() {
       api.get(`/campaigns/${id}/plan`),
       api.get(`/campaigns/${id}/status`),
     ])
+    revRef.current = nextLive?.rev || revRef.current
     setData((d) => ({ ...d, campaign: nextCampaign, plan: nextPlan, live: nextLive }))
   }
 

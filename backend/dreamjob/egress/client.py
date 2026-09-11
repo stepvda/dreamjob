@@ -420,7 +420,11 @@ class EgressClient:
         if domain in self._robots:
             return self._robots[domain]
 
-        cached = query_one("SELECT body, expires_at FROM robots_cache WHERE domain = ?", (domain,))
+        cached = await asyncio.to_thread(
+            query_one,
+            "SELECT body, expires_at FROM robots_cache WHERE domain = ?",
+            (domain,),
+        )
         if cached and cached["expires_at"] > utcnow():
             if cached["body"] is None:
                 # A previous attempt could not read the rules and the retry
@@ -430,7 +434,8 @@ class EgressClient:
             return self._memoise_robots(domain, cached["body"])
 
         body, ttl, reason = await self._read_robots(parsed.scheme, domain)
-        upsert_row(
+        await asyncio.to_thread(
+            upsert_row,
             "robots_cache",
             {
                 "domain": domain,

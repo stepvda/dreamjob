@@ -12,6 +12,7 @@ swallowed by the id route.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
@@ -248,8 +249,9 @@ async def rebuild(
                 u for u in proposal.unresolved if u != "location.areas[0].coordinates"
             ]
 
-    saved = repo.create(seeker.id, proposal.directives)
-    record_audit(
+    saved = await asyncio.to_thread(repo.create, seeker.id, proposal.directives)
+    await asyncio.to_thread(
+        record_audit,
         "directives.rebuilt",
         "directive_set",
         saved,

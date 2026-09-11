@@ -26,6 +26,7 @@ would profile somebody else's company under this one's name.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -244,7 +245,8 @@ async def backfill(
         params.extend(company_ids)
     params.append(int(limit))
 
-    rows = query_all(
+    rows = await asyncio.to_thread(
+        query_all,
         f"""
         SELECT c.id, c.name, c.domain, c.ats_vendor, c.ats_slug, c.source,
                (SELECT v.source_url FROM vacancy v
@@ -266,13 +268,15 @@ async def backfill(
             urls = [u for u in (row.get("url1"), row.get("url2"), row.get("source")) if u]
             host = await resolve_company(row, urls, egress or client)
             if host:
-                update_row("company", row["id"], {"domain": host, "refreshed_at": utcnow()})
+                await asyncio.to_thread(
+                    update_row, "company", row["id"], {"domain": host, "refreshed_at": utcnow()}
+                )
                 resolved += 1
                 continue
             # No site: record the board so the crawl has somewhere to start.
             board = board_url(row)
             if board:
-                update_row("company", row["id"], {"careers_url": board})
+                await asyncio.to_thread(update_row, "company", row["id"], {"careers_url": board})
                 boards += 1
     log.info("Domain backfill: %d resolved, %d given a board", resolved, boards)
     return {"considered": len(rows), "resolved": resolved, "board_only": boards}

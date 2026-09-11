@@ -257,7 +257,8 @@ async def resolve_batch(seeker: Seeker, body: BatchRequest | None = None) -> dic
         run_id = run_repo.start_run(
             job_run_id=job_id, job_seeker_id=seeker.id, requested=len(queue)
         )
-        record_audit(
+        await asyncio.to_thread(
+            record_audit,
             "employer_kind.batch_started",
             "job_run",
             job_id,
@@ -291,7 +292,8 @@ async def resolve_batch(seeker: Seeker, body: BatchRequest | None = None) -> dic
     )
     payload = report.as_dict()
     run_repo.finish_run(run_id, payload, status=payload.get("status") or "done")
-    record_audit(
+    await asyncio.to_thread(
+        record_audit,
         "employer_kind.batch_completed",
         "employer_resolve_run",
         run_id,
@@ -337,7 +339,8 @@ async def resolve_one(
         )
     except KeyError as exc:  # the company vanished between the two reads
         raise HTTPException(status.HTTP_404_NOT_FOUND, "company not found") from exc
-    record_audit(
+    await asyncio.to_thread(
+        record_audit,
         "employer_kind.resolved",
         "company",
         company_id,

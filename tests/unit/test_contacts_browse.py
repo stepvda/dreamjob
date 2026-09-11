@@ -208,6 +208,80 @@ def _add_contact(
     return contact_id
 
 
+def _vacancy(
+    company_id: str,
+    *,
+    posted_at: str | None = None,
+    collected_at: str | None = None,
+    title: str = "Role",
+) -> str:
+    return insert_row(
+        "vacancy",
+        {
+            "company_id": company_id,
+            "title": title,
+            "country": "BE",
+            "posted_at": posted_at,
+            "collected_at": collected_at or utcnow(),
+        },
+    )
+
+
+def _company(name: str) -> str:
+    return insert_row(
+        "company",
+        {
+            "name": name,
+            "normalised_name": name.lower(),
+            "country": "BE",
+            "collected_at": utcnow(),
+        },
+    )
+
+
+def _correlated_all_companies(limit: int) -> list[dict]:
+    """The pre-152 correlated form, kept as the equivalence oracle.
+
+    ``all_companies_for_contact`` now folds the two per-company aggregates into
+    one grouped ``LEFT JOIN``; this is the query it replaced, run against the
+    same database so the rewrite can be checked row for row rather than by
+    reading the two SQL strings side by side.
+    """
+    return query_all(
+        """
+        WITH covered AS MATERIALIZED (
+            SELECT DISTINCT u.company_id
+              FROM usable_contact u
+             WHERE u.email IS NOT NULL AND u.email != ''
+               AND u.company_id IS NOT NULL
+        )
+        SELECT co.id                        AS company_id,
+               co.name                      AS company_name,
+               co.domain                    AS company_domain,
+               co.careers_url               AS careers_url,
+               co.country                   AS company_country,
+               (SELECT COUNT(*) FROM vacancy v WHERE v.company_id = co.id)
+                                            AS vacancy_count,
+               (SELECT MAX(COALESCE(v.posted_at, v.collected_at)) FROM vacancy v
+                 WHERE v.company_id = co.id) AS latest_vacancy_at,
+               0                            AS backs_opportunity,
+               CASE WHEN co.id IN (SELECT company_id FROM covered)
+                    THEN 1 ELSE 0 END       AS has_contact,
+               r.status                     AS resolution_status,
+               r.resolved_at                AS resolved_at
+          FROM company co
+          LEFT JOIN apply_contact_resolution r ON r.company_id = co.id
+         WHERE co.name IS NOT NULL AND co.name != ''
+           AND co.id NOT IN (SELECT company_id FROM covered)
+         GROUP BY co.id
+         ORDER BY has_contact ASC, (r.resolved_at IS NULL) DESC, vacancy_count DESC,
+                  latest_vacancy_at DESC, COALESCE(co.name, '') COLLATE NOCASE ASC
+         LIMIT ?
+        """,
+        (limit,),
+    )
+
+
 # ---------------------------------------------------------------------------
 # FR-303 / FR-304: uncertainty is a stored property
 # ---------------------------------------------------------------------------
@@ -630,6 +704,34 @@ def test_all_companies_for_contact_keeps_a_resolved_but_unreachable_company() ->
     assert ids["company_id"] in by_id
     assert by_id[ids["company_id"]]["resolution_status"] == "unreachable"
     assert by_id[ids["company_id"]]["has_contact"] == 0
+
+
+def test_all_companies_for_contact_matches_the_correlated_form() -> None:
+    """The single grouped pass answers exactly what the per-company subqueries did.
+
+    Seeded with a company that has no vacancy, one whose newest date comes from
+    a posting with ``posted_at`` null (so ``COALESCE`` has to fall through to
+    ``collected_at``), and a third with two postings, so both aggregates and the
+    ordering that reads them are exercised.
+    """
+    ids = _seed()
+    _vacancy(ids["company_id"], posted_at=None, collected_at="2026-01-03T00:00:00+00:00")
+    _vacancy(ids["company_id"], posted_at="2026-01-01T00:00:00+00:00",
+             collected_at="2026-01-01T00:00:00+00:00")
+    _vacancy(ids["company_id"], posted_at="2026-02-01T00:00:00+00:00",
+             collected_at="2026-02-01T00:00:00+00:00")
+    third = _company("Third Company BV")
+    _vacancy(third, posted_at="2026-03-01T00:00:00+00:00",
+             collected_at="2026-03-01T00:00:00+00:00")
+    _vacancy(third, posted_at=None, collected_at="2025-12-01T00:00:00+00:00")
+
+    rewritten = apply_repo.all_companies_for_contact(50)
+    correlated = _correlated_all_companies(50)
+
+    assert [row["company_id"] for row in rewritten] == [
+        row["company_id"] for row in correlated
+    ]
+    assert rewritten == correlated
 
 
 def test_scope_all_visits_every_company_without_early_stop(

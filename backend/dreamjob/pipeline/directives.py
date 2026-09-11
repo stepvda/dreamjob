@@ -31,7 +31,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -413,17 +413,224 @@ _JSON_COLUMNS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Legacy-value coercion (FR-143, NFR-501)
+# ---------------------------------------------------------------------------
+#
+# Directive sets predate the canonical vocabulary: a size band stored as the
+# human form "50-250" or ">1000" raises a Pydantic error the moment any slice
+# reads the row, which turned one stale set into a 500 on export.  Every
+# enum-shaped value therefore passes through :func:`_coerce_enum_value` before
+# validation.  A known label or spelling maps to the canonical member; a
+# numeric band string is parsed into the bucket it describes; anything else is
+# dropped with a warning instead of raising.  Structural errors are untouched
+# and still reach Pydantic.
+
+_ENUM_LIST_FIELDS: dict[str, dict[str, type[StrEnum]]] = {
+    "company_type": {
+        "size_bands": SizeBand,
+        "stages": Stage,
+        "trajectories": Trajectory,
+        "ownerships": Ownership,
+    },
+    "work_arrangement": {
+        "arrangements": WorkArrangement,
+        "employment_types": EmploymentType,
+        "contract_types": ContractType,
+    },
+}
+
+_ENUM_SCALAR_FIELDS: dict[str, dict[str, type[StrEnum]]] = {
+    "job_content": {
+        "seniority_min": Seniority,
+        "seniority_max": Seniority,
+        "management_scope": ManagementScope,
+    },
+    "work_arrangement": {"travel_tolerance": TravelTolerance},
+    "location": {"commute_mode": CommuteMode},
+    "compensation": {
+        "period": CompensationPeriod,
+        "equity_treatment": PayComponentTreatment,
+        "variable_treatment": PayComponentTreatment,
+    },
+}
+
+_ENUM_REASON_FIELDS: dict[str, type[StrEnum]] = {
+    "discretion_excluded_companies": CompanyExclusionReason,
+    "discretion_excluded_contacts": ContactExclusionReason,
+}
+
+_ENUM_LABEL_GROUPS: dict[type[StrEnum], tuple[str, ...]] = {
+    SizeBand: ("size_band",),
+    Stage: ("stage",),
+    Trajectory: ("trajectory",),
+    Ownership: ("ownership",),
+    Seniority: ("seniority",),
+    ManagementScope: ("management_scope",),
+    WorkArrangement: ("work_arrangement",),
+    EmploymentType: ("employment_type",),
+    ContractType: ("contract_type",),
+    TravelTolerance: ("travel_tolerance",),
+    CommuteMode: ("commute_mode",),
+    PayComponentTreatment: ("pay_component_treatment",),
+    CompensationPeriod: ("compensation_period",),
+    CompanyExclusionReason: ("company_exclusion_reason",),
+    ContactExclusionReason: ("contact_exclusion_reason",),
+}
+
+_RANGE_NUM_RE = re.compile(r"\d[\d.,]*")
+_MORE_THAN_RE = re.compile(
+    r"(?:>|≥|>=|\+|more than|over|above|meer dan|plus de)", re.IGNORECASE
+)
+_LESS_THAN_RE = re.compile(
+    r"(?:<|≤|<=|fewer than|less than|under|minder dan|moins de)", re.IGNORECASE
+)
+
+
+def _size_band_from_text(text: str) -> SizeBand | None:
+    """The FR-143 band a human range describes, e.g. ``"50-250"`` or ``">1000"``."""
+    numbers = [int(re.sub(r"[.,]", "", n)) for n in _RANGE_NUM_RE.findall(text)]
+    if not numbers:
+        return None
+    if len(numbers) == 1:
+        if _MORE_THAN_RE.search(text):
+            return size_band_for_fte(numbers[0] + 1)
+        if _LESS_THAN_RE.search(text):
+            return size_band_for_fte(max(0, numbers[0] - 1))
+        return size_band_for_fte(numbers[0])
+    # Adjacent bands share their boundary value ("10 to 50" vs "50 to 250"),
+    # so the upper bound is what identifies the bucket a range names.
+    return size_band_for_fte(max(numbers))
+
+
+@cache
+def _enum_aliases(enum_cls: type[StrEnum]) -> dict[str, str]:
+    """Every label or spelling known to mean one of ``enum_cls``'s members."""
+    aliases: dict[str, str] = {}
+    for member in enum_cls:
+        for spelling in (member.value, _fold(member.value)):
+            if spelling:
+                aliases.setdefault(spelling, member.value)
+    try:
+        groups = label_catalogue().get("groups", {})
+    except (OSError, KeyError, ValueError):  # pragma: no cover - bundled file
+        groups = {}
+    for group in _ENUM_LABEL_GROUPS.get(enum_cls, ()):
+        for option in groups.get(group, []):
+            key = option.get("key")
+            if key not in enum_cls._value2member_map_:
+                continue
+            for label in (option.get("labels") or {}).values():
+                folded = _fold(str(label))
+                if folded:
+                    aliases.setdefault(folded, key)
+    return aliases
+
+
+def _coerce_enum_value(value: Any, enum_cls: type[StrEnum]) -> str | None:
+    """Canonical value for a stored enum, or ``None`` when it cannot be mapped."""
+    if isinstance(value, enum_cls):
+        return value.value
+    if enum_cls is SizeBand and not isinstance(value, bool):
+        if isinstance(value, (int, float)):
+            band = size_band_for_fte(value)
+            return band.value if band else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.lower() in enum_cls._value2member_map_:
+        return text.lower()
+    mapped = _enum_aliases(enum_cls).get(_fold(text))
+    if mapped is not None:
+        return mapped
+    if enum_cls is SizeBand:
+        band = _size_band_from_text(text)
+        if band is not None:
+            return band.value
+    return None
+
+
+def _normalise_enum_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Map legacy enum values to canonical ones, dropping what cannot be mapped.
+
+    The input's nested blocks are copied before they are changed, so the
+    caller's stored row is never mutated.
+    """
+    for group, fields in _ENUM_LIST_FIELDS.items():
+        block = data.get(group)
+        if not isinstance(block, Mapping):
+            continue
+        block = dict(block)
+        for field, enum_cls in fields.items():
+            values = block.get(field)
+            if field not in block or not isinstance(values, list):
+                continue
+            kept: list[str] = []
+            for item in values:
+                mapped = _coerce_enum_value(item, enum_cls)
+                if mapped is None:
+                    log.warning("Dropping unrecognised %s.%s value %r", group, field, item)
+                    continue
+                if mapped not in kept:
+                    kept.append(mapped)
+            block[field] = kept
+        data[group] = block
+
+    for group, fields in _ENUM_SCALAR_FIELDS.items():
+        block = data.get(group)
+        if not isinstance(block, Mapping):
+            continue
+        block = dict(block)
+        for field, enum_cls in fields.items():
+            raw = block.get(field)
+            if field not in block or raw is None:
+                continue
+            mapped = _coerce_enum_value(raw, enum_cls)
+            if mapped is None:
+                log.warning("Dropping unrecognised %s.%s value %r", group, field, raw)
+                block.pop(field, None)
+            else:
+                block[field] = mapped
+        data[group] = block
+
+    for column, enum_cls in _ENUM_REASON_FIELDS.items():
+        entries = data.get(column)
+        if not isinstance(entries, list):
+            continue
+        normalised: list[Any] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                normalised.append(entry)
+                continue
+            entry = dict(entry)
+            raw = entry.get("reason")
+            if raw is not None:
+                mapped = _coerce_enum_value(raw, enum_cls)
+                if mapped is None:
+                    log.warning("Dropping unrecognised %s.reason value %r", column, raw)
+                    entry.pop("reason", None)
+                else:
+                    entry["reason"] = mapped
+            normalised.append(entry)
+        data[column] = normalised
+    return data
+
+
 def coerce_directive_set(value: DirectiveSetLike) -> DirectiveSet:
     """Accept a model, a plain dict, or a ``directive_set`` database row.
 
     Repository rows keep the five groups as JSON text and the flags as
     integers, so every cross-slice helper starts by normalising through here
-    and callers never have to care which shape they hold.
+    and callers never have to care which shape they hold.  Legacy enum labels
+    are mapped to their canonical values (and unmappable ones dropped) so a
+    stale stored set can never fail validation.
     """
     if isinstance(value, DirectiveSet):
         return value
     if isinstance(value, DirectiveSetPayload):
-        return DirectiveSet.model_validate(value.model_dump())
+        return DirectiveSet.model_validate(_normalise_enum_fields(value.model_dump()))
     if isinstance(value, Mapping):
         data = dict(value)
         for column in _JSON_COLUMNS:
@@ -433,8 +640,18 @@ def coerce_directive_set(value: DirectiveSetLike) -> DirectiveSet:
         for flag in ("spontaneous_only", "discretion_mode"):
             if flag in data:
                 data[flag] = bool(data[flag])
-        return DirectiveSet.model_validate(data)
+        return DirectiveSet.model_validate(_normalise_enum_fields(data))
     raise TypeError(f"Cannot read directives from {type(value).__name__}")
+
+
+def coerce_directive_payload(value: DirectiveSetLike) -> DirectiveSetPayload:
+    """The write model behind :func:`coerce_directive_set` (FR-148).
+
+    Callers that build or patch a directive set from stored row data need the
+    same legacy-value normalisation the read path gets, without the
+    id/version/created_at columns.
+    """
+    return DirectiveSetPayload.model_validate(coerce_directive_set(value).model_dump())
 
 
 def to_columns(payload: DirectiveSetPayload) -> dict[str, Any]:

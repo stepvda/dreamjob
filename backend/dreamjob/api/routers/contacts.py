@@ -407,7 +407,8 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
     work = body.limit if body.scope == "shortlist" else min(
         body.limit, body.max_companies or body.limit
     )
-    job_id = runner.create(
+    job_id = await asyncio.to_thread(
+        runner.create,
         scale_pipeline.DISCOVERY_JOB_KIND,
         job_seeker_id=seeker.id,
         campaign_id=body.campaign_id,
@@ -415,7 +416,9 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
         # A ladder step budgets about eight seconds per company (FR-182 pacing).
         estimated_seconds=max(60, min(work, 1000) * 8),
     )
-    update_row("job_run", job_id, {"checkpoint": to_json({"options": options})})
+    await asyncio.to_thread(
+        update_row, "job_run", job_id, {"checkpoint": to_json({"options": options})}
+    )
     await runner.start(job_id)
     return {
         "job_id": job_id,
@@ -718,13 +721,16 @@ async def start_emails_backfill(body: BackfillRequest, seeker: Seeker) -> dict[s
             "reused": True,
         }
     options = body.model_dump()
-    job_id = runner.create(
+    job_id = await asyncio.to_thread(
+        runner.create,
         backfill.BACKFILL_JOB_KIND,
         job_seeker_id=seeker.id,
         total=1,
         estimated_seconds=max(60, min(body.limit, 1000) * 2),
     )
-    update_row("job_run", job_id, {"checkpoint": to_json({"options": options})})
+    await asyncio.to_thread(
+        update_row, "job_run", job_id, {"checkpoint": to_json({"options": options})}
+    )
     await runner.start(job_id)
     return {
         "job_id": job_id,
