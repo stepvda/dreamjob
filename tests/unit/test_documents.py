@@ -530,6 +530,67 @@ def test_judge_does_not_read_a_skill_headline_as_an_invented_name() -> None:
     )
 
 
+def test_a_generator_evidence_path_is_not_a_leaked_domain() -> None:
+    """NFR-206: "company.name 'Acme NV'" is provenance, not a leaked host.
+
+    ``company.name`` ends in a real TLD, so the domain scan read the citation as
+    a leak and hard-blocked the package with no override.
+    """
+    from dreamjob.documents.consistency import build_provenance, is_internal_path, scan_leakage
+
+    assert is_internal_path("company.name")
+    assert is_internal_path("opening.description")
+    assert is_internal_path("employer_kind.verdict")
+    assert is_internal_path("dream_fit_detail.unknown")
+    assert not is_internal_path("acme.com")
+
+    provenance = build_provenance({"profile_version": {"sections": {}}, "seeker": {}})
+    findings = scan_leakage(
+        {"motivation": "Fit: company.name 'The Stepstone Group Belgium NV'."}, provenance
+    )
+    assert not [f for f in findings if f.kind == "leak_domain"]
+
+
+def test_a_field_path_is_not_written_into_the_document() -> None:
+    """A reader must not be shown the generator's own keys (FR-322 quality)."""
+    from dreamjob.documents.motivation import _human_evidence
+
+    rendered = _human_evidence(
+        "company.name 'The Stepstone Group Belgium NV'; dream_fit_detail.unknown: x; "
+        "employer_kind.verdict"
+    )
+    assert "company.name" not in rendered
+    assert "dream_fit_detail" not in rendered
+    assert "employer_kind" not in rendered
+    assert "The Stepstone Group Belgium NV" in rendered
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "België", "Nederlands", "ERP-ervaring", "SAP-functionaliteit",
+        "ERP-implementatie", "Document Management-oplossingen", "AI-analyselaag",
+        "ECM-businessunit", "HR-technologieportefeuille", "ERP-kennis",
+    ],
+)
+def test_ordinary_capitalised_terms_are_not_leaks(phrase: str) -> None:
+    """NFR-206 noise: a Dutch/technical word is not leaked material.
+
+    The scan reported "België", "Nederlands" and "ERP-ervaring" as untraceable,
+    burying the findings that matter.
+    """
+    from dreamjob.documents.consistency import _is_generic_entity
+
+    assert _is_generic_entity(phrase)
+
+
+@pytest.mark.parametrize("phrase", ["Globex International", "Acme NV", "Jan Peeters"])
+def test_a_distinctive_name_is_still_a_leak(phrase: str) -> None:
+    from dreamjob.documents.consistency import _is_generic_entity
+
+    assert not _is_generic_entity(phrase)
+
+
 def test_judge_escalation_honours_german_noun_capitalisation() -> None:
     """FR-322: in German, a capitalised word is a noun, not a name.
 

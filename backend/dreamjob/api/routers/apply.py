@@ -648,6 +648,45 @@ def send_all(payload: SendAllIn, seeker: CurrentSeeker = Depends(current_seeker)
 # ---------------------------------------------------------------------------
 
 
+def _recipient_advisories(row: dict) -> list[dict[str, str]]:
+    """Non-blocking warnings about the chosen recipient (FR-304, NFR-305).
+
+    A generic careers mailbox is a legitimate last-resort target, but applying
+    there is slower and may never reach a person.  Saying so before Send is the
+    difference between an informed decision and a silent one.
+    """
+    out: list[dict[str, str]] = []
+    if row.get("contact_is_generic"):
+        out.append(
+            {
+                "kind": "generic_mailbox",
+                "detail": (
+                    "This is the employer's general careers mailbox rather than a named "
+                    "person: replies are slower, and the address is a pattern guess."
+                ),
+            }
+        )
+    validation = (row.get("contact_email_validation") or "").lower()
+    if row.get("contact_email") and validation not in {"valid"}:
+        out.append(
+            {
+                "kind": "unverified_email",
+                "detail": (
+                    f"This address is unverified ({validation or 'unknown'}); it may bounce. "
+                    "Consider finding a named contact first."
+                ),
+            }
+        )
+    if row.get("reachability") == "unreachable":
+        out.append(
+            {
+                "kind": "unreachable",
+                "detail": row.get("unreachable_reason") or "This contact is unreachable.",
+            }
+        )
+    return out
+
+
 @router.get("/{opportunity_id}")
 def get_application(
     opportunity_id: str, seeker: CurrentSeeker = Depends(current_seeker)
@@ -732,6 +771,7 @@ def get_application(
             "report": package.get("consistency_report"),
         },
         "blockers": view.get("blockers"),
+        "advisories": _recipient_advisories(row),
         "state": _state(
             {
                 "package_id": package["id"],

@@ -52,12 +52,18 @@ export default function IntelligencePage() {
 
   const overview = useFetch(useCallback(() => api.get('/intelligence'), []), [])
   const journey = useFetch(useCallback(() => api.get('/overview/journey'), []), [])
+  // The module defaults to the latest campaign, which may hold no collected
+  // opportunities - the gap analysis then reports a "data gap" instead of the
+  // seeker's real gaps.  A picker lets the screen point at a campaign that has
+  // data without changing the default everywhere else.
+  const campaigns = useFetch(useCallback(() => api.get('/campaigns'), []), [])
+  const [chosenCampaignId, setChosenCampaignId] = useState(null)
 
   /* Every route in this module defaults to the latest campaign when no id is
      given, but the ranked list does not — so the campaign is resolved once,
      here, and passed to everything. */
   const ready = !overview.loading && !overview.error
-  const campaignId = overview.data?.campaign_id || null
+  const campaignId = chosenCampaignId || overview.data?.campaign_id || null
   const qs = campaignId ? `?campaign_id=${encodeURIComponent(campaignId)}` : ''
 
   const gaps = useFetch(
@@ -285,6 +291,25 @@ export default function IntelligencePage() {
       <ScreenIntro pathname="/intelligence" />
 
       <AdvisoryNotice discretionMode={discretionMode} />
+
+      {Array.isArray(campaigns.data) && campaigns.data.length > 1 && (
+        <label className="row" style={{ gap: 8, alignItems: 'center', margin: '4px 0 8px' }}>
+          <span className="muted small">Campaign</span>
+          <select
+            value={campaignId || ''}
+            onChange={(event) => setChosenCampaignId(event.target.value || null)}
+          >
+            {campaigns.data.map((campaign) => (
+              <option key={campaign.id} value={campaign.id}>
+                {campaign.name} · {campaign.status}
+              </option>
+            ))}
+          </select>
+          <span className="tiny muted">
+            The gap, routes and fit below are computed for this campaign.
+          </span>
+        </label>
+      )}
 
       {overview.error && <ErrorBox error={overview.error} onRetry={overview.reload} />}
       {actionError && <ErrorBox error={actionError} onRetry={() => setActionError(null)} />}

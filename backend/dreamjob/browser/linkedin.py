@@ -360,6 +360,144 @@ def parse_company(html: str, url: str) -> dict:
 _PROFILE_HREF = re.compile(r'href="(https://[^"]*linkedin\.com)?(/in/[^"?#]+)', re.IGNORECASE)
 
 
+def _profile_path(href: str | None) -> str | None:
+    """The ``/in/<slug>`` path of a profile link, absolute or relative."""
+    match = re.search(r"(?:https?://[^/\"']*linkedin\.com)?(/in/[^/?#\"']+)", href or "")
+    return match.group(1) if match else None
+
+
+def _direct_children(node: Any) -> list[Any]:
+    out: list[Any] = []
+    child = getattr(node, "child", None)
+    while child is not None:
+        if getattr(child, "tag", None):
+            out.append(child)
+        child = child.next
+    return out
+
+
+def _clean_text(node: Any) -> str:
+    return re.sub(r"\s+", " ", node.text() or "").strip()
+
+
+def _name_like(text: str) -> str | None:
+    """A plausible person name, or ``None`` for a badge ("… is open to work")."""
+    cleaned = re.sub(r"\s*[•·].*$", "", text or "").strip()
+    low = cleaned.lower()
+    if not cleaned or len(cleaned) > 60:
+        return None
+    if any(token in low for token in ("open to work", "mutual", "connect", " is a ")):
+        return None
+    return cleaned
+
+
+_DEGREE_RE = re.compile(r"[•·]\s*(?:1st|2nd|3rd|4th|5th|\d+th|follow\w*)", re.IGNORECASE)
+
+
+def _identity_block(node: Any, name: str = "") -> Any:
+    """The element whose children are name+degree, headline and place.
+
+    Found from the degree paragraph ("Jane Doe • 2nd") rather than a class name:
+    its parent is the block, whose following children are the headline and the
+    location.  This is what survives LinkedIn's randomised class names.  A
+    paragraph that starts with this person's own name is preferred, so a nested
+    "people also viewed" card inside the item cannot answer for them.
+    """
+    degree_paragraphs = [
+        paragraph for paragraph in node.css("p") if _DEGREE_RE.search(_clean_text(paragraph))
+    ]
+    if name:
+        for paragraph in degree_paragraphs:
+            if _clean_text(paragraph).startswith(name):
+                return paragraph.parent
+    if degree_paragraphs:
+        return degree_paragraphs[0].parent
+    for candidate in node.iter(include_text=False):
+        if getattr(candidate, "tag", None) == "div" and _DEGREE_RE.search(_clean_text(candidate)):
+            return candidate
+    return None
+
+
+def _person_from_result_item(node: Any, url: str) -> dict | None:
+    """One person from a LinkedIn people-search result (current DOM).
+
+    LinkedIn now ships randomised class names, so the stable structure is the
+    serialized one: a ``role="listitem"`` holding a name link, and a block whose
+    direct children are the name-and-degree line, the headline and the place, in
+    that order.  Reading it by position is what survives the next class-name
+    shuffle; the old ``li.reusable-search__result-container`` and
+    ``entity-result`` selectors silently matched nothing and the scraper wrote
+    no contacts at all.
+    """
+    anchors = [
+        a for a in node.css('a[href*="/in/"]') if _profile_path(a.attributes.get("href"))
+    ]
+    if not anchors:
+        return None
+
+    # The item's own profile is the first link (the photo); every other /in/
+    # link in it is a mutual connection and must not be mistaken for the person.
+    primary_path = _profile_path(anchors[0].attributes.get("href"))
+    if not primary_path:
+        return None
+    name = ""
+    for candidate in anchors:
+        if _profile_path(candidate.attributes.get("href")) != primary_path:
+            continue
+        text = _name_like(_clean_text(candidate))
+        if text and (not name or len(text) > len(name)):
+            name = text
+    path = primary_path
+    if not name:
+        raw = _clean_text(node)
+        name = re.split(r"\s*[•·]\s*", raw, maxsplit=1)[0].strip()
+    if not name or name.lower() in {"linkedin member", "view profile"}:
+        return None
+
+    headline = ""
+    location = ""
+    block = _identity_block(node, name)
+    if block is not None:
+        parts = [text for text in (_clean_text(c) for c in _direct_children(block)) if text]
+        if parts and name and parts[0].startswith(name):
+            parts = parts[1:]
+        headline = parts[0] if parts else ""
+        location = parts[1] if len(parts) > 1 else ""
+
+    return {
+        "profile_url": normalise_target_url(f"https://www.linkedin.com{path}"),
+        "full_name": name,
+        "headline": headline,
+        "location": location,
+        "source_search": safe_url(url),
+    }
+
+
+def _person_from_legacy_item(node: Any, url: str) -> dict | None:
+    """One person from the previous result markup, kept for saved pages."""
+    anchor = node.css_first('a[href*="/in/"]')
+    if anchor is None:
+        return None
+    match = _PROFILE_HREF.search(f'href="{anchor.attributes.get("href") or ""}"')
+    if match is None:
+        return None
+    profile_url = normalise_target_url(f"https://www.linkedin.com{match.group(2)}")
+    name = tidy(anchor.text())
+    if not name or name.lower() in {"linkedin member", "view profile"}:
+        name = tidy((node.css_first("span[aria-hidden='true']") or anchor).text())
+    headline_node = (
+        node.css_first(".entity-result__primary-subtitle")
+        or node.css_first(".subline-level-1")
+        or node.css_first("div.t-14")
+    )
+    return {
+        "profile_url": profile_url,
+        "full_name": name,
+        "headline": tidy(headline_node.text()) if headline_node is not None else "",
+        "source_search": safe_url(url),
+    }
+
+
 def parse_people_search(html: str, url: str) -> list[dict]:
     """People-search results: name, headline and profile URL only (CR-402 minimisation)."""
     results: list[dict] = []
@@ -367,39 +505,22 @@ def parse_people_search(html: str, url: str) -> list[dict]:
     if HTMLParser is None or not html:  # pragma: no cover
         return results
     tree = HTMLParser(html)
-    containers = (
-        tree.css("li.reusable-search__result-container")
-        or tree.css("div.entity-result")
-        or tree.css("li")
+    modern = tree.css('[role="listitem"]')
+    containers = modern or tree.css("li.reusable-search__result-container") or tree.css(
+        "div.entity-result"
     )
     for node in containers:
-        anchor = node.css_first('a[href*="/in/"]')
-        if anchor is None:
-            continue
-        href = anchor.attributes.get("href") or ""
-        match = _PROFILE_HREF.search(f'href="{href}"')
-        if match is None:
-            continue
-        profile_url = normalise_target_url(f"https://www.linkedin.com{match.group(2)}")
-        if profile_url in seen:
-            continue
-        name = tidy(anchor.text())
-        if not name or name.lower() in {"linkedin member", "view profile"}:
-            name = tidy((node.css_first("span[aria-hidden='true']") or anchor).text())
-        headline_node = (
-            node.css_first(".entity-result__primary-subtitle")
-            or node.css_first(".subline-level-1")
-            or node.css_first("div.t-14")
+        person = (
+            _person_from_result_item(node, url)
+            if modern
+            else _person_from_legacy_item(node, url)
         )
-        seen.add(profile_url)
-        results.append(
-            {
-                "profile_url": profile_url,
-                "full_name": name,
-                "headline": tidy(headline_node.text()) if headline_node is not None else "",
-                "source_search": safe_url(url),
-            }
-        )
+        if person is None or not person.get("profile_url"):
+            continue
+        if person["profile_url"] in seen:
+            continue
+        seen.add(person["profile_url"])
+        results.append(person)
     return results
 
 

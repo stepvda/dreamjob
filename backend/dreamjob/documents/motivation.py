@@ -276,25 +276,25 @@ class MotivationResult:
         """The document as text, for the NFR-206 leak scan."""
         chunks: list[str] = []
         for row in self.content.get("why_this_job") or []:
-            chunks += [str(row.get("text") or ""), str(row.get("link") or "")]
+            chunks += [str(row.get("text") or ""), _human_evidence(row.get("link"))]
         for row in self.content.get("why_fit_job") or []:
             chunks += [
-                str(row.get("requirement") or ""), str(row.get("evidence") or ""),
+                str(row.get("requirement") or ""), _human_evidence(row.get("evidence")),
                 str(row.get("talking_point") or ""),
             ]
         for row in self.content.get("why_fit_company") or []:
-            chunks += [str(row.get("text") or ""), str(row.get("evidence") or "")]
+            chunks += [str(row.get("text") or ""), _human_evidence(row.get("evidence"))]
         # The undisclosed-employer blocks are text in the document like any
         # other, so they are scanned like any other (NFR-206).
         for row in self.content.get("posting_says_about_employer") or []:
-            chunks += [str(row.get("text") or ""), str(row.get("evidence") or "")]
+            chunks += [str(row.get("text") or ""), _human_evidence(row.get("evidence"))]
         chunks += [str(q) for q in self.content.get("recruiter_questions") or []]
         if self.content.get("intermediary_note"):
             chunks.append(str(self.content["intermediary_note"]))
         for row in self.content.get("objections") or []:
             chunks += [
                 str(row.get("objection") or ""), str(row.get("answer") or ""),
-                str(row.get("evidence") or ""),
+                _human_evidence(row.get("evidence")),
             ]
         chunks += [str(t) for t in self.content.get("talking_points") or []]
         return "\n".join(c for c in chunks if c)
@@ -840,7 +840,7 @@ def _why_job(builder: PdfBuilder, content: dict, lang: str) -> None:
     for row in rows:
         builder.para(str(row.get("text") or ""))
         if row.get("link"):
-            builder.note(f"{label(lang, 'dream_job_link')}: {row['link']}")
+            builder.note(f"{label(lang, 'dream_job_link')}: {_human_evidence(row['link'])}")
 
 
 def _fit_job(builder: PdfBuilder, content: dict, lang: str) -> None:
@@ -854,7 +854,7 @@ def _fit_job(builder: PdfBuilder, content: dict, lang: str) -> None:
         [
             [
                 str(row.get("requirement") or ""),
-                str(row.get("evidence") or ""),
+                _human_evidence(row.get("evidence")),
                 str(row.get("strength") or ""),
             ]
             for row in rows
@@ -864,6 +864,26 @@ def _fit_job(builder: PdfBuilder, content: dict, lang: str) -> None:
     points = [str(r.get("talking_point") or "") for r in rows if r.get("talking_point")]
     if points:
         builder.bullets(points[:8])
+
+
+_EVIDENCE_PATH_RE = re.compile(
+    r"\b(?:company|opening|vacancy|profile|job|requirement|dream(?:_fit(?:_detail)?|_job)?|"
+    r"composite|evidence|skills?|signals?|directives?|persona|finding|source|search|"
+    r"candidate|employer(?:_kind)?|role|location)\.[A-Za-z0-9_.]+",
+    re.IGNORECASE,
+)
+
+
+def _human_evidence(text: Any) -> str:
+    """Strip the generator's own field paths from a citation.
+
+    The evidence strings look like ``company.name 'Acme NV'``.  That path is an
+    internal key: it must not appear in the document a person reads, where
+    ``company.name`` looks like a host, and the NFR-206 scan then read it as a
+    leaked domain and hard-blocked the package.  The quoted value is kept.
+    """
+    cleaned = _EVIDENCE_PATH_RE.sub(" ", str(text or ""))
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" ;:")
 
 
 def _fit_company(builder: PdfBuilder, content: dict, lang: str) -> None:
@@ -884,7 +904,7 @@ def _fit_company(builder: PdfBuilder, content: dict, lang: str) -> None:
     for row in rows:
         builder.para(str(row.get("text") or ""))
         if row.get("evidence"):
-            builder.note(f"{label(lang, 'evidence')}: {row['evidence']}")
+            builder.note(f"{label(lang, 'evidence')}: {_human_evidence(row['evidence'])}")
 
 
 def _posting_says(builder: PdfBuilder, content: dict, lang: str) -> None:
@@ -893,7 +913,7 @@ def _posting_says(builder: PdfBuilder, content: dict, lang: str) -> None:
     for row in content.get("posting_says_about_employer") or []:
         builder.para(str(row.get("text") or ""))
         if row.get("evidence"):
-            builder.note(f"{label(lang, 'evidence')}: {row['evidence']}")
+            builder.note(f"{label(lang, 'evidence')}: {_human_evidence(row['evidence'])}")
 
     questions = [str(q) for q in content.get("recruiter_questions") or [] if str(q).strip()]
     if not questions:
@@ -920,7 +940,7 @@ def _objection_block(sub: PdfBuilder, row: dict, lang: str) -> None:
         f"{label(lang, 'answer')}: {answer}" if answer else label(lang, "prepare_answer")
     )
     if row.get("evidence"):
-        sub.note(f"{label(lang, 'evidence')}: {row['evidence']}")
+        sub.note(f"{label(lang, 'evidence')}: {_human_evidence(row['evidence'])}")
 
 
 def _talking_points(builder: PdfBuilder, content: dict, lang: str) -> None:

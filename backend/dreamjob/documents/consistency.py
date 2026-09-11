@@ -245,6 +245,31 @@ def hosts(text: str) -> set[str]:
     return {h for h in found if "." in h}
 
 
+#: Roots of the field paths the generators put in evidence citations, such as
+#: ``company.name 'Acme NV'``.  They are provenance metadata, not third-party
+#: material, but ``company.name`` ends in a real TLD, so the domain scan read
+#: the citation as a leaked domain and hard-blocked the package with no override
+#: (NFR-206).  A genuine leaked domain does not begin with one of these roots.
+_INTERNAL_PATH_ROOTS = frozenset(
+    {
+        "company", "opening", "vacancy", "profile", "job", "requirement",
+        "dream", "dream_jit", "dream_job", "composite", "evidence", "skill", "skills",
+        "signal", "signals", "directive", "directives", "persona", "finding",
+        "source", "search", "candidate", "employer", "role", "location",
+    }
+)
+
+
+def is_internal_path(host: str) -> bool:
+    """True for a generator's own evidence path rather than a real host.
+
+    The first label is compared with any ``_suffix`` removed, so
+    ``employer_kind.verdict`` and ``dream_fit_detail.unknown`` are recognised
+    alongside ``company.name``.
+    """
+    return host.split(".", 1)[0].split("_", 1)[0] in _INTERNAL_PATH_ROOTS
+
+
 def similar(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
@@ -591,6 +616,60 @@ def capitalised_phrases(text: str, language: str = "en") -> list[str]:
     ]
 
 
+#: Vocabulary common enough in a European job application that a capitalised
+#: instance is not evidence of leaked material: technologies, business nouns,
+#: languages and countries.  The leak scan reported ordinary words ("België",
+#: "Nederlands", "ERP-ervaring") and buried the findings that matter.
+_GENERIC_ENTITY_WORDS = {
+    # technologies and standards, where the acronym rule does not catch a word
+    "sap", "erp", "crm", "ecm", "api", "sql", "etl", "bi", "ml", "ai", "llm",
+    "cloud", "aws", "azure", "docker", "kubernetes", "javascript", "python",
+    # English business prose commonly capitalised
+    "document", "management", "science", "data", "engineering", "solutions",
+    "analytics", "platform", "systems", "services", "product", "project",
+    "process", "quality", "security", "customer", "digital", "innovation",
+    # Dutch generic nouns that capitalise in a heading or a compound
+    "opleiding", "vermelding", "configuratie", "implementatie", "functionaliteit",
+    "oplossingen", "oplossing", "omgeving", "omgevingen", "systeem", "systemen",
+    "module", "modules", "technologie", "portefeuille", "technologieportefeuille",
+    "analyselaag",
+    "businessunit", "ontwerp", "ontwikkeling", "beheer", "processen", "proces",
+    "kennis", "ervaring", "vaardigheden", "rol", "functie", "team", "projecten",
+    "traject", "procesengineering", "implementaties",
+    # places and languages that occur in every Belgian posting
+    "belgië", "belgie", "belgium", "nederlands", "engels", "duits", "frans",
+    "french", "german", "english", "dutch",
+    "brussel", "brussels", "vlaanderen", "wallonië", "wallonie", "europa",
+    "europe", "remote", "hybride", "hybrid",
+    # ordinary English words that capitalise in a heading or a sentence
+    "served", "service", "delivery", "support", "analysis", "reporting",
+}
+
+
+def _is_generic_entity(phrase: str) -> bool:
+    """True when a capitalised phrase is ordinary vocabulary, not a leak.
+
+    Every part must be generic.  A phrase with one distinctive token - a name,
+    an employer - is still reported, so the allowance cannot hide a real leak.
+    A short all-caps acronym is a technology or a standard, not private data.
+    """
+    generic = _PROSE_WORDS | _GENERIC_ENTITY_WORDS
+    words: list[str] = []
+    for token in phrase.split():
+        words.extend(part for part in re.split(r"[-/&]", token) if part)
+    words = [w for w in words if w]
+    if not words:
+        return True
+    for word in words:
+        key = fold(word)
+        if key and key in generic:
+            continue
+        if word.isupper() and 2 <= len(word) <= 6 and word.isalpha():
+            continue
+        return False
+    return True
+
+
 def german_head_trim(phrase: str, language: str) -> str | None:
     """The same run without its leading word, for a second attempt in German.
 
@@ -736,6 +815,8 @@ def scan_leakage(
                     )
                 )
         for domain in hosts(masked):
+            if is_internal_path(domain):
+                continue
             if domain not in provenance.domains:
                 findings.append(
                     Finding(
@@ -766,6 +847,8 @@ def scan_leakage(
                 continue
             trimmed = german_head_trim(phrase, language)
             if trimmed and provenance.contains(trimmed, with_context=allow_context):
+                continue
+            if _is_generic_entity(phrase):
                 continue
             findings.append(
                 Finding(

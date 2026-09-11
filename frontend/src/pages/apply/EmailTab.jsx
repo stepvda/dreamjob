@@ -59,6 +59,19 @@ export default function EmailTab({ detail, busy, onSave, onRegenerate }) {
         message the recipient reads; the CV is what they open next.
       </p>
 
+      {Array.isArray(detail.advisories) && detail.advisories.length > 0 && (
+        <div className="alert alert-warn" role="status">
+          <div>
+            <strong>About this recipient</strong>
+            <ul style={{ margin: '6px 0 0 18px' }}>
+              {detail.advisories.map((a) => (
+                <li key={a.kind}>{a.detail}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
+
       <div className="apl-meta">
         <span className="muted">
           To

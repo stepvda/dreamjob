@@ -613,3 +613,36 @@ def test_a_cut_off_generator_degrades_instead_of_raising(
     assert any("cut off" in reason for reason in result.degradation)
     assert len(calls) == 2, "the group is retried once"
     assert calls[-1] is False, "and the retry runs without the model"
+
+
+def test_a_generic_unverified_recipient_is_advisory_not_blocking():
+    """FR-304/NFR-305: applying to a shared, unverified mailbox is a choice.
+
+    The apply screen should say so before Send - it is not a blocker, because
+    the address is a legitimate last-resort target.
+    """
+    from dreamjob.api.routers.apply import _recipient_advisories
+
+    out = _recipient_advisories(
+        {
+            "contact_email": "jobs@acme.com",
+            "contact_email_validation": "risky",
+            "contact_is_generic": 1,
+            "reachability": "reachable",
+        }
+    )
+    kinds = {row["kind"] for row in out}
+    assert kinds == {"generic_mailbox", "unverified_email"}
+
+    # A named, verified person raises nothing.
+    assert (
+        _recipient_advisories(
+            {
+                "contact_email": "jane@acme.com",
+                "contact_email_validation": "valid",
+                "contact_is_generic": 0,
+                "reachability": "reachable",
+            }
+        )
+        == []
+    )

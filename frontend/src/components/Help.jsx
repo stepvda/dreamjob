@@ -52,9 +52,14 @@ export function HelpTip({ term, title, children, align = 'left' }) {
 
   return (
     <span className="helptip" ref={ref}>
-      <button
-        type="button"
+      {/* A span, not a button: the tip is placed inside buttons (the Home
+          "Search again" control) and inside badges, and a nested <button> is
+          invalid HTML that React warns about.  role/tabIndex/keydown keep it
+          operable by keyboard. */}
+      <span
         className="helptip-trigger"
+        role="button"
+        tabIndex={0}
         aria-label={`What is ${heading}?`}
         aria-expanded={open}
         onClick={(e) => {
@@ -62,9 +67,16 @@ export function HelpTip({ term, title, children, align = 'left' }) {
           e.stopPropagation()
           setOpen((v) => !v)
         }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            e.stopPropagation()
+            setOpen((v) => !v)
+          }
+        }}
       >
         ?
-      </button>
+      </span>
       {open && (
         <span className={`helptip-pop helptip-${align}`} role="tooltip">
           <strong>{heading}</strong>
