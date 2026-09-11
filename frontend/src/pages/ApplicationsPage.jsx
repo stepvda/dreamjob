@@ -19,8 +19,8 @@
  * behind the same server-side guard (RK-05, FR-325).
  */
 
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
@@ -56,6 +56,9 @@ const FILTERS = [
 ]
 
 export default function ApplicationsPage() {
+  const location = useLocation()
+  const navigate = useNavigate()
+
   const { data, error, loading, reload } = useFetch(async () => {
     const [list, templates, profile] = await Promise.all([
       api.get('/applications/'),
@@ -88,6 +91,14 @@ export default function ApplicationsPage() {
   const packages = data?.list?.packages || []
   const counts = data?.list?.counts || {}
 
+  // Arriving from the Opportunities screen: it started a batch and handed us
+  // the size. Stash it, then start watching once the package list has loaded.
+  const pendingGen = useRef(
+    typeof location.state?.startedGeneration === 'number' && location.state.startedGeneration > 0
+      ? location.state.startedGeneration
+      : null,
+  )
+
   const visible = useMemo(
     () => (filter === 'all' ? packages : packages.filter((p) => p.status === filter)),
     [packages, filter],
@@ -98,6 +109,18 @@ export default function ApplicationsPage() {
   /* --- Generation (FR-321) ------------------------------------------------ */
 
   const madeSoFar = gen ? Math.max(0, packages.length - gen.base) : 0
+
+  // A batch started on the Opportunities screen arrives as navigation state.
+  // Once the list has loaded, take up the same watch the local path uses, then
+  // clear the state so a refresh does not restart it.
+  useEffect(() => {
+    if (!data || pendingGen.current == null) return
+    const expected = pendingGen.current
+    pendingGen.current = null
+    setGen({ expected, base: packages.length, startedAt: Date.now() })
+    navigate(location.pathname, { replace: true, state: null })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data])
 
   // The API starts the batch but exposes no route to read the job back, so the
   // watch is on its output: poll the list, and give up at half again the
@@ -333,7 +356,7 @@ export default function ApplicationsPage() {
           otherwise saving an email would throw the reader back to the top. */}
       {loading && !data && <Loading rows={5} />}
 
-      {data && packages.length === 0 && (
+      {data && packages.length === 0 && !gen && (
         <FirstRun
           pathname="/applications"
           action={

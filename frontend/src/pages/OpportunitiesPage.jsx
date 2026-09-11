@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
@@ -657,6 +657,7 @@ export default function OpportunitiesPage() {
   // The workflow map links straight to the unadvertised roles (?kind=speculative),
   // so the screen opens on the filter it was asked for rather than on everything.
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
 
   const [campaignId, setCampaignId] = useState('')
   const [filters, setFilters] = useState(() => {
@@ -897,19 +898,12 @@ export default function OpportunitiesPage() {
         campaign_id: campaignId || undefined,
       })
       setGenerating(false)
-      // Stay on the list and say what is happening. The four documents take a
-      // couple of minutes of model calls per opportunity and are built in the
-      // background, so navigating away immediately showed an Applications
-      // screen with nothing on it yet and read as a failure. The packages
-      // appear there as they are written.
-      setNotice(
-        res?.count
-          ? `Generating ${res.count} application package${res.count === 1 ? '' : 's'} in the ` +
-              'background. A package is a CV, a briefing, a motivation document and an email, ' +
-              'so this takes a couple of minutes each — they appear on the Applications screen ' +
-              'as they are ready.'
-          : 'Generation started.',
-      )
+      // The batch runs in the background, so the work has to be visible where
+      // it lands: hand the batch size to the Applications screen, which shows
+      // the running progress banner while the packages are written.
+      navigate('/applications', {
+        state: { startedGeneration: res?.count ?? selected.length },
+      })
     } catch (e) {
       setGenerating(false)
       setActionError(e)
