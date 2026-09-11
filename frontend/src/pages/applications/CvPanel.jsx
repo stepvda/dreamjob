@@ -15,7 +15,7 @@
 import { HelpTip } from '../../components/Help'
 import { Badge } from '../../components/ui'
 
-import { LANGUAGES } from './shared'
+import { LANGUAGES, PdfViewer } from './shared'
 
 export default function CvPanel({
   pkg,
@@ -36,6 +36,10 @@ export default function CvPanel({
         The only document attached to the email. It is your profile, tailored to this role — never
         more than your profile contains.
       </p>
+
+      {/* The CV is the one document that is actually sent, so it is the one a
+          reviewer most needs to read rather than take on trust (FR-324). */}
+      <PdfViewer packageId={pkg.id} kind="cv_pdf" label="CV" />
 
       <div className="apl-meta">
         <span className="muted">

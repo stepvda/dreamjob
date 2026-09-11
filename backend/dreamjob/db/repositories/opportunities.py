@@ -642,6 +642,25 @@ def campaign_vacancies(campaign_id: str) -> list[dict]:
     )
 
 
+def campaign_opportunity_companies(campaign_id: str, limit: int = 100) -> list[str]:
+    """Companies behind a campaign's opportunities, busiest first.
+
+    Enrichment targets these rather than everything the campaign collected: the
+    point is to make the rows on the ranked list more than a name, and a company
+    whose postings were all rejected is not on that list - so crawling its
+    website would spend the budget on a page nobody opens.
+    """
+    rows = query_all(
+        """
+        SELECT company_id AS id, COUNT(*) AS n FROM opportunity
+        WHERE campaign_id = ? AND company_id IS NOT NULL
+        GROUP BY company_id ORDER BY n DESC LIMIT ?
+        """,
+        (campaign_id, int(limit)),
+    )
+    return [str(r["id"]) for r in rows]
+
+
 def campaign_company_ids(campaign_id: str) -> list[str]:
     """Companies this campaign touched, directly or through a vacancy."""
     rows = query_all(

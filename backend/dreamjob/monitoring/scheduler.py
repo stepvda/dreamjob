@@ -223,6 +223,52 @@ async def _run_llm_redaction() -> dict[str, Any]:
     return await asyncio.to_thread(run_redaction_job)
 
 
+async def _run_company_enrichment() -> dict[str, Any]:
+    """Enrich the employers behind the most recent opportunities (FR-221..246).
+
+    The collection tail enriches each campaign's own shortlist, bounded to keep
+    the run prompt.  This is the sweep that works through the rest: it takes the
+    companies with the most opportunities across every seeker and runs the
+    employer-kind ladder, the website crawl, signals and the filings over a
+    larger batch, so a knowledge base that has fallen behind catches up on its
+    own rather than waiting for someone to press a button.
+    """
+    from dreamjob.db.connection import query_all  # noqa: PLC0415
+    from dreamjob.pipeline import company_enrichment  # noqa: PLC0415
+
+    rows = await asyncio.to_thread(
+        query_all,
+        """
+        SELECT o.company_id AS id, COUNT(*) AS n
+        FROM opportunity o
+        WHERE o.company_id IS NOT NULL
+        GROUP BY o.company_id
+        ORDER BY n DESC
+        LIMIT ?
+        """,
+        (company_enrichment.SWEEP_COMPANY_LIMIT,),
+    )
+    company_ids = [str(r["id"]) for r in rows]
+    if not company_ids:
+        return {"skipped": "no companies"}
+
+    # No campaign and no seeker: the sweep runs over the shared knowledge base,
+    # which belongs to no one (FR-344), so only the passes that need neither run
+    # and the campaign-scoped ones are picked up by the next collection.
+    report = await company_enrichment.enrich_companies(
+        company_ids,
+        campaign_id=None,
+        job_seeker_id=None,
+        limit=company_enrichment.SWEEP_COMPANY_LIMIT,
+    )
+    data = report.as_dict()
+    return {
+        "companies": data.get("companies"),
+        "employers": data.get("employer_kind"),
+        "signals": data.get("signals"),
+    }
+
+
 HOUR = 3600
 
 DEFAULT_TASKS: list[Task] = [
@@ -230,6 +276,8 @@ DEFAULT_TASKS: list[Task] = [
          "Classify incoming replies and draft answers (FR-422)"),
     Task("watchlist", HOUR, _run_watchlist,
          "Recheck watched companies that are due (FR-401, FR-402)"),
+    Task("company_enrichment", 6 * HOUR, _run_company_enrichment,
+         "Enrich the employers behind the opportunities (FR-221..246, FR-341)"),
     Task("follow_ups", HOUR, _run_follow_ups,
          "Notify about follow-ups whose date has passed (FR-327)"),
     Task("digest", 6 * HOUR, _run_digest,

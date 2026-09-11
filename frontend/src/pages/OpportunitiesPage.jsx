@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
@@ -335,6 +335,19 @@ function OpportunityRow({
             </Link>
             {/* FR-263: the distinction is a component, never an ad-hoc label. */}
             <KindBadge kind={item.kind} />
+            {/* A published posting that names no role. Real, but not a specific
+                job, so it is called out rather than left to look like one. */}
+            {item.open_application && (
+              <Badge tone="info">
+                <HelpTip title="Open application">
+                  The employer published this on its own careers page, so it is a real
+                  posting — but it names no particular role. It invites you to write
+                  without applying for a specific job, so treat it as a way in rather
+                  than a role to be scored against.
+                </HelpTip>
+                Open application
+              </Badge>
+            )}
             {item.timing_flag && (
               <Badge tone="warn">{TIMING_LABELS[item.timing_flag] || human(item.timing_flag)}</Badge>
             )}
@@ -629,7 +642,6 @@ function CompareModal({ result, onClose }) {
 /* --- The screen ------------------------------------------------------------ */
 
 export default function OpportunitiesPage() {
-  const navigate = useNavigate()
   // The workflow map links straight to the unadvertised roles (?kind=speculative),
   // so the screen opens on the filter it was asked for rather than on everything.
   const [searchParams] = useSearchParams()
@@ -841,7 +853,19 @@ export default function OpportunitiesPage() {
         campaign_id: campaignId || undefined,
       })
       setGenerating(false)
-      navigate('/applications', { state: { generation: res } })
+      // Stay on the list and say what is happening. The four documents take a
+      // couple of minutes of model calls per opportunity and are built in the
+      // background, so navigating away immediately showed an Applications
+      // screen with nothing on it yet and read as a failure. The packages
+      // appear there as they are written.
+      setNotice(
+        res?.count
+          ? `Generating ${res.count} application package${res.count === 1 ? '' : 's'} in the ` +
+              'background. A package is a CV, a briefing, a motivation document and an email, ' +
+              'so this takes a couple of minutes each — they appear on the Applications screen ' +
+              'as they are ready.'
+          : 'Generation started.',
+      )
     } catch (e) {
       setActionError(e)
     } finally {

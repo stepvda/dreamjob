@@ -641,3 +641,51 @@ def prune_irrelevant(
         report.kept_user_decided,
     )
     return report
+
+
+# ---------------------------------------------------------------------------
+# FR-263: a third kind of row, distinct from both vacancy and speculative
+# ---------------------------------------------------------------------------
+
+#: Titles an employer uses for an **open application** advert: a published
+#: posting that invites you to write without naming a role.  Companies put
+#: these on their own ATS boards (".../o/spontaneous-application"), so they are
+#: genuinely published - which is why they are ``kind="vacancy"`` and not
+#: speculative - but they advertise no specific job, so a reader deciding what
+#: to apply to needs to see that at a glance.
+OPEN_APPLICATION_PATTERNS = (
+    r"\bspontaneous (application|applications|vacancy|speculative)\b",
+    r"\bopen application\b",
+    r"\bunsolicited application\b",
+    r"\bspeculative application\b",
+    r"\bgeneral application\b",
+    r"\bopen sollicitatie\b",
+    r"\bspontane sollicitatie\b",
+    r"\bcandidature spontan[ée]e\b",
+    r"\btalent (pool|community|pipeline)\b",
+    r"\bjoin our talent\b",
+    r"\bevergreen (role|posting)\b",
+)
+_OPEN_APPLICATION_RE = re.compile("|".join(OPEN_APPLICATION_PATTERNS), re.IGNORECASE)
+
+
+def is_open_application(title: str | None, description: str | None = None) -> bool:
+    """Is this a published posting that names no role? (FR-263, FR-261)
+
+    The distinction the ranked list has to make is three-way, not two-way:
+
+    * **advertised vacancy** - a specific role the employer has published;
+    * **open application** - published, but inviting you to write *without* a
+      named role.  Real, but not something to score as a fit for a particular
+      job;
+    * **speculative opening** - inferred by the model, published nowhere.
+
+    Only the title and the opening lines are read: an ordinary posting whose
+    body happens to contain the phrase once is not an open application.
+    """
+    if not title:
+        return False
+    if _OPEN_APPLICATION_RE.search(title):
+        return True
+    # Some boards name the role normally and put the invitation in the body.
+    return bool(description and _OPEN_APPLICATION_RE.search(description[:200]))

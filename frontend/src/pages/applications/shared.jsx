@@ -9,6 +9,8 @@
  * here once rather than in three places.
  */
 
+import { useState } from 'react'
+
 import { Badge } from '../../components/ui'
 
 export const PACKAGE_STATUS_TONE = {
@@ -121,4 +123,43 @@ export function photoBlocked(paths) {
 export function documentName(pkg, kind, extension) {
   const company = (pkg?.company_name || 'application').replace(/[/\\]/g, '-')
   return `${company} - ${kind}.${extension}`
+}
+
+
+/**
+ * The document itself, in the page (FR-324, FR-331).
+ *
+ * A reviewer approving an application has to read the words, and the panels
+ * could only describe a document and offer it as a download - which is a round
+ * trip through the file system to read something already on the server. The
+ * frame loads lazily, because a package holds three PDFs and rendering all of
+ * them on open would fetch a few hundred kilobytes nobody asked to see.
+ *
+ * The endpoint serves the file inline; the download buttons still force a save,
+ * so nothing about the existing behaviour changes.
+ */
+export function PdfViewer({ packageId, kind, label = 'document', height = 620 }) {
+  const [open, setOpen] = useState(false)
+  if (!packageId || !kind) return null
+  const url = `/api/applications/${packageId}/documents/${kind}`
+  return (
+    <div className="pdf-viewer">
+      <div className="pdf-viewer-bar">
+        <button className="btn btn-sm" onClick={() => setOpen((v) => !v)}>
+          {open ? 'Hide the document' : `Read the ${label}`}
+        </button>
+        <a className="btn btn-sm btn-ghost" href={url} target="_blank" rel="noreferrer">
+          Open in a new tab
+        </a>
+      </div>
+      {open && (
+        <iframe
+          className="pdf-frame"
+          style={{ height }}
+          src={url}
+          title={`${label} (PDF)`}
+        />
+      )}
+    </div>
+  )
 }

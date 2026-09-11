@@ -68,6 +68,10 @@ class GenerateIn(BaseModel):
     contact_id: str | None = None
     parts: list[str] | None = None
     use_llm: bool = True
+    #: True (the default) returns a job immediately; False waits for the
+    #: package and returns it, which is what a script or a test wants and what
+    #: a browser must not, because the work is minutes of model calls.
+    background: bool = True
 
 
 class RegenerateIn(BaseModel):
@@ -168,7 +172,14 @@ async def generate(
         )
     options = _options(payload)
 
-    if len(ids) == 1:
+    # Generating a package is four model calls - CV, briefing, motivation,
+    # email - plus a consistency pass and the PDF renders, so even a single
+    # opportunity is around two and a half minutes of work.  By default that is
+    # a job, because holding the HTTP request open for the whole of it showed
+    # the browser a spinner with no progress and, behind a proxy or a browser
+    # timeout, gave up and looked stuck.  ``background=False`` keeps the
+    # synchronous form for callers that genuinely want the package back.
+    if not payload.background:
         try:
             package = await asyncio.to_thread(
                 package_module.generate, seeker.id, ids[0], options, actor=seeker.email
@@ -418,4 +429,10 @@ def download(
         path,
         media_type=MEDIA_TYPES.get(kind, "application/octet-stream"),
         filename=f"{company} - {kind}{path.suffix}",
+        # Inline, so the Apply screen can show the document in the page rather
+        # than only offering it as a download.  ``filename`` alone makes
+        # Starlette send ``Content-Disposition: attachment``, which forces a
+        # download and leaves nothing for an <iframe> to render.  The download
+        # buttons are unaffected: they fetch the blob and save it themselves.
+        content_disposition_type="inline",
     )

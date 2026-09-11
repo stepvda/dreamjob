@@ -905,9 +905,16 @@ def test_api_generate_preview_and_download() -> None:
     assert {t["key"] for t in templates["cv"]} >= {"classic", "modern"}
     assert templates["never_sent"] == ["briefing", "motivation"]
 
+    # background=False asks for the synchronous form; the browser asks for the
+    # job (see the assertion below), because minutes of model calls behind a
+    # spinner read as a hang.
     created = client.post(
         "/api/applications/generate",
-        json={"opportunity_ids": [ids["opportunity"]], "cv_template": "classic"},
+        json={
+            "opportunity_ids": [ids["opportunity"]],
+            "cv_template": "classic",
+            "background": False,
+        },
     )
     assert created.status_code == 200, created.text
     body = created.json()
@@ -939,8 +946,10 @@ def test_api_bulk_approval_requires_a_summary() -> None:
     ids = seed()
     client = _client(ids["seeker"])
     packages = [
-        client.post("/api/applications/generate", json={"opportunity_ids": [opportunity]})
-        .json()["package"]["id"]
+        client.post(
+            "/api/applications/generate",
+            json={"opportunity_ids": [opportunity], "background": False},
+        ).json()["package"]["id"]
         for opportunity in (ids["opportunity"], ids["speculative"])
     ]
 
@@ -969,7 +978,10 @@ def test_api_refuses_another_seekers_package() -> None:
     ids = seed()
     package_id = (
         _client(ids["seeker"])
-        .post("/api/applications/generate", json={"opportunity_ids": [ids["opportunity"]]})
+        .post(
+            "/api/applications/generate",
+            json={"opportunity_ids": [ids["opportunity"]], "background": False},
+        )
         .json()["package"]["id"]
     )
     intruder = insert_row(

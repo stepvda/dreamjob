@@ -1765,6 +1765,12 @@ async def _rank_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict
     # estimate rather than recomputing it, so scoring first would score every
     # unpriced opportunity against a range nothing had filled in.
     report["compensation"] = await _pass(ctx, campaign, "compensation", _price)
+    # Company enrichment, before scoring: the employer kind decides what the
+    # product may do with an employer, and company attractiveness reads the
+    # website profile, the signals and the filings.  Every one of those passes
+    # already existed and none ran automatically, so a campaign left every
+    # employer a bare name with "employer type not verified" on every row.
+    report["enrichment"] = await _pass_async(ctx, campaign, "enrichment", _enrich)
     report["scoring"] = await _pass(ctx, campaign, "scoring", _score)
 
     repo.record_audit(
@@ -1835,6 +1841,51 @@ def _price(campaign: dict) -> dict:
     if fn is None:
         return {"skipped": "no compensation stage"}
     return fn(campaign["job_seeker_id"], campaign["id"])
+
+
+async def _pass_async(ctx: JobContext, campaign: dict, name: str, fn: Any) -> dict:
+    """Run one asynchronous post-collection pass, reporting its outcome.
+
+    The employer-kind ladder and the website crawl are coroutines (they own
+    their concurrency and their own network budget), so they cannot go through
+    :func:`_pass`, which runs a synchronous callable in a thread.
+    """
+    try:
+        result = await fn(campaign)
+    except JobCancelled:
+        raise
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        log.warning("Post-collection %s failed for campaign %s: %s", name, campaign["id"], reason)
+        repo.record_audit(
+            f"campaign.{name}_failed",
+            job_seeker_id=ctx.job_seeker_id,
+            entity_type="campaign",
+            entity_id=campaign["id"],
+            detail={"error": reason},
+        )
+        return {"error": reason}
+    if hasattr(result, "as_dict"):
+        return result.as_dict()
+    if isinstance(result, dict):
+        return result
+    return {"result": str(result)[:200]}
+
+
+async def _enrich(campaign: dict) -> dict:
+    """Company enrichment for the campaign's shortlist (FR-221..246, FR-341).
+
+    Bounded: a campaign that touched 1,600 companies still shows its list
+    promptly, and the rest is picked up by the next run or the nightly sweep.
+    """
+    from dreamjob.pipeline import company_enrichment  # noqa: PLC0415
+
+    report = await company_enrichment.enrich_campaign(
+        campaign["id"],
+        campaign["job_seeker_id"],
+        limit=company_enrichment.DEFAULT_COMPANY_LIMIT,
+    )
+    return report.as_dict()
 
 
 def _score(campaign: dict) -> dict:

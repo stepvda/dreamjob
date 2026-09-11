@@ -155,6 +155,13 @@ def _present(opportunity: dict, locale: str | None = None) -> dict:
     out = dict(opportunity)
     out.update(speculative.presentation(opportunity))
     out["employer"] = _employer_tag(opportunity, locale)
+    # FR-263 is a three-way distinction, not two. An employer's "Spontaneous
+    # Application" posting on its own ATS board is genuinely published - so it
+    # is a vacancy, not a speculative opening - but it names no role, and a
+    # reader deciding what to apply to has to be able to see that on the row.
+    out["open_application"] = synth.is_open_application(
+        opportunity.get("title"), opportunity.get("description")
+    )
     company_id = opportunity.get("company_id")
     out["links"] = {
         "company_profile": f"/api/companies/{company_id}" if company_id else None,

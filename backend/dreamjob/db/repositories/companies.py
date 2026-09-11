@@ -478,3 +478,93 @@ def backfill_country_from_vacancies() -> int:
             """
         )
         return cur.rowcount
+
+
+def enrichment_coverage(limit: int = 200) -> dict[str, Any]:
+    """What the knowledge base knows about each employer, and how fresh it is.
+
+    The passes that build a company record - website crawl, filings, signals,
+    competitors, the employer-kind verdict - each wrote somewhere different, so
+    "is this employer enriched?" had no single answer and the company screen had
+    no single place to say it.  This is that answer, in one read: aggregate
+    counts for the operator, and per-company status for the list, ordered by how
+    many postings the employer holds so the rows a job seeker sees come first.
+    """
+    aggregate = query_one(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM company) AS companies,
+            (SELECT COUNT(*) FROM company WHERE business_summary IS NOT NULL
+                AND business_summary <> '') AS with_profile,
+            (SELECT COUNT(*) FROM financial_analysis) AS with_financials,
+            (SELECT COUNT(*) FROM financial_analysis WHERE is_estimated = 0) AS with_filed_financials,
+            (SELECT COUNT(DISTINCT company_id) FROM hiring_signal) AS with_signals,
+            (SELECT COUNT(DISTINCT company_id) FROM competitor_link) AS with_competitors,
+            (SELECT COUNT(*) FROM company_employer_kind) AS with_employer_kind,
+            (SELECT COUNT(*) FROM company WHERE ats_slug IS NOT NULL) AS with_ats_board,
+            (SELECT COUNT(*) FROM raw_document) AS raw_documents
+        """
+    ) or {}
+
+    rows = query_all(
+        """
+        SELECT c.id, c.name, c.domain, c.country, c.collected_at, c.refreshed_at,
+               CASE WHEN c.business_summary IS NOT NULL AND c.business_summary <> ''
+                    THEN 1 ELSE 0 END AS has_profile,
+               (SELECT COUNT(*) FROM financial_analysis fa WHERE fa.company_id = c.id)
+                   AS financial_years,
+               (SELECT COALESCE(fa.is_estimated, 1) FROM financial_analysis fa
+                 WHERE fa.company_id = c.id LIMIT 1) AS financials_estimated,
+               (SELECT COUNT(*) FROM hiring_signal hs WHERE hs.company_id = c.id) AS signals,
+               (SELECT COUNT(*) FROM competitor_link cl WHERE cl.company_id = c.id) AS competitors,
+               (SELECT k.kind FROM company_employer_kind k WHERE k.company_id = c.id LIMIT 1)
+                   AS employer_kind,
+               (SELECT COUNT(*) FROM opportunity o WHERE o.company_id = c.id) AS opportunities
+        FROM company c
+        WHERE EXISTS (SELECT 1 FROM opportunity o WHERE o.company_id = c.id)
+           OR EXISTS (SELECT 1 FROM vacancy v WHERE v.company_id = c.id)
+        ORDER BY opportunities DESC, signals DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+
+    def pct(n: int) -> float | None:
+        total = int(aggregate.get("companies") or 0)
+        return round(n / total, 4) if total else None
+
+    return {
+        "aggregate": {
+            **{k: int(v or 0) for k, v in aggregate.items()},
+            "share_with_profile": pct(int(aggregate.get("with_profile") or 0)),
+            "share_with_financials": pct(int(aggregate.get("with_financials") or 0)),
+            "share_with_signals": pct(int(aggregate.get("with_signals") or 0)),
+            "share_with_competitors": pct(int(aggregate.get("with_competitors") or 0)),
+            "share_with_employer_kind": pct(int(aggregate.get("with_employer_kind") or 0)),
+        },
+        "companies": [dict(r) for r in rows],
+        "note": (
+            "A company is enriched when it has a website profile; the filings, signals, "
+            "competitors and employer kind are added on top. A financial analysis marked "
+            "estimated means no filing could be read - usually a registry key that is not "
+            "configured - not that the company has no accounts."
+        ),
+    }
+
+
+def busiest_companies(limit: int = 25) -> list[str]:
+    """Company ids with the most postings - the ones worth enriching first.
+
+    The order that matters everywhere else in the product: a company holding a
+    hundred vacancies makes a hundred rows better when it is researched, and one
+    holding a single posting makes one.
+    """
+    rows = query_all(
+        """
+        SELECT company_id AS id, COUNT(*) AS n FROM vacancy
+        WHERE company_id IS NOT NULL
+        GROUP BY company_id ORDER BY n DESC LIMIT ?
+        """,
+        (int(limit),),
+    )
+    return [str(r["id"]) for r in rows]

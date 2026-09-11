@@ -683,3 +683,28 @@ tr.row-disabled td:first-child { opacity: 0.75; }
 @media (max-width: 720px) {
   .filter-grid-wide { grid-column: span 1; }
 }
+
+/* ==========================================================================
+   Embedded document viewer (FR-324, FR-331)
+
+   The generated PDFs are read in the page rather than only downloaded: the
+   frame carries the document's own renderer, so nothing has to be re-styled
+   and nothing is re-fetched when the reader scrolls.
+   ========================================================================== */
+
+.pdf-viewer { margin-top: 4px; }
+
+.pdf-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pdf-frame {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-sunk);
+  display: block;
+}

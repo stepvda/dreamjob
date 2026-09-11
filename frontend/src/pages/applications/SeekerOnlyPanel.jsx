@@ -12,11 +12,13 @@
 import { Caution, HelpTip } from '../../components/Help'
 import { formatDate } from '../../components/ui'
 
-import { NEVER_SENT_LABEL } from './shared'
+import { NEVER_SENT_LABEL, PdfViewer } from './shared'
 
 export default function SeekerOnlyPanel({
   title,
   purpose,
+  packageId,
+  kind,
   result,
   available,
   neverSent,
@@ -36,6 +38,8 @@ export default function SeekerOnlyPanel({
         {named.length > 0 && <> Held for you on this package: {named.join(' and ')}.</>}
         <HelpTip term="seeker_only_document" />
       </Caution>
+
+      <PdfViewer packageId={packageId} kind={kind} label={title || 'document'} />
 
       <p className="section-intro" style={{ marginTop: 0 }}>
         {purpose}

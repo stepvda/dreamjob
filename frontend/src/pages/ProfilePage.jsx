@@ -19,6 +19,7 @@ import { Caution, FirstRun, ScreenIntro } from '../components/Help'
 import Icon from '../components/Icon'
 import WorkflowMap from '../components/WorkflowMap'
 import { ErrorBox, Loading, Stat, Tabs, useFetch } from '../components/ui'
+import DreamJobPage from './DreamJobPage'
 import ConflictsTab from './profile/ConflictsTab'
 import DocumentsTab from './profile/DocumentsTab'
 import EvidenceTab from './profile/EvidenceTab'
@@ -93,6 +94,14 @@ export default function ProfilePage() {
         </>
       ),
       count: unresolved || undefined,
+    },
+    {
+      key: 'dream_job',
+      label: (
+        <>
+          <Icon name="dream" /> Dream job
+        </>
+      ),
     },
     {
       key: 'skills',
@@ -212,6 +221,11 @@ export default function ProfilePage() {
                 onNewVersion={adopt}
               />
             )}
+            {/* The same editor Advanced offers. The dream-job statement is the
+                one field the search cannot proceed without, so it belongs on
+                the screen a new job seeker is already working in rather than
+                only behind a separate nav item. */}
+            {tab === 'dream_job' && <DreamJobPage />}
             {tab === 'skills' && <SkillsTab profile={profile.data} />}
             {tab === 'evidence' && <EvidenceTab profile={profile.data} />}
             {tab === 'personas' && <PersonasTab />}

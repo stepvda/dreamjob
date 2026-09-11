@@ -456,8 +456,13 @@ def test_a_board_creates_the_company_whose_board_it_is(db, no_network):
     # produced them.
     assert company["source"] == "par.tenant"
     provenance = kb_repo.provenance_for("company", company["id"])
-    assert provenance and provenance[0]["adapter_key"] == "par.tenant"
-    assert provenance[0]["source_plan_item_id"]
+    # The company-enrichment pass records its own provenance for the same
+    # company (FR-341), so the board's row is no longer necessarily first. What
+    # FR-166 requires is that the board that produced the company is recorded
+    # and attributed to the plan item - not that it heads the list.
+    board_rows = [p for p in provenance if p["adapter_key"] == "par.tenant"]
+    assert board_rows, "the board that produced the company is recorded"
+    assert board_rows[0]["source_plan_item_id"]
 
     vacancies = query_all("SELECT company_id FROM vacancy")
     assert len(vacancies) == 2

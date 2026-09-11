@@ -166,6 +166,53 @@ def refresh_job_status(job_id: str, seeker: Seeker) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/enrichment-coverage")
+def enrichment_coverage(
+    limit: int = Query(200, ge=1, le=1000),
+    seeker: CurrentSeeker = Depends(current_seeker),
+) -> dict:
+    """What the knowledge base knows about each employer, and how fresh it is (FR-341).
+
+    The passes that build a company - website crawl, filings, signals,
+    competitors, employer kind - each write somewhere different, so "is this
+    employer enriched?" had no single answer. This is that answer: aggregate
+    counts for the operator, and per-company status for the list.
+    """
+    return repo.enrichment_coverage(limit=limit)
+
+
+class EnrichRequest(BaseModel):
+    """Run company enrichment now: for companies named, or the busiest ones."""
+
+    company_ids: list[str] | None = None
+    limit: int = Field(25, ge=1, le=200)
+
+
+@router.post("/enrichment/run")
+async def run_enrichment(
+    payload: EnrichRequest | None = None,
+    seeker: CurrentSeeker = Depends(current_seeker),
+) -> dict:
+    """Backfill company enrichment by hand (FR-221..246).
+
+    The collection tail enriches each campaign's shortlist automatically and the
+    scheduler sweeps the busiest employers every six hours; this is the button
+    for when an operator wants it now.
+    """
+    from dreamjob.pipeline import company_enrichment  # noqa: PLC0415
+
+    body = payload or EnrichRequest()
+    ids = [str(c) for c in (body.company_ids or []) if c]
+    if not ids:
+        ids = repo.busiest_companies(body.limit)
+    if not ids:
+        return {"skipped": "no companies to enrich"}
+    report = await company_enrichment.enrich_companies(
+        ids, job_seeker_id=seeker.id, limit=body.limit
+    )
+    return report.as_dict()
+
+
 @router.get("/{company_id}")
 def company_profile_view(company_id: str, seeker: Seeker) -> dict:
     """The fixed-schema company profile, in the layout FR-222 prescribes."""

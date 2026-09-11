@@ -234,6 +234,8 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
 
         {tab === 'briefing' && (
           <SeekerOnlyPanel
+            packageId={pkg.id}
+            kind="briefing"
             title="The briefing"
             purpose="Everything known about the company and the role — the profile, five years of financials, hiring signals, competitors, and the questions worth asking. Written for you to read before an interview (FR-329)."
             result={pkg.generation?.briefing || {}}
@@ -258,6 +260,8 @@ export default function PackageDetail({ pkg, templates, photo, onChanged, onAppr
 
         {tab === 'motivation' && (
           <SeekerOnlyPanel
+            packageId={pkg.id}
+            kind="motivation"
             title="The motivation document"
             purpose="Why this role, where you meet its requirements and where you do not, and the talking points that follow. Written for you, so the gaps are stated plainly rather than written around (FR-330)."
             result={pkg.generation?.motivation || {}}
