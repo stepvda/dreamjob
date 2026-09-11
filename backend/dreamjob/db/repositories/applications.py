@@ -513,15 +513,23 @@ def competitors(company_id: str | None, limit: int = 20) -> list[dict]:
     )
 
 
-def contacts_for_company(company_id: str | None) -> list[dict]:
-    """NFR-302: a contact that objected is never offered as a recipient."""
+def contacts_for_company(
+    company_id: str | None, *, job_seeker_id: str | None = None
+) -> list[dict]:
+    """NFR-302/FR-344: an objecting contact is never offered as a recipient,
+    and a campaign-scoped row belonging to another seeker is invisible."""
     if not company_id:
         return []
-    return query_all(
-        "SELECT * FROM contact WHERE company_id = ? AND objected = 0 "
-        "ORDER BY is_generic_mailbox ASC, confidence DESC",
-        (company_id,),
-    )
+    sql = "SELECT * FROM contact WHERE company_id = ? AND objected = 0"
+    params: list[Any] = [company_id]
+    if job_seeker_id:
+        sql += (
+            " AND (shareable = 1 OR owning_campaign_id IS NULL"
+            " OR owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?))"
+        )
+        params.append(job_seeker_id)
+    sql += " ORDER BY is_generic_mailbox ASC, confidence DESC"
+    return query_all(sql, tuple(params))
 
 
 def get_contact(contact_id: str | None) -> dict | None:

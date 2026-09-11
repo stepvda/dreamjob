@@ -911,6 +911,7 @@ export default function OpportunitiesPage() {
           : 'Generation started.',
       )
     } catch (e) {
+      setGenerating(false)
       setActionError(e)
     } finally {
       setBusy(false)
