@@ -708,3 +708,94 @@ tr.row-disabled td:first-child { opacity: 0.75; }
   background: var(--surface-sunk);
   display: block;
 }
+
+/* ==========================================================================
+   Journey strip - high contrast
+
+   The strip is wayfinding, and it was drawn in the same soft tints as the
+   surfaces around it, so it read as decoration and got skipped. It is now a
+   dark band with the phase colours as filled dots and the current phase as a
+   solid pill: the one element on the page that is deliberately darker than
+   everything else, on every screen that shows it.
+
+   Fixed colours rather than the surface tokens, because "darker than the page"
+   is not something a token that flips in dark mode can express.
+   ========================================================================== */
+
+:root {
+  --steps-band: #22222a;
+  --steps-band-edge: #141419;
+  --steps-ink: #f3f3f7;
+  --steps-muted: rgba(243, 243, 247, 0.58);
+  --steps-sep: rgba(243, 243, 247, 0.32);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --steps-band: #2c2c37;
+    --steps-band-edge: #1a1a21;
+    --steps-ink: #f6f6fa;
+    --steps-muted: rgba(246, 246, 250, 0.6);
+    --steps-sep: rgba(246, 246, 250, 0.28);
+  }
+}
+
+.wfstrip {
+  background: var(--steps-band);
+  border: 1px solid var(--steps-band-edge);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  gap: 3px;
+  box-shadow: var(--shadow);
+  margin-bottom: 18px;
+}
+
+.wfstrip-node {
+  color: var(--steps-muted);
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 4px 11px;
+  border-radius: 20px;
+  border: 1px solid transparent;
+}
+
+.wfstrip-node:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--steps-ink);
+}
+
+/* A phase that is finished: readable, with its own colour in the dot. */
+.wfstrip-node.wfmap-done { color: var(--steps-ink); }
+.wfstrip-node.wfmap-done .wfmap-dot {
+  background: var(--hue);
+  border-color: var(--hue);
+  color: #fff;
+}
+
+/* Where you are: the only filled pill in the band. */
+.wfstrip-node.wfmap-current {
+  background: var(--hue);
+  border-color: var(--hue);
+  color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22);
+}
+
+.wfstrip-node.wfmap-current .wfmap-dot {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.9);
+  color: transparent;
+}
+
+.wfstrip-node.wfmap-active { color: var(--steps-ink); }
+.wfstrip-node.wfmap-ready { color: var(--steps-muted); }
+
+.wfstrip-node .wfmap-dot {
+  width: 12px;
+  height: 12px;
+  flex-basis: 12px;
+  font-size: 8px;
+  margin-top: 0;
+  border-width: 1.5px;
+}
+
+.wfstrip-sep { color: var(--steps-sep); font-size: 14px; padding: 0 2px; }

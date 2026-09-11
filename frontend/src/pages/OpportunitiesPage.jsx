@@ -67,6 +67,18 @@ const TIMING_LABELS = { apply_now: 'Apply now', favourable: 'Favourable window' 
 
 const PAGE_SIZE = 50
 
+/** The autopilot's stages, in the words a job seeker would use (FR-162). */
+const AUTOPILOT_STAGE = {
+  composite: 'Reading your profile',
+  dream_job: 'Understanding what you want',
+  directives: 'Deciding what to search for',
+  campaign: 'Setting up the search',
+  plan: 'Choosing which sources to use',
+  collection: 'Collecting and ranking opportunities',
+  profiling: 'Looking into the companies',
+  notify: 'Finishing up',
+}
+
 const EMPTY_FILTERS = {
   q: '',
   kind: '',
@@ -665,6 +677,7 @@ export default function OpportunitiesPage() {
   const [comparison, setComparison] = useState(null)
   const [actionError, setActionError] = useState(null)
   const [notice, setNotice] = useState(null)
+  const [finding, setFinding] = useState(null)
   const [busy, setBusy] = useState(false)
   const [recalculating, setRecalculating] = useState(null)
   const [selectionNonce, setSelectionNonce] = useState(0)
@@ -676,6 +689,32 @@ export default function OpportunitiesPage() {
   // defaults to "every campaign", and synthesis is per-campaign, so without
   // this the one button that unblocks an empty screen had nothing to aim at.
   const [buildFrom, setBuildFrom] = useState('')
+
+  // Poll the run while it is in flight, then refresh what is on screen. The
+  // chain takes minutes and reports its stage, so the bar advances rather than
+  // sitting at "working".
+  useEffect(() => {
+    if (!finding || ['done', 'failed', 'cancelled'].includes(finding.status)) return
+    const t = setInterval(async () => {
+      try {
+        const res = await api.get('/autopilot/status')
+        const run = res?.run
+        if (!run) return
+        setFinding(run)
+        if (['done', 'failed', 'cancelled'].includes(run.status)) {
+          list.reload()
+          campaigns.reload()
+          if (run.status === 'done') {
+            setNotice('The search finished. The campaign selector above lists the new run.')
+          }
+        }
+      } catch {
+        /* a poll that fails is retried on the next tick */
+      }
+    }, 3000)
+    return () => clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finding?.status, finding?.job_id])
 
   // Typing in the search box should not fire a request per keystroke.
   useEffect(() => {
@@ -873,6 +912,34 @@ export default function OpportunitiesPage() {
     }
   }
 
+  async function findMore() {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const res = await api.post('/autopilot/start', {})
+      setFinding({
+        status: res?.already_running ? 'running' : 'running',
+        stage: 'composite',
+        stage_index: 0,
+        total_steps: 8,
+        job_id: res?.job_id,
+      })
+    } catch (e) {
+      setActionError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function cancelFind() {
+    if (!finding?.job_id) return
+    try {
+      await api.post(`/autopilot/${finding.job_id}/cancel`, {})
+    } catch (e) {
+      setActionError(e)
+    }
+  }
+
   async function recalculate() {
     setBusy(true)
     setActionError(null)
@@ -1011,12 +1078,12 @@ export default function OpportunitiesPage() {
       )}
 
       <div className="card" style={{ marginBottom: 14 }}>
-        <div className="row row-wrap" style={{ alignItems: 'flex-end', gap: 14 }}>
-          <div style={{ flex: '1 1 240px' }}>
-            <Field
-              label="Campaign"
-              hint="Pinning, rejecting and tagging work everywhere; hand-ordering needs one campaign."
-            >
+        {/* A grid, not a wrapping flex row: the campaign field carries helper
+            text and the others do not, so bottom-aligning them dropped every
+            other label and control onto a different line. */}
+        <div className="filter-grid">
+          <div>
+            <Field label="Campaign">
               <select
                 value={campaignId}
                 onChange={(e) => {
@@ -1034,7 +1101,7 @@ export default function OpportunitiesPage() {
             </Field>
           </div>
 
-          <div style={{ flex: '1 1 220px' }}>
+          <div>
             <Field label="Sort">
               <select
                 value={sort}
@@ -1052,42 +1119,134 @@ export default function OpportunitiesPage() {
             </Field>
           </div>
 
-          <label className="checkline" style={{ marginBottom: 14 }}>
-            <input
-              type="checkbox"
-              checked={manualOrder}
-              onChange={(e) => {
-                setManualOrder(e.target.checked)
-                setOffset(0)
-              }}
-            />
-            My order first
-            <HelpTip term="manual_order" />
-          </label>
+          <div className="field">
+            <label>&nbsp;</label>
+            <label className="checkline" style={{ minHeight: 34 }}>
+              <input
+                type="checkbox"
+                checked={manualOrder}
+                onChange={(e) => {
+                  setManualOrder(e.target.checked)
+                  setOffset(0)
+                }}
+              />
+              My order first
+              <HelpTip term="manual_order" />
+            </label>
+          </div>
 
-          <div className="spacer" />
+          <div className="field">
+            <label>&nbsp;</label>
+            <button
+              className="btn btn-primary"
+              style={{ minHeight: 34 }}
+              disabled={busy || Boolean(finding)}
+              onClick={findMore}
+            >
+              {finding ? <span className="spinner" /> : <Icon name="search" />}
+              Find more opportunities
+              <HelpTip title="What this does">
+                One click: reads your profile and dream job, decides what to search for and
+                which sources to use, collects, then ranks what came back and looks into the
+                companies. It is the campaign screen, without the campaign screen.
+              </HelpTip>
+            </button>
+          </div>
 
           {campaignId && (
-            <>
-              <button
-                className="btn btn-sm"
-                style={{ marginBottom: 14 }}
-                disabled={busy || Boolean(recalculating)}
-                onClick={recalculate}
-              >
-                Recalculate scores
-              </button>
-              <button
-                className="btn btn-sm"
-                style={{ marginBottom: 14 }}
-                disabled={busy}
-                onClick={clearOrder}
-              >
-                Clear my order
-              </button>
-            </>
+            <div className="field">
+              <label>&nbsp;</label>
+              <div className="row" style={{ minHeight: 34, gap: 8 }}>
+                <button
+                  className="btn btn-sm"
+                  disabled={busy || Boolean(recalculating) || Boolean(finding)}
+                  onClick={recalculate}
+                >
+                  Recalculate scores
+                </button>
+                <button
+                  className="btn btn-sm"
+                  disabled={busy || Boolean(finding)}
+                  onClick={clearOrder}
+                >
+                  Clear my order
+                </button>
+              </div>
+            </div>
           )}
         </div>
+
+        <p className="filter-note small muted">
+          Pinning, rejecting and tagging work everywhere; hand-ordering needs one campaign.
+        </p>
+
+        {/* One progress bar for the whole chain, because "find more" is one
+            action: if it reported per stage there would be nothing to say. */}
+        {finding && (
+          <div className="card" style={{ marginTop: 12, marginBottom: 0 }}>
+            <div className="row" style={{ marginBottom: 8 }}>
+              {['done', 'failed', 'cancelled'].includes(finding.status) ? (
+                <Icon
+                  name={
+                    finding.status === 'done'
+                      ? 'success'
+                      : finding.status === 'cancelled'
+                        ? 'stop'
+                        : 'error'
+                  }
+                />
+              ) : (
+                <span className="spinner" />
+              )}
+              <strong>{AUTOPILOT_STAGE[finding.stage] || 'Finding opportunities'}</strong>
+              <div className="spacer" />
+              <span className="small muted">
+                step {Math.min((finding.stage_index || 0) + 1, finding.total_steps || 8)} of{' '}
+                {finding.total_steps || 8}
+              </span>
+              {!['done', 'failed', 'cancelled'].includes(finding.status) && (
+                <button className="btn btn-sm btn-danger" onClick={cancelFind}>
+                  Stop
+                </button>
+              )}
+              {['done', 'failed', 'cancelled'].includes(finding.status) && (
+                <button className="btn btn-sm" onClick={() => setFinding(null)}>
+                  Dismiss
+                </button>
+              )}
+            </div>
+            <div className="progress-track">
+              <div
+                className="progress-fill"
+                style={{
+                  width: `${
+                    finding.status === 'done'
+                      ? 100
+                      : Math.min(
+                          100,
+                          Math.round(
+                            ((finding.stage_index || 0) / (finding.total_steps || 8)) * 100,
+                          ),
+                        )
+                  }%`,
+                }}
+              />
+            </div>
+            {finding.status === 'done' && (
+              <p className="small muted" style={{ margin: '8px 0 0' }}>
+                {finding.report?.counts?.opportunities
+                  ? `${finding.report.counts.opportunities} opportunities in the new search.`
+                  : 'The search finished; the list below is refreshed.'}{' '}
+                Switch the campaign above to the new one to see it.
+              </p>
+            )}
+            {finding.status === 'failed' && (
+              <p className="small" style={{ margin: '8px 0 0', color: 'var(--danger)' }}>
+                {finding.last_error || 'The search did not finish.'}
+              </p>
+            )}
+          </div>
+        )}
 
         {summary.data && (
           <div className="grid grid-4" style={{ marginTop: 4 }}>
