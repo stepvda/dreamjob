@@ -478,6 +478,14 @@ def synthesise_campaign(
     pool = campaign_vacancy_pool(
         campaign_id, include_knowledge_base=include_knowledge_base, window_days=window_days
     )
+    # FR-186: the cap is on the campaign, not on this run.  Counting only
+    # creations made here let a second run add every row the first had capped,
+    # because they arrived as ``existing`` and the counter stayed low.
+    held = (
+        repo.count_opportunities(seeker_id, campaign_id=campaign_id)
+        if max_opportunities
+        else 0
+    )
     if max_opportunities:
         pool.sort(
             key=lambda v: str(v.get("posted_at") or v.get("collected_at") or ""),
@@ -485,6 +493,7 @@ def synthesise_campaign(
         )
 
     companies: dict[str, dict] = {}
+    timing: dict[str, str] = {}
     for vacancy in pool:
         report.considered += 1
         company_id = vacancy.get("company_id")
@@ -500,10 +509,18 @@ def synthesise_campaign(
             continue
 
         if company_id:
-            record["timing_flag"] = signals_mod.timing_flag_for(company_id)
+            # Recomputed per vacancy before, which re-ran the signal query for
+            # every posting of the same employer: 48k queries over ~1,600 firms.
+            if company_id not in timing:
+                timing[company_id] = signals_mod.timing_flag_for(company_id)
+            record["timing_flag"] = timing[company_id]
 
         existing = repo.find_by_vacancy(campaign_id, vacancy["id"], job_seeker_id=seeker_id)
-        if existing is None and max_opportunities and report.created >= max_opportunities:
+        if (
+            existing is None
+            and max_opportunities
+            and held + report.created >= max_opportunities
+        ):
             # The corpus is larger than the campaign asked to hold.  Count it so
             # the screen can say the shortlist was bounded, and keep going only
             # to refresh rows that already exist.
@@ -545,7 +562,8 @@ def _companies_by_id(company_ids: set[str]) -> dict[str, dict]:
         chunk = ids[start : start + 400]
         marks = ",".join("?" for _ in chunk)
         for row in query_all(
-            f"SELECT id, name, country, business_summary, sector_codes, markets "
+            f"SELECT id, name, country, business_summary, sector_codes, markets, "
+            f"       domain, legal_id "
             f"FROM company WHERE id IN ({marks})",
             tuple(chunk),
         ):

@@ -82,8 +82,8 @@ TITLE = "Dream Job"
 SUBTITLE = "Functional Design"
 TAGLINE = "AI-assisted job discovery and application platform"
 AUTHOR = "Stephane van der Aa"
-VERSION = "1.0"
-DATE = "8 September 2026"
+VERSION = "1.1"
+DATE = "11 September 2026"
 STATUS = "Describes the implemented system"
 SPECIFIES = "Dream Job SRS v0.3 (Dream_Job_Requirements.docx)"
 COMPANION = "Technical Architecture · DPIA"
@@ -96,12 +96,10 @@ RUNNING_HEAD = "Dream Job — Functional Design"
 # markdown contains `after`. Anchors are distinctive sentence fragments, so
 # the placement survives ordinary edits to the surrounding prose.
 #
-# `fdd-11-coverage.png` is deliberately not used: it renders 155 of 157
-# requirements (98.7%) and 9 of 9 Could, while section 12 of the markdown --
-# the source of truth, and the Technical Architecture agreeing with it --
-# states 154 of 157 (98%) and 8 of 9 Could. A figure may not contradict the
-# text it illustrates. Regenerate the chart from the same count and add it
-# back here.
+# `fdd-11-coverage.png` is generated from the same count as section 12 of the
+# markdown: both now render 156 of 157 requirements (99%) and 9 of 9 Could,
+# from scripts/traceability.py. A figure may not contradict the text it
+# illustrates; it is placed on the traceability section, anchored to the count.
 # --------------------------------------------------------------------------
 
 FIGURES = [
@@ -135,7 +133,7 @@ FIGURES = [
     ),
     dict(
         file="fdd-05-planning.png",
-        after="vacancies 7 days, company websites",
+        after="hiring signals and events 30 days",
         caption="Everything the planner settles before a single request is made, "
                 "including which records the knowledge base can already answer for.",
     ),
@@ -181,6 +179,13 @@ FIGURES = [
         caption="The verified example. Five of eight against one of nine is a wide "
                 "gap and drives the advice, but at seventeen applications the "
                 "intervals still overlap.",
+    ),
+    dict(
+        file="fdd-11-coverage.png",
+        after="156 of 157 requirements (99%)",
+        caption="Requirement coverage by MoSCoW priority. One requirement is not "
+                "cited in code, and it is the DPIA itself — a document, not a "
+                "code path.",
     ),
 ]
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker
@@ -53,7 +53,7 @@ class CorrectionIn(BaseModel):
 
 @router.get("/responses")
 def list_responses(
-    limit: int = 200, seeker: CurrentSeeker = Depends(current_seeker)
+    limit: int = Query(200, ge=1, le=1000), seeker: CurrentSeeker = Depends(current_seeker)
 ) -> list[dict]:
     """Every response received, detected or entered by hand."""
     return response_intake.list_responses(seeker.id, limit=limit)

@@ -506,21 +506,21 @@ def parse_blocks(md: str):
 # "replace" figures stand in for the block itself (the two ASCII diagrams).
 
 FIG_AFTER = {
-    "**Scale.** 172 Python modules": [
+    "**Scale.** 219 Python modules": [
         ("ta-10-codebase.png",
-         "Where the 120,308 lines sit. The pipeline package is 29% of the "
-         "backend on its own; tests are 11% of everything written.",
+         "Where the 110,773 backend lines sit. The pipeline package is 38% of "
+         "the backend on its own; the tests are a further 51,165 lines.",
          {"width": 5.75}),
     ],
     "The architecture rests on funnelling five concerns": [
         ("ta-02-chokepoints.png",
-         "The whole application narrows to five modules. Under each is the "
+         "The whole application narrows to seven modules. Under each is the "
          "requirement that module makes true for every caller, which is why "
          "these are properties rather than conventions."),
     ],
     "Full-text search over companies and vacancies": [
         ("ta-03-schema.png",
-         "How the 71 tables divide. Private tables carry a job_seeker_id and "
+         "How the 87 tables divide. Private tables carry a job_seeker_id and "
          "shared ones carry none, so erasing a job seeker leaves the market "
          "data standing; contact is the one table that sits across the line."),
     ],
@@ -537,7 +537,7 @@ FIG_AFTER = {
     ],
     "Extraction prefers JSON-LD `JobPosting`": [
         ("ta-05-adapter.png",
-         "The four-method contract every source implements, and how the 24 "
+         "The four-method contract every source implements, and how the 29 "
          "adapters divide by type."),
     ],
     "Deliberately not a broker": [
@@ -548,7 +548,7 @@ FIG_AFTER = {
     "Down from 858 KB unsplit": [
         ("ta-08-bundle.png",
          "The same numbers as a picture: what used to arrive in one payload "
-         "against the shell plus 22 chunks fetched on navigation."),
+         "against the shell plus 24 chunks fetched on navigation."),
     ],
     "Body text stays near-neutral": [
         ("ta-09-contrast.png",
@@ -562,8 +562,8 @@ FIG_AFTER = {
 FIG_REPLACE = [
     ("┌──────", "ta-01-architecture.png",
      "The system in one picture: the SPA talks only to the API, the pipeline "
-     "reaches the outside world only through the five modules below it, and "
-     "SQL is written in exactly one layer.",
+     "reaches the outside world only through the shared service modules below "
+     "it, and SQL is written in exactly one layer.",
      {"width": 5.55}),
     ("directives + composite profile + dream job model", "ta-07-dataflow.png",
      "One campaign end to end. The job seeker decides at two points, marked "

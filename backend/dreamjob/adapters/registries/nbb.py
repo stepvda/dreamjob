@@ -263,8 +263,12 @@ class NBBAdapter(RegistryAdapter):
                     record.reporting_standard = "BE-GAAP"
                     if not record.fiscal_year and deposit.get("fiscal_year"):
                         record.fiscal_year = int(deposit["fiscal_year"])
-                if facts:
-                    return [r for r in facts if r.fiscal_year]
+                usable = [r for r in facts if r.fiscal_year]
+                if usable:
+                    return usable
+                # Facts parsed but none carried a year (and the deposit has no
+                # fallback year either): fall through to the PDF rather than
+                # returning [] and dropping the filing.
         except Exception as exc:  # noqa: BLE001 - fall through to the PDF
             log.info("[%s] structured deposit %s unavailable (%s)", self.key, reference, exc)
 

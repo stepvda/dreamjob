@@ -174,7 +174,6 @@ def _validation_detail(exc: RequestValidationError) -> str:
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
     app = FastAPI(
         title="Dream Job",
         description="AI-assisted job discovery and application platform",
@@ -212,16 +211,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> JSONResponse:
-        return JSONResponse(
-            {
-                "status": "ok",
-                "env": settings.env,
-                "llm_provider": settings.llm_provider,
-                "llm_configured": bool(settings.deepseek_api_key),
-                "mail_backend": settings.mail_backend,
-                "database": str(settings.abs_db_path),
-            }
-        )
+        # Liveness only: this route is unauthenticated, so it must not disclose
+        # the deployment's environment, providers, mail backend or the absolute
+        # database path.
+        return JSONResponse({"status": "ok"})
 
     # Serve the built React SPA when present (CR-407).
     dist = REPO_ROOT / "frontend" / "dist"

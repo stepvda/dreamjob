@@ -99,3 +99,80 @@ def test_the_mining_is_idempotent(db: Path) -> None:
         (compensation_corpus.SOURCE,),
     )
     assert rows[0]["n"] == 1
+
+
+def test_a_campaign_prices_without_repeating_the_same_lookup(db: Path, monkeypatch) -> None:
+    """FR-264: 48k rows × ten filters is why a whole-campaign pass never finished.
+
+    The lookups are memoised for the run, so opportunities that share a shape
+    share the query.  Without the cache every row would run its own.
+    """
+    from dreamjob.pipeline import compensation
+
+    seeker = insert_row(
+        "job_seeker",
+        {
+            "email": "price@example.com",
+            "display_name": "Price",
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+        },
+    )
+    directive_id = insert_row(
+        "directive_set", {"job_seeker_id": seeker, "name": "d", "created_at": utcnow()}
+    )
+    profile_id = insert_row(
+        "profile_version",
+        {
+            "job_seeker_id": seeker,
+            "version": 1,
+            "sections": "{}",
+            "source_note": "manual",
+            "created_at": utcnow(),
+        },
+    )
+    campaign_id = insert_row(
+        "campaign",
+        {
+            "job_seeker_id": seeker,
+            "directive_set_id": directive_id,
+            "profile_version_id": profile_id,
+            "name": "c",
+            "created_at": utcnow(),
+        },
+    )
+    for _ in range(20):
+        insert_row(
+            "opportunity",
+            {
+                "job_seeker_id": seeker,
+                "campaign_id": campaign_id,
+                "kind": "vacancy",
+                "title": "Data Engineer",
+                "function_family": "data & analytics",
+                "seniority": "medior",
+                "country": "BE",
+                "created_at": utcnow(),
+                "updated_at": utcnow(),
+            },
+        )
+
+    posted_calls = {"n": 0}
+    obs_calls = {"n": 0}
+
+    def fake_posted(**kwargs):
+        posted_calls["n"] += 1
+        return []
+
+    def fake_observations(**kwargs):
+        obs_calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(compensation.repo, "posted_salary_corpus", fake_posted)
+    monkeypatch.setattr(compensation.repo, "compensation_observations", fake_observations)
+
+    compensation.enrich_campaign(seeker, campaign_id, limit=100)
+
+    # Three market widths at most, not twenty rows' worth.
+    assert posted_calls["n"] <= 4, posted_calls
+    assert obs_calls["n"] <= 4, obs_calls

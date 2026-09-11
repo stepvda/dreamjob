@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import urlsplit
 
 # Legal forms carry no identity: "Acme NV" and "Acme" are the same company.
 LEGAL_FORMS = frozenset(
@@ -302,11 +303,23 @@ def _week_bucket(posted_at: Any) -> str:
     return f"{iso[0]}w{iso[1]:02d}"
 
 
+def _url_identity(url: Any) -> str:
+    """A posting URL reduced to scheme://host/path, so tracking params do not split it."""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(str(url).strip())
+    except ValueError:
+        return str(url).strip().lower()
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}".rstrip("/")
+
+
 def vacancy_dedup_key(
     title: str | None,
     company: str | None,
     location: str | None = None,
     posted_at: Any = None,
+    source_url: Any = None,
 ) -> str:
     """Deterministic part of the vacancy identity (written to ``vacancy.dedup_key``).
 
@@ -314,16 +327,23 @@ def vacancy_dedup_key(
     ISO week so that the same posting re-collected a few days later still keys
     the same.  Across a week boundary the key changes, which is why the writer
     always follows a key miss with the fuzzy comparison below.
+
+    A posting with no date used to bucket as ``nodate`` and so collapsed onto
+    every other undated posting of the same title, company and place - distinct
+    hiring rounds deduplicated away for good.  When there is no date the posting
+    URL stands in as the discriminator, so the same posting still keys the same
+    and two different ones do not.
     """
-    parts = "|".join(
-        (
-            normalise_title(title),
-            normalise_company_name(company),
-            normalise_location(location),
-            _week_bucket(posted_at),
-        )
-    )
-    return hashlib.sha1(parts.encode("utf-8")).hexdigest()[:32]
+    bucket = _week_bucket(posted_at)
+    parts = [
+        normalise_title(title),
+        normalise_company_name(company),
+        normalise_location(location),
+        bucket,
+    ]
+    if bucket == "nodate":
+        parts.append(_url_identity(source_url))
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
 def assign_dedup_key(vacancy: dict) -> str:
@@ -333,6 +353,7 @@ def assign_dedup_key(vacancy: dict) -> str:
         vacancy.get("company_name_raw") or vacancy.get("company_name"),
         vacancy.get("location"),
         vacancy.get("posted_at"),
+        vacancy.get("source_url"),
     )
     vacancy["dedup_key"] = key
     return key

@@ -224,3 +224,20 @@ def test_a_board_that_appends_the_city_still_merges() -> None:
     assert dedup.is_duplicate_vacancy(
         dict(base, title="Data Engineer"), dict(base, title="Data Engineer - Gent")
     )
+
+
+def test_two_undated_postings_are_not_one_opening() -> None:
+    """An empty month used to collapse every undated repost into one row."""
+    base = {"title": "Data Engineer", "company_name_raw": "Acme NV", "location": "Gent"}
+    first = dict(base, source_url="https://jobs.test/acme/1")
+    second = dict(base, source_url="https://jobs.test/acme/2")
+
+    assert dedup.assign_dedup_key(dict(first)) != dedup.assign_dedup_key(dict(second))
+
+
+def test_the_same_undated_posting_still_merges() -> None:
+    base = {"title": "Data Engineer", "company_name_raw": "Acme NV", "location": "Gent"}
+    posting = dict(base, source_url="https://jobs.test/acme/1?utm_source=x")
+    again = dict(base, source_url="https://jobs.test/acme/1")
+
+    assert dedup.assign_dedup_key(dict(posting)) == dedup.assign_dedup_key(dict(again))

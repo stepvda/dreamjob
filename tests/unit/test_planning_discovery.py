@@ -483,6 +483,27 @@ def test_the_network_crawl_is_not_widened_by_the_campaign_cap(db):
     assert plan.native_query["max_profiles"] <= 4 * planning.DEFAULT_NETWORK_CAPS["max_profiles"]
 
 
+def test_the_network_plan_uses_its_page_budget(db):
+    """FR-165: 100 profiles at ~10 a page is ten pages, not one per title.
+
+    One page per title reached ~50 profiles and stopped, so the profile cap the
+    campaign asked for was never reached.
+    """
+    plan = planning.linkedin_network_plan(
+        adapter_key="linkedin_network",
+        keywords=["data engineer", "platform engineer"],
+        employers=["Acme"],
+        schools=["Ghent"],
+        locations=["Gent"],
+        caps={**planning.DEFAULT_CAPS, "max_people": 100},
+    )
+
+    urls = plan.native_query["search_urls"]
+    assert len(urls) > 2, "more than one page per title"
+    assert any("&page=2" in url for url in urls)
+    assert plan.estimated_pages == len(urls)
+
+
 # ---------------------------------------------------------------------------
 # The review screen (FR-163)
 # ---------------------------------------------------------------------------

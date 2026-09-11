@@ -290,21 +290,36 @@ CHALLENGE_URL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("rate_limit", re.compile(r"too[-_]?many[-_]?requests|rate[-_]?limit", re.IGNORECASE)),
 )
 
-#: DOM and copy markers, lower-cased, in the order they are tested.
+#: Structural markers, searched in the raw HTML: element ids, class names and
+#: widget attributes that only appear when the site really served a challenge.
 CHALLENGE_DOM_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "captcha",
         (
-            "g-recaptcha", "h-captcha", "hcaptcha", "recaptcha", "cf-turnstile",
-            "px-captcha", 'id="captcha"', "captcha-internal",
+            "g-recaptcha", "h-captcha", "cf-turnstile", "px-captcha",
+            'id="captcha"', "captcha-internal", "data-sitekey",
         ),
     ),
     (
         "challenge",
         (
             "challenge-dialog", "checkpoint/challenge", "cf-browser-verification",
+            "authwall",
+        ),
+    ),
+)
+
+#: Copy markers, searched in the page's *visible* text only.  A bare word in a
+#: script bundle is not a challenge - the job seeker cannot see it.  Scanning
+#: the whole HTML for the word "recaptcha" flagged any page that merely loads
+#: the reCAPTCHA script, which LinkedIn does on perfectly ordinary pages, so
+#: every run stopped on a captcha nobody could see (FR-203).
+CHALLENGE_COPY_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "challenge",
+        (
             "verify you are a human", "verify you're a human", "confirm your identity",
-            "unusual activity", "security verification", "let's do a quick security check",
+            "unusual activity", "security verification", "quick security check",
         ),
     ),
     (
@@ -346,6 +361,19 @@ class ChallengeDetected(RuntimeError):
         )
 
 
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style|noscript|template)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def visible_text(html: str) -> str:
+    """The page's rendered text: script and style blocks and tags removed."""
+    text = _SCRIPT_STYLE_RE.sub(" ", html or "")
+    text = _TAG_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def detect_challenge(
     url: str, html: str = "", *, status: int | None = None, title: str = ""
 ) -> ChallengeVerdict:
@@ -368,6 +396,15 @@ def detect_challenge(
             for marker in markers:
                 if marker in haystack:
                     return ChallengeVerdict(True, kind, f"page contains {marker!r}", url)
+
+    # Copy markers are read from the rendered text, not the source: a phrase in
+    # a script bundle is not something the user is being shown.
+    visible = f"{title}\n{visible_text(html)}".lower()
+    if visible.strip():
+        for kind, markers in CHALLENGE_COPY_MARKERS:
+            for marker in markers:
+                if marker in visible:
+                    return ChallengeVerdict(True, kind, f"page says {marker!r}", url)
     return ChallengeVerdict(False, url=url)
 
 

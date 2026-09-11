@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from dreamjob.config import get_settings
-from dreamjob.db.connection import insert_row, query_one, update_row, utcnow
+from dreamjob.db.connection import insert_row, query_one, utcnow, write_tx
 
 log = logging.getLogger(__name__)
 
@@ -275,6 +275,18 @@ SPECIAL_CATEGORY_HINTS = (
     "ethnic", "race", "biometric",
 )
 
+# Bounded so a hint matches a word, not a fragment: as a bare substring "race"
+# stripped keys as unrelated as ``trace_id``, ``embrace`` and ``party_size``.
+_SPECIAL_CATEGORY_RE = re.compile(
+    r"(?<![\w])(" + "|".join(re.escape(hint) for hint in SPECIAL_CATEGORY_HINTS) + r")(?![\w])",
+    re.IGNORECASE,
+)
+
+
+def _is_special_category(key: str) -> bool:
+    normalised = key.replace("_", " ").replace("-", " ")
+    return bool(_SPECIAL_CATEGORY_RE.search(normalised))
+
 
 def redact(payload: Any, do_not_disclose: set[str] | None = None) -> Any:
     """Drop do-not-disclose fields (FR-106) and special-category data (FR-127).
@@ -290,7 +302,7 @@ def redact(payload: Any, do_not_disclose: set[str] | None = None) -> Any:
                 key_path = f"{path}.{k}".strip(".")
                 if k.lower() in blocked or key_path.lower() in blocked:
                     continue
-                if any(h in k.lower() for h in SPECIAL_CATEGORY_HINTS):
+                if _is_special_category(k):
                     continue
                 out[k] = _clean(v, key_path)
             return out
@@ -353,17 +365,19 @@ class CampaignBudget:
             )
 
     def debit(self, usage: Usage) -> None:
-        row = self._row()
-        if not row:
+        if not self.campaign_id:
             return
-        update_row(
-            "campaign",
-            self.campaign_id,
-            {
-                "tokens_used": int(row["tokens_used"]) + usage.input_tokens + usage.output_tokens,
-                "cost_eur": float(row["cost_eur"]) + usage.cost_eur,
-            },
-        )
+        # An increment in SQL, not read-then-write: two calls running
+        # concurrently both read the same ``tokens_used`` and the second write
+        # dropped the first, so the NFR-104 budget under-counted and was not
+        # actually enforced.
+        total = usage.input_tokens + usage.output_tokens
+        with write_tx() as conn:
+            conn.execute(
+                "UPDATE campaign SET tokens_used = tokens_used + ?, "
+                "cost_eur = cost_eur + ? WHERE id = ?",
+                (total, usage.cost_eur, self.campaign_id),
+            )
 
 
 # ---------------------------------------------------------------------------

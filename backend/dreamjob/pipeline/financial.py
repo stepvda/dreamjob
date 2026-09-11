@@ -225,10 +225,23 @@ def _series(years: list[YearFigures], attribute: str) -> list[tuple[int, float]]
 
 
 def _growth_rates(series: list[tuple[int, float]]) -> list[float]:
+    """Year-over-year growth, annualised across a missing year.
+
+    Abbreviated accounts omit years, so two adjacent *present* years can be two
+    years apart.  Treating that compound change as a one-year rate overstated
+    growth and skewed the trajectory classification and its confidence.
+    """
     rates = []
-    for (_, previous), (_, current) in zip(series, series[1:], strict=False):
-        if previous > 0:
-            rates.append(current / previous - 1.0)
+    for (previous_year, previous), (current_year, current) in zip(
+        series, series[1:], strict=False
+    ):
+        if previous <= 0 or current <= 0:
+            continue
+        try:
+            gap = max(1, int(current_year) - int(previous_year))
+        except (TypeError, ValueError):
+            gap = 1
+        rates.append((current / previous) ** (1.0 / gap) - 1.0)
     return rates
 
 

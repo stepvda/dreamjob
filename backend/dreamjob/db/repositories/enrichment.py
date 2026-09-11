@@ -77,6 +77,8 @@ def list_findings(
     status: str | None = None,
     classification: str | None = None,
     include_rejected: bool = True,
+    limit: int = 200,
+    offset: int = 0,
 ) -> list[dict]:
     sql = "SELECT * FROM enrichment_finding WHERE job_seeker_id = ?"
     params: list[Any] = [job_seeker_id]
@@ -88,7 +90,8 @@ def list_findings(
         params.append(classification)
     if not include_rejected:
         sql += " AND rejected_permanently = 0"
-    sql += " ORDER BY identity_score DESC, created_at DESC"
+    sql += " ORDER BY identity_score DESC, created_at DESC LIMIT ? OFFSET ?"
+    params.extend((int(limit), int(offset)))
     return [_decode(r, _FINDING_JSON) or {} for r in query_all(sql, tuple(params))]
 
 

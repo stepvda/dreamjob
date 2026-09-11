@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from dreamjob.adapters.base import AccessMethod, AdapterCapabilities, SourceType, register_adapter
 from dreamjob.adapters.registries.common import (
@@ -122,8 +123,10 @@ class KvKAdapter(RegistryAdapter):
             return None
 
     async def search(self, name: str, *, egress: Any) -> str | None:
-        payload = await self._json(f"{SEARCH_URL}?naam={name}&pagina=1&resultatenPerPagina=5",
-                                   egress=egress)
+        payload = await self._json(
+            f"{SEARCH_URL}?naam={quote(name, safe='')}&pagina=1&resultatenPerPagina=5",
+            egress=egress,
+        )
         if not isinstance(payload, dict):
             # ``_json`` answers ``None`` for an outage, a non-2xx and a body
             # that is not JSON alike.  None of those is the register saying it

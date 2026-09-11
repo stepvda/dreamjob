@@ -13,7 +13,7 @@
  * created; it never holds a LinkedIn or Glassdoor credential (NFR-203).
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
@@ -470,6 +470,34 @@ export default function BrowserPage() {
     setStartError(null)
   }, [campaignId, site])
 
+  /* FR-204: request the estimate as soon as a campaign and site are chosen.
+     The primary action used to stay greyed until the user found a separate
+     "Estimate duration" button, which reads as a dead control.  The estimate is
+     only a figure: nothing opens, and the confirmation dialog still presents it
+     and requires the job seeker's explicit confirmation before a run starts. */
+  const estimatedFor = useRef(null)
+  useEffect(() => {
+    if (!campaignId) return undefined
+    const key = `${campaignId}|${site}`
+    if (estimatedFor.current === key) return undefined
+    estimatedFor.current = key
+    let live = true
+    setEstimating(true)
+    setPlanError(null)
+    api
+      .post('/browser/runs/estimate', { campaign_id: campaignId, site })
+      .then((res) => live && setPlan(res))
+      .catch((e) => {
+        if (!live) return
+        setPlan(null)
+        setPlanError(e)
+      })
+      .finally(() => live && setEstimating(false))
+    return () => {
+      live = false
+    }
+  }, [campaignId, site])
+
   /* Adopt a run that is already in flight, so a page reload does not lose it. */
   useEffect(() => {
     if (activeRunId || !runsQ.data) return
@@ -623,7 +651,12 @@ export default function BrowserPage() {
   if (!campaignId) blockers.push('Choose a campaign.')
   if (needsAck && !acknowledged)
     blockers.push(`Acknowledge ${siteInfo?.display_name || 'the site'}'s terms first (CR-401).`)
-  if (!plan) blockers.push('Ask for the duration estimate first (FR-204).')
+  if (!plan)
+    blockers.push(
+      estimating
+        ? 'Getting the duration estimate from the plan…'
+        : 'Ask for the duration estimate first (FR-204).',
+    )
   else if (!plan.target_count)
     blockers.push('This campaign plan holds no targets for this site, so there is nothing to run.')
   if (driver === 'cdp' && statusQ.data && !statusQ.data.connected)

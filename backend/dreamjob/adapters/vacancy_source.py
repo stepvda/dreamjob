@@ -446,10 +446,7 @@ def annualise_salary(
     def as_number(value: Any) -> float | None:
         if value in (None, "", "0", 0):
             return None
-        try:
-            return float(str(value).replace(",", "."))
-        except (TypeError, ValueError):
-            return None
+        return _parse_amount(value)
 
     minimum, maximum = as_number(low), as_number(high)
     if minimum is None and maximum is None:
@@ -646,14 +643,21 @@ _DESIRABLE_HEADINGS = (
 
 
 def _section(text: str, headings: tuple[str, ...]) -> str:
-    """Text following the first matching heading, up to the next blank-line heading."""
-    lowered = text.lower()
+    """Text following the first matching heading, up to the next blank-line heading.
+
+    Headings match on word boundaries: a bare ``find`` matched "plus" inside
+    "surplus", "extra" inside "extract" and "profil" inside "profile", so an
+    incidental word early in the advert could scope the skills scan to an
+    arbitrary slice and silently add or drop skills.
+    """
     for heading in headings:
-        index = lowered.find(heading)
-        if index < 0:
+        pattern = re.compile(
+            rf"(?<![\w]){re.escape(heading)}(?![\w])", re.IGNORECASE
+        )
+        match = pattern.search(text)
+        if match is None:
             continue
-        tail = text[index + len(heading) : index + len(heading) + 2500]
-        return tail
+        return text[match.end() : match.end() + 2500]
     return ""
 
 
@@ -688,6 +692,69 @@ _SALARY_RE = re.compile(
 )
 
 
+def _parse_amount(raw: Any) -> float | None:
+    """Parse a localized number: ``50,000`` and ``50.000`` are both 50000.
+
+    The previous parser always treated ``.`` as the grouping separator, so the
+    English form ``€50,000`` became ``50.000`` and then ``50.0`` - a thousandfold
+    error that was stored in the annual salary columns.  With two separators the
+    last one is the decimal point; with one, a group of exactly three digits is
+    grouping and anything else is a decimal.
+    """
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip().replace("\u00a0", "").replace(" ", "")
+    if not s:
+        return None
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        parts = s.split(",")
+        if _grouped(parts):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
+    elif "." in s:
+        parts = s.split(".")
+        if _grouped(parts):
+            s = s.replace(".", "")
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _grouped(parts: list[str]) -> bool:
+    """True when a separated number uses three-digit thousands grouping."""
+    return (
+        len(parts) > 1
+        and len(parts[0]) <= 3
+        and all(len(part) == 3 and part.isdigit() for part in parts[1:])
+    )
+
+
+#: Pay period stated next to a range, in the languages the sources publish in.
+_PERIOD_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?:per|/|a|à|par)\s*(?:year|annum|jaar|an)\b|jaarlijks|annuel|annual|yearly", re.I), "year"),
+    (re.compile(r"(?:per|/|a|à|par)\s*(?:month|maand|mois|monat)\b|monthly|maandelijks|mensuel", re.I), "month"),
+    (re.compile(r"(?:per|/|a|à|par)\s*(?:week|semaine|woche)\b|weekly|wekelijks", re.I), "week"),
+    (re.compile(r"(?:per|/|a|à|par)\s*(?:hour|uur|heure|stunde)\b|hourly|per uur", re.I), "hour"),
+    (re.compile(r"(?:per|/|a|à|par)\s*(?:day|dag|jour|tag)\b|daily", re.I), "day"),
+]
+
+
+def _salary_period(tail: str) -> str | None:
+    for pattern, period in _PERIOD_PATTERNS:
+        if pattern.search(tail):
+            return period
+    return None
+
+
 def parse_salary_text(text: str | None) -> tuple[float | None, float | None, str | None]:
     """Posted ranges only - never an estimate (FR-261 says "if stated")."""
     if not text:
@@ -701,12 +768,18 @@ def parse_salary_text(text: str | None) -> tuple[float | None, float | None, str
         currency = "USD"
     elif "£" in token or "gbp" in token:
         currency = "GBP"
-    try:
-        low = float(match.group(1).replace(".", "").replace(",", "."))
-        high = float(match.group(2).replace(".", "").replace(",", "."))
-    except ValueError:
+    low = _parse_amount(match.group(1))
+    high = _parse_amount(match.group(2))
+    if low is None or high is None:
         return None, None, None
-    return (low, high, currency) if low <= high else (high, low, currency)
+    if low > high:
+        low, high = high, low
+    # Scale the stated period to the annual column; an hourly or daily range
+    # returns (None, None) rather than a figure that would overstate pay.
+    low, high = annualise_salary(low, high, _salary_period(text[match.end():match.end() + 40]))
+    if low is None or high is None:
+        return None, None, None
+    return low, high, currency
 
 
 _NON_WORD = re.compile(r"[^a-z0-9]+")
@@ -769,6 +842,13 @@ def jobposting_to_fields(posting: dict, source_url: str = "") -> dict[str, Any]:
     currency = salary.get("currency") or salary.get("salaryCurrency")
     if salary_min is None and salary_max is None:
         salary_min, salary_max, currency = parse_salary_text(description[:4000])
+    else:
+        # schema.org states the pay period in unitText ("HOUR", "MONTH", ...).
+        # Ignoring it wrote an hourly rate into the annual column, a 1,000x+
+        # overstatement indistinguishable from a real annual figure (FR-261).
+        salary_min, salary_max = annualise_salary(
+            salary_min, salary_max, salary_value.get("unitText") or salary.get("unitText")
+        )
 
     employment = posting.get("employmentType")
     employment_text = (
@@ -821,12 +901,7 @@ def jobposting_to_fields(posting: dict, source_url: str = "") -> dict[str, Any]:
 
 
 def _as_float(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(str(value).replace(",", "."))
-    except (TypeError, ValueError):
-        return None
+    return _parse_amount(value)
 
 
 VACANCY_COLUMNS = {

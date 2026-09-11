@@ -328,7 +328,14 @@ class ProfileFacts:
 def profile_facts(inputs: dict[str, Any]) -> ProfileFacts:
     """The verified facts a generated document may rest on (CR-405)."""
     version = inputs.get("profile_version") or {}
-    sections: dict[str, Any] = version.get("sections") or {}
+    # FR-106: redact before folding, so a flagged field is neither checked nor
+    # shipped to the judge as the untrusted ``profile`` block.  Imported here to
+    # keep the module import order simple.
+    from dreamjob.documents.cv_generator import Disclosure  # noqa: PLC0415
+
+    sections: dict[str, Any] = Disclosure(
+        set(inputs.get("do_not_disclose") or set())
+    ).redact(version.get("sections") or {})
     composite = inputs.get("composite") or {}
     seeker = inputs.get("seeker") or {}
 
@@ -857,7 +864,13 @@ def judge(
         return [], f"{exc.__class__.__name__}: {exc}"
 
     findings: list[Finding] = []
-    for item in (response or {}).get("unsupported") or []:
+    # A model can answer with a bare JSON array; ``complete_json`` returns
+    # whatever parsed, and ``.get`` on a list raised an uncaught AttributeError
+    # that aborted the whole package instead of degrading.
+    if not isinstance(response, dict):
+        log.info("Consistency judge returned %s, not an object", type(response).__name__)
+        return [], "judge did not return an object"
+    for item in response.get("unsupported") or []:
         if not isinstance(item, dict):
             continue
         quote = str(item.get("quote") or "").strip()
@@ -874,7 +887,10 @@ def judge(
         # deterministic test.  Everything else it reports is advisory, so a
         # model that dislikes the tone cannot block a dispatch on its own.
         unsupported = unsupported_tokens(quote, facts, allow=allow, language=language)
-        severity = "high" if unsupported else min(severity, "medium", key=_SEVERITY.get)
+        # _SEVERITY is ordered most-severe-first (high=0), so capping at medium
+        # is ``max``: ``min`` would keep a bare judge "high" as high, letting the
+        # model fail a package on its own - exactly what the rule above forbids.
+        severity = "high" if unsupported else max(severity, "medium", key=_SEVERITY.get)
         detail = str(item.get("why") or "The profile does not support this claim.")[:500]
         if unsupported:
             detail = f"{detail} Not in the profile: {', '.join(unsupported[:5])}."

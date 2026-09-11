@@ -106,6 +106,30 @@ class Disclosure:
         text = str(value).strip()
         return text or None
 
+    def redact(self, sections: dict | None) -> dict:
+        """A copy of ``sections`` with every blocked path removed.
+
+        FR-106 is absolute: a flagged field must not reach an external model
+        either, not just the rendered document.  The CV generator filtered the
+        document it built but the motivation prompt and the consistency judge
+        sent the raw sections, so a flagged phone or photo path left the
+        building on every generation.
+        """
+        def walk(node: Any, prefix: str) -> Any:
+            if isinstance(node, dict):
+                out: dict[str, Any] = {}
+                for key, value in node.items():
+                    path = f"{prefix}.{key}" if prefix else str(key)
+                    if self.blocked(path):
+                        continue
+                    out[key] = walk(value, path)
+                return out
+            if isinstance(node, list):
+                return [walk(item, f"{prefix}[{index}]") for index, item in enumerate(node)]
+            return node
+
+        return walk(sections or {}, "")
+
 
 # ---------------------------------------------------------------------------
 # Result

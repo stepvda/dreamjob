@@ -706,5 +706,13 @@ def regenerate_cv_only(
             "cv_docx_path": rendered["docx_path"],
             "cv_pdf_path": rendered["pdf_path"],
             "generation_notes": notes,
+            # A different template renders a different subset of fields, so the
+            # old approval and its FR-322 report no longer describe this file.
+            # Withdraw both; the package must be checked and approved again.
+            "status": "draft",
+            "approved_at": None,
+            "approved_by": None,
+            "consistency_override": None,
+            "consistency_status": "not_run",
         },
     )

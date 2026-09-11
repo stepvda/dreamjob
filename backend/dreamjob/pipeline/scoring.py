@@ -2037,9 +2037,15 @@ def score_unscored(
     report = ScoringReport(campaign_id=campaign_id)
     scored = 0
     while True:
-        rows = repo.list_unscored(job_seeker_id, campaign_id, limit=page)
-        if wanted is not None:
-            rows = [r for r in rows if str(r.get("id")) in wanted]
+        # Narrow the query itself when a caller named ids: filtering the first
+        # page afterwards meant an older backlog could fill it, the filter would
+        # leave nothing, and the just-created rows were never scored.
+        rows = repo.list_unscored(
+            job_seeker_id,
+            campaign_id,
+            limit=page,
+            ids=list(wanted) if wanted is not None else None,
+        )
         if not rows:
             break
         progressed = 0

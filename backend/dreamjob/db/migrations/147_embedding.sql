@@ -12,7 +12,7 @@
 -- without one simply has an empty table and no new behaviour.
 -- ===========================================================================
 
-CREATE TABLE embedding (
+CREATE TABLE IF NOT EXISTS embedding (
     id            TEXT PRIMARY KEY,
     entity_type   TEXT NOT NULL,          -- vacancy|company|opportunity
     entity_id     TEXT NOT NULL,
@@ -23,5 +23,5 @@ CREATE TABLE embedding (
     created_at    TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX idx_embedding_entity ON embedding(entity_type, entity_id, model);
-CREATE INDEX idx_embedding_type ON embedding(entity_type, model);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_entity ON embedding(entity_type, entity_id, model);
+CREATE INDEX IF NOT EXISTS idx_embedding_type ON embedding(entity_type, model);

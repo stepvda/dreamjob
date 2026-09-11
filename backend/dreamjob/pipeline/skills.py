@@ -100,7 +100,11 @@ def _key(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" -")
 
 
+@lru_cache(maxsize=8192)
 def _tokens(text: str) -> set[str]:
+    # Memoised: normalise_skill re-tokenises every taxonomy label and synonym
+    # for every label that misses the exact index, so an unmatched corpus of
+    # 48k vacancies re-derived the same thousands of token sets each time.
     return {t for t in _TOKEN_RE.findall(_key(text)) if t not in _STOPWORDS and len(t) > 1}
 
 

@@ -402,6 +402,11 @@ class EgressClient:
             return None, ROBOTS_FAILURE_TTL_SECONDS, f"{type(exc).__name__}: {exc}"
         if resp.status_code == 200:
             return resp.text, ROBOTS_TTL_SECONDS, ""
+        if resp.status_code == 429 or resp.status_code >= 500:
+            # A transient refusal or an outage is "come back later", not "this
+            # site publishes no rules".  Caching 429 as an empty robots.txt
+            # switched the gate off for the domain for a whole day.
+            return None, ROBOTS_FAILURE_TTL_SECONDS, f"robots.txt returned HTTP {resp.status_code}"
         if 400 <= resp.status_code < 500:
             # RFC 9309: "unavailable" - the site publishes no rules.
             return "", ROBOTS_TTL_SECONDS, ""
@@ -828,7 +833,8 @@ class EgressClient:
         self._inflight[key] = future
         try:
             result = await self._fetch_cached(
-                url, key, access_method=access_method, max_retries=max_retries, **kwargs
+                url, key, access_method=access_method, max_retries=max_retries,
+                respect_robots=respect_robots, **kwargs
             )
         except BaseException as exc:
             future.set_exception(exc)

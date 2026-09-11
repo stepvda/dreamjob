@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 from dreamjob.db.connection import get_connection, utcnow, write_tx
@@ -51,6 +53,28 @@ def applied_versions(db_path: Path | None = None) -> dict[str, str]:
         cur.close()
 
 
+def _iter_statements(sql: str) -> Iterator[str]:
+    """Split a migration script into statements without breaking on semicolons.
+
+    ``executescript`` cannot be used here: it commits the open transaction
+    before it runs, which would separate the DDL from the ``schema_migration``
+    row and leave a half-applied migration with no version recorded if it
+    failed partway.  ``sqlite3.complete_statement`` respects string literals and
+    trigger bodies, so each statement can run inside the one transaction.
+    """
+    buffer = ""
+    for line in sql.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statement = buffer.strip()
+            if statement:
+                yield statement
+            buffer = ""
+    tail = buffer.strip()
+    if tail:
+        yield tail
+
+
 def migrate(db_path: Path | None = None) -> list[str]:
     """Apply pending migrations.  Returns the versions that were applied."""
     done = applied_versions(db_path)
@@ -67,8 +91,11 @@ def migrate(db_path: Path | None = None) -> list[str]:
                 )
             continue
         log.info("Applying migration %s_%s", version, name)
+        # One transaction for the whole file and its version row, so a failure
+        # rolls back to a clean previous state and the migration can be retried.
         with write_tx(db_path) as conn:
-            conn.executescript(sql)
+            for statement in _iter_statements(sql):
+                conn.execute(statement)
             conn.execute(
                 "INSERT INTO schema_migration (version, name, checksum, applied_at) "
                 "VALUES (?, ?, ?, ?)",

@@ -556,7 +556,15 @@ class JobRunner:
     def cancel(self, job_id: str) -> bool:
         c = self._controls.get(job_id)
         if not c:
-            update_row("job_run", job_id, {"status": "cancelled", "finished_at": utcnow()})
+            # Not running here.  Only a job that has not reached a terminal
+            # state is ours to cancel: a completed or failed run must not have
+            # its status rewritten to "cancelled", which corrupted dashboards
+            # and re-marked a finished campaign stage.
+            row = query_one("SELECT status FROM job_run WHERE id = ?", (job_id,))
+            if row and row["status"] in ("pending", "running", "paused"):
+                update_row(
+                    "job_run", job_id, {"status": "cancelled", "finished_at": utcnow()}
+                )
             return False
         with c.lock:
             c.cancelled = True

@@ -111,8 +111,22 @@ def new_session_token() -> tuple[str, str]:
     return token, hash_token(token)
 
 
+_SESSION_SECRET_WARNED = False
+
+
 def hash_token(token: str) -> str:
-    secret = get_settings().session_secret or "dreamjob-dev-session-secret"
+    global _SESSION_SECRET_WARNED
+    secret = get_settings().session_secret
+    if not secret:
+        # The fallback is a constant published in this repository.  Warn once
+        # rather than weaken every session silently (NFR-202).
+        if not _SESSION_SECRET_WARNED:
+            log.warning(
+                "DREAMJOB_SESSION_SECRET is not set; session tokens are keyed with a "
+                "public default. Set it before exposing this installation."
+            )
+            _SESSION_SECRET_WARNED = True
+        secret = "dreamjob-dev-session-secret"
     return hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest()
 
 

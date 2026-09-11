@@ -281,9 +281,15 @@ def _totp_envelope(seeker_row: dict) -> dict | None:
         raise MFAUnavailable(
             "DREAMJOB_MASTER_KEY is not configured, so the stored MFA secret cannot be read"
         ) from None
-    except Exception:  # noqa: BLE001 - a corrupt envelope must not lock the account silently
+    except Exception as exc:  # noqa: BLE001 - a corrupt envelope must fail closed
+        # Returning None here made the account log in on the password alone,
+        # because ``authenticate`` only challenges for MFA when it can read an
+        # active envelope.  A damaged or tampered secret therefore *disabled*
+        # the second factor.  Refuse instead (NFR-202).
         log.exception("Could not decrypt the MFA secret for job seeker %s", seeker_row["id"])
-        return None
+        raise MFAUnavailable(
+            "The stored MFA secret could not be read; refusing to sign in without it"
+        ) from exc
     return json.loads(raw)
 
 

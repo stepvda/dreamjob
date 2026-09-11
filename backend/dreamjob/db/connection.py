@@ -471,7 +471,10 @@ def upsert_row(
     marks = ", ".join(f":{k}" for k in payload)
     updates = ", ".join(f"{k}=excluded.{k}" for k in payload if k not in conflict_cols)
     conflict = ", ".join(conflict_cols)
-    sql = f"INSERT INTO {table} ({cols}) VALUES ({marks}) ON CONFLICT({conflict}) DO UPDATE SET {updates}"
+    # If the payload carries nothing but the conflict key, "DO UPDATE SET" with
+    # an empty assignment list is a syntax error; doing nothing is the intent.
+    action = f"DO UPDATE SET {updates}" if updates else "DO NOTHING"
+    sql = f"INSERT INTO {table} ({cols}) VALUES ({marks}) ON CONFLICT({conflict}) {action}"
     with db_logging.writing(table, "UPSERT", values.get("id")), write_tx(db_path) as conn:
         conn.execute(sql, payload)
 

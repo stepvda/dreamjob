@@ -14,7 +14,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
+from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker, owned_or_404
 from dreamjob.browser import ats_form, glassdoor
 from dreamjob.browser import linkedin as li
 from dreamjob.browser import pacing as pacing_mod
@@ -28,6 +28,10 @@ router = APIRouter()
 
 # FR-101: every route here is scoped to the authenticated job seeker.
 Seeker = Annotated[CurrentSeeker, Depends(current_seeker)]
+# The retention policy is installation-wide and the purge deletes other people's
+# browser-collected contacts, so it is an administrator's decision (NFR-303,
+# NFR-344).  The equivalent routes under /api/contacts already require one.
+Admin = Annotated[CurrentSeeker, Depends(current_admin)]
 
 SITES = {"linkedin": li, "glassdoor": glassdoor}
 
@@ -335,7 +339,7 @@ def glassdoor_snapshots(campaign_id: str, seeker: Seeker) -> dict:
 
 
 @router.get("/retention")
-def retention(seeker: Seeker) -> dict:
+def retention(admin: Admin) -> dict:
     return {
         "grace_days": repo.retention_grace_days(),
         "expired_now": len(repo.expired_browser_contacts()),
@@ -348,12 +352,12 @@ def retention(seeker: Seeker) -> dict:
 
 
 @router.put("/retention")
-def set_retention(payload: RetentionIn, seeker: Seeker) -> dict:
+def set_retention(payload: RetentionIn, admin: Admin) -> dict:
     return {"grace_days": repo.set_retention_grace_days(payload.grace_days)}
 
 
 @router.post("/retention/purge")
-def purge_retention(seeker: Seeker) -> dict:
+def purge_retention(admin: Admin) -> dict:
     return {"deleted": repo.purge_expired_browser_contacts()}
 
 

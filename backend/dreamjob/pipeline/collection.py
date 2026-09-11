@@ -629,8 +629,13 @@ def _pages_for(
     key = item.get("adapter_key") or ""
     if admin_cache is None:
         admin = administrator_caps(key)
+    elif key in admin_cache:
+        admin = admin_cache[key]
     else:
-        admin = admin_cache.setdefault(key, administrator_caps(key))
+        # ``dict.setdefault(key, administrator_caps(key))`` evaluates the read
+        # every call, so the promised one lookup per run became one per item.
+        admin = administrator_caps(key)
+        admin_cache[key] = admin
     admin_max = admin.get("max_pages")
     if admin_max:
         pages = min(pages, int(admin_max))

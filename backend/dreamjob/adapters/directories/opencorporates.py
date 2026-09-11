@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from dreamjob.adapters.base import AccessMethod, AdapterCapabilities, SourceType, register_adapter
 from dreamjob.adapters.registries.common import (
@@ -116,9 +117,13 @@ class OpenCorporatesAdapter(RegistryAdapter):
 
     # -- API calls ----------------------------------------------------------
     async def _json(self, url: str, *, egress: Any) -> Any:
-        separator = "&" if "?" in url else "?"
         try:
-            response = await egress.fetch(f"{url}{separator}api_token={self.api_key()}")
+            # The token goes in a header, not the query string: a query-string
+            # credential was written verbatim into http_cache.url, raw_document.url
+            # and every diagnostic that printed a URL (NFR-201).
+            response = await egress.fetch(
+                url, headers={"Authorization": f"Token {self.api_key()}"}
+            )
         except Exception as exc:  # noqa: BLE001 - directory outages degrade
             log.info("[%s] %s unavailable (%s)", self.key, url, exc)
             return None
@@ -140,7 +145,7 @@ class OpenCorporatesAdapter(RegistryAdapter):
     async def search(
         self, name: str, *, jurisdiction: str | None = None, egress: Any
     ) -> dict | None:
-        url = f"{API_BASE}/companies/search?q={name}&per_page=5"
+        url = f"{API_BASE}/companies/search?q={quote(name, safe='')}&per_page=5"
         if jurisdiction:
             url += f"&jurisdiction_code={jurisdiction.lower()}"
         payload = await self._json(url, egress=egress)

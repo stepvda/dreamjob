@@ -344,6 +344,27 @@ def test_do_not_disclose_is_absolute(tmp_path: Path) -> None:
     assert "+32 470" not in document.plain_text()
 
 
+def test_do_not_disclose_never_reaches_the_model_payload() -> None:
+    """FR-106 is absolute: a flagged field must not leave for the model either."""
+    from dreamjob.documents.consistency import profile_facts
+    from dreamjob.documents.cv_generator import Disclosure
+
+    ids = seed()
+    inputs = _inputs(ids)
+    inputs["do_not_disclose"] = {"contact.phone"}
+    version = dict(inputs["profile_version"])
+    sections = dict(version["sections"])
+    sections["contact"] = {**(sections.get("contact") or {}), "phone": "+32 470 11 22 33"}
+    version["sections"] = sections
+    inputs["profile_version"] = version
+
+    facts = profile_facts(inputs)
+    assert "470 11 22 33" not in facts.corpus
+
+    redacted = Disclosure({"contact.phone"}).redact(sections)
+    assert "phone" not in redacted["contact"]
+
+
 # ---------------------------------------------------------------------------
 # FR-322 / RK-03: the factual-consistency validator
 # ---------------------------------------------------------------------------
@@ -420,6 +441,48 @@ def test_judge_findings_only_fail_on_unsupported_figures_or_names() -> None:
     # A fabricated employer and a fabricated figure do.
     assert "Globex International" in unsupported_tokens("Werkte bij Globex International.", facts)
     assert "45" in unsupported_tokens("Leidde 45 mensen.", facts)
+
+
+def test_the_judge_cannot_fail_a_package_on_its_own() -> None:
+    """FR-322/RK-03: a bare judge ``high`` with nothing mechanically missing is capped.
+
+    The severity cap used ``min`` over a most-severe-first map, so ``high``
+    stayed high and a model that disliked the tone could block a dispatch on
+    its own - the invariant this module states.
+    """
+    from dreamjob.documents.consistency import judge, profile_facts
+
+    facts = profile_facts(_inputs(seed()))
+
+    class Dislikes:
+        def complete_json(self, *args: object, **kwargs: object) -> object:
+            return {
+                "unsupported": [
+                    {"quote": "a great fit for the team", "severity": "high", "why": "tone"}
+                ]
+            }
+
+    findings, error = judge("CV text", facts, Dislikes())
+
+    assert error is None
+    assert findings, "the finding is still reported"
+    assert findings[0].severity == "medium", "but it cannot fail the document"
+
+
+def test_the_judge_tolerates_a_bare_json_array() -> None:
+    """complete_json returns whatever parsed; a list must degrade, not raise."""
+    from dreamjob.documents.consistency import judge, profile_facts
+
+    facts = profile_facts(_inputs(seed()))
+
+    class AnswersAList:
+        def complete_json(self, *args: object, **kwargs: object) -> object:
+            return ["not", "an", "object"]
+
+    findings, error = judge("CV text", facts, AnswersAList())
+
+    assert findings == []
+    assert error is not None
 
 
 def test_judge_allows_the_company_and_role_the_application_is_for() -> None:

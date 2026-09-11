@@ -15,37 +15,38 @@ from __future__ import annotations
 # find backend/dreamjob -name '*.py' -not -path '*__pycache__*' | xargs wc -l
 
 CODEBASE = {
-    "backend_files": 172,
-    "backend_lines": 72_820,
-    "frontend_files": 113,
-    "frontend_lines": 34_082,
-    "test_files": 17,
-    "test_lines": 13_406,
-    "tests_passing": 528,
-    "api_routes": 301,
-    "db_tables": 71,
-    "db_indexes": 79,
-    "migrations": 10,
-    "prompt_templates": 21,
+    "backend_files": 219,
+    "backend_lines": 110_773,
+    "frontend_files": 140,
+    "frontend_lines": 40_650,
+    "test_files": 94,
+    "test_lines": 51_165,
+    "tests_passing": 1_725,
+    "api_routes": 337,
+    "db_tables": 87,
+    "db_indexes": 144,
+    "migrations": 34,
+    "prompt_templates": 24,
 }
 
 # Lines per backend package.
 PACKAGE_LINES = {
-    "pipeline": 21_038,
-    "db/repositories": 9_314,
-    "adapters": 7_744,
-    "api/routers": 7_465,
-    "documents": 6_309,
-    "postapp": 5_670,
+    "pipeline": 41_897,
+    "db/repositories": 13_700,
+    "adapters": 11_771,
+    "api/routers": 10_765,
+    "documents": 6_886,
+    "postapp": 5_719,
+    "mail": 3_823,
     "intelligence": 3_969,
-    "browser": 3_417,
-    "mail": 3_158,
-    "monitoring": 1_603,
+    "browser": 3_565,
+    "monitoring": 1_742,
+    "observability": 1_625,
+    "egress": 1_077,
+    "security": 993,
+    "llm": 812,
     "exporting": 798,
-    "security": 638,
-    "llm": 510,
-    "egress": 335,
-    "jobs": 229,
+    "jobs": 676,
 }
 
 # --- Requirement coverage ---------------------------------------------------
@@ -53,14 +54,13 @@ PACKAGE_LINES = {
 
 COVERAGE = {
     "total": 157,
-    "cited": 155,
+    "cited": 156,
     "by_priority": {          # (cited, total)
         "Must": (103, 104),
-        "Should": (43, 44),
+        "Should": (44, 44),
         "Could": (9, 9),
     },
     "uncited": [
-        ("NFR-103", "S", "Campaign completes non-browser stages within 4 hours"),
         ("NFR-304", "M", "A DPIA shall be produced before production use"),
     ],
 }
@@ -68,20 +68,26 @@ COVERAGE = {
 # --- Source adapters --------------------------------------------------------
 
 ADAPTERS = {
-    "ATS": 7,
-    "Job boards": 7,
+    "ATS": 9,
+    "Job boards": 9,
     "Registries": 5,
     "News / events": 3,
     "Directories": 1,
     "Website crawler": 1,
+    "Compensation": 1,
 }
 
 ADAPTER_NAMES = {
-    "ATS": ["Greenhouse", "Lever", "SmartRecruiters", "Ashby",
-            "Recruitee", "Personio", "Workday"],
-    "Job boards": ["EURES", "VDAB", "Jobat", "StepStone", "Indeed",
-                   "Welcome to the Jungle", "generic HTML"],
+    "ATS": ["Greenhouse", "Lever", "SmartRecruiters", "Ashby", "Recruitee",
+            "Personio", "Teamtailor", "Workable", "Workday"],
+    "Job boards": ["EURES", "VDAB", "Actiris", "Jobat", "StepStone", "Indeed",
+                   "Arbeitnow", "Welcome to the Jungle", "generic HTML"],
     "Registries": ["NBB", "KBO/BCE", "Companies House", "KvK", "SEC EDGAR"],
+    "News / events": ["company newsroom / RSS", "conference and community calendars",
+                      "Meetup and Eventbrite"],
+    "Directories": ["OpenCorporates"],
+    "Website crawler": ["company website"],
+    "Compensation": ["Eurostat Structure of Earnings Survey"],
 }
 
 # --- Frontend bundle --------------------------------------------------------
@@ -90,11 +96,11 @@ ADAPTER_NAMES = {
 BUNDLE = {
     "before_kb": 858.25,
     "before_gzip_kb": 243.13,
-    "after_initial_kb": 261.89,
-    "after_initial_gzip_kb": 88.04,
-    "largest_page_kb": 52.54,      # DirectivesPage
-    "smallest_page_kb": 9.41,      # CompaniesPage
-    "lazy_chunks": 22,
+    "after_initial_kb": 347.7,
+    "after_initial_gzip_kb": 109.6,
+    "largest_page_kb": 74.0,       # AdminPage
+    "smallest_page_kb": 7.4,       # HomePage
+    "lazy_chunks": 24,
 }
 
 # --- Accessibility ----------------------------------------------------------
@@ -180,9 +186,9 @@ SAMPLE_SIZE_DEMO = [
 # --- Help system ------------------------------------------------------------
 
 HELP = {
-    "screens_documented": 18,
-    "glossary_terms": 22,
-    "inline_tips": 386,
+    "screens_documented": 21,
+    "glossary_terms": 142,
+    "inline_tips": 305,
 }
 
 # --- Pipeline stages (specification section 2.3) ----------------------------
@@ -199,11 +205,11 @@ PHASES = [
 
 SUB_SCORES = [
     ("Profile fit", "deterministic", "skills, seniority, domain overlap"),
-    ("Dream-job fit", "LLM", "semantic match against the dream job model"),
+    ("Dream-job fit", "LLM", "0.6 semantic + 0.4 deterministic"),
     ("Directive fit", "deterministic", "location, arrangement, contract, company type"),
-    ("Company", "deterministic", "trajectory, ability to pay, investment capacity"),
+    ("Company", "deterministic", "trajectory, ability to pay, capacity, reviews"),
     ("Compensation", "deterministic", "estimate against the stated minimum"),
-    ("Plausibility", "LLM", "speculative openings only"),
+    ("Plausibility", "LLM", "every row; 1.0 when advertised"),
     ("Reachability", "deterministic", "validated contact or introduction path"),
 ]
 
@@ -225,10 +231,13 @@ STALENESS_DAYS = {
     "vacancy": 7,
     "hiring_signal": 30,
     "event": 30,
+    "board_registry": 30,
     "company": 90,
     "contact": 180,
     "competitor_link": 180,
+    "employer_kind": 180,
     "financial_year": 365,
+    "compensation_observation": 1_460,
 }
 
 # --- Collection --------------------------------------------------------------
@@ -271,35 +280,37 @@ SEGMENT_DIMENSIONS = 9
 
 
 # --- Schema scopes ----------------------------------------------------------
-# Measured from the ten migration files: a table is private when its own
-# definition carries a job_seeker_id column.
+# Measured from the migrations and the migrated database: a table is private
+# when its own definition carries a job_seeker_id column.
 #
-#   grep -c 'CREATE TABLE' backend/dreamjob/db/migrations/*.sql   -> 70
-#   plus schema_migration, created by db/migrator.py              -> 71
+#   34 migration files, 86 application tables; plus schema_migration,
+#   created by db/migrator.py, and two FTS5 virtual tables.
 #
-# ``restricted`` is one of the 25 shared tables (contact), not a sixth group:
+# ``restricted`` is one of the shared tables (contact), not a separate group:
 # it is shared except when a row was collected through browser automation.
 
 SCHEMA_SCOPES = {
-    "private": 45,      # carry job_seeker_id; every query filters on it
-    "shared": 25,       # carry no link back to a job seeker
-    "restricted": 1,    # contact, inside the 25 above (NFR-303)
+    "private": 49,      # carry job_seeker_id, or are the seeker row itself
+    "shared": 37,       # carry no link back to a job seeker
+    "restricted": 1,    # contact, inside the 37 above (NFR-303)
     "ledger": 1,        # schema_migration
 }
 
 SCHEMA_PRINCIPAL = {
-    # The principal tables of each scope, not all 71.
+    # The principal tables of each scope, not all 87.
     "private": [
         "profile_version", "profile_skill", "profile_conflict", "evidence_item",
         "persona", "composite_profile", "dream_job_model",
         "directive_set", "campaign", "opportunity", "application_package",
-        "dispatch", "incoming_reply", "pipeline_card",
+        "dispatch", "incoming_reply", "pipeline_card", "watchlist_entry",
+        "apply_selection",
     ],
     "shared": [
         "company", "vacancy", "financial_year", "financial_analysis",
-        "hiring_signal", "competitor_link",
-        "event", "raw_document", "provenance", "source_catalogue",
-        "email_pattern", "company_group_link",
+        "hiring_signal", "competitor_link", "event", "raw_document",
+        "provenance", "source_catalogue", "email_pattern", "board_registry",
+        "company_employer_kind", "company_registry_identity",
+        "compensation_observation", "embedding",
     ],
     "restricted": ["contact"],
 }
@@ -307,4 +318,4 @@ SCHEMA_PRINCIPAL = {
 # --- API surface ------------------------------------------------------------
 # ls backend/dreamjob/api/routers/*.py | grep -v __init__ | wc -l
 
-API_ROUTERS = 18
+API_ROUTERS = 22

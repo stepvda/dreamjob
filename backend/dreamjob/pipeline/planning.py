@@ -999,21 +999,31 @@ def allocate_pages(planned: list[PlannedSource], max_pages: int) -> dict[str, in
     wants = [max(1, int(item.estimated_pages or 1)) for item in planned]
     requested = sum(wants)
     if requested > max_pages:
-        floor = 1
-        surplus = max(0, max_pages - floor * len(planned))
-        over_floor = max(1, requested - floor * len(planned))
-        for item, want in zip(planned, wants, strict=True):
-            item.estimated_pages = floor + int((want - floor) * surplus / over_floor)
-        # Integer division leaves a remainder; give it to the hungriest sources.
-        granted = sum(item.estimated_pages for item in planned)
-        for want, item in sorted(
-            zip(wants, planned, strict=True), key=lambda pair: -pair[0]
-        ):
-            if granted >= max_pages:
-                break
-            if item.estimated_pages < want:
-                item.estimated_pages += 1
-                granted += 1
+        if max_pages < len(planned):
+            # More sources than the cap allows pages: handing one page to every
+            # item granted more than max_pages.  Give the pages to the hungriest
+            # sources and zero to the rest so the cap holds.
+            order = sorted(range(len(planned)), key=lambda index: -wants[index])
+            for item in planned:
+                item.estimated_pages = 0
+            for index in order[:max_pages]:
+                planned[index].estimated_pages = 1
+        else:
+            floor = 1
+            surplus = max(0, max_pages - floor * len(planned))
+            over_floor = max(1, requested - floor * len(planned))
+            for item, want in zip(planned, wants, strict=True):
+                item.estimated_pages = floor + int((want - floor) * surplus / over_floor)
+            # Integer division leaves a remainder; give it to the hungriest sources.
+            granted = sum(item.estimated_pages for item in planned)
+            for want, item in sorted(
+                zip(wants, planned, strict=True), key=lambda pair: -pair[0]
+            ):
+                if granted >= max_pages:
+                    break
+                if item.estimated_pages < want:
+                    item.estimated_pages += 1
+                    granted += 1
     granted = sum(item.estimated_pages for item in planned)
     for item in planned:
         # The reuse assessment (FR-342) measures against the budget the plan
@@ -1060,11 +1070,23 @@ def linkedin_network_plan(
         },
         {"facet": "alumni_schools", "description": "alumni of the same schools", "seeds": schools},
     ]
-    search_urls = [
-        "https://www.linkedin.com/search/results/people/?keywords="
-        + re.sub(r"\s+", "%20", title)
-        for title in titles
-    ]
+    # One search page per title reached about fifty profiles and stopped there,
+    # however many the campaign's own cap allowed: ``pages`` below was computed
+    # and never used.  Spread the profile cap over the titles at roughly ten
+    # results a page, up to the source's ten-page ceiling, and each page after
+    # the first is requested with LinkedIn's own ``page`` parameter.
+    per_title = max(
+        1, min(10, -(-max_profiles // (10 * max(1, len(titles)))))
+    )
+    search_urls: list[str] = []
+    for title in titles:
+        encoded = re.sub(r"\s+", "%20", title)
+        for page in range(1, per_title + 1):
+            suffix = "" if page == 1 else f"&page={page}"
+            search_urls.append(
+                "https://www.linkedin.com/search/results/people/?keywords="
+                f"{encoded}{suffix}"
+            )
     native_query = {
         "strategy": "network",
         "facets": facets,
@@ -1073,7 +1095,7 @@ def linkedin_network_plan(
         "max_profiles": max_profiles,
         "max_companies": max_companies,
     }
-    pages = max(1, min(10, max_profiles // 10))
+    pages = max(1, len(search_urls))
     return PlannedSource(
         adapter_key=adapter_key,
         native_query=native_query,

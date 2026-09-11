@@ -366,11 +366,11 @@ def adapter() -> None:
     # --- the population the contract holds ---------------------------------
     items = sorted(facts.ADAPTERS.items(), key=lambda kv: -kv[1])
     total = sum(v for _, v in items)
-    unit = 2.0                       # x units per adapter
-    bar_x = 82.5
+    unit = 1.5                       # x units per adapter
+    bar_x = 84.0
     y = 84.0
     for name, value in items:
-        c.text(81.0, y + 2.5, name, size=BODY_PT, colour=st.INK_2, ha="right",
+        c.text(81.5, y + 2.5, name, size=BODY_PT, colour=st.INK_2, ha="right",
                rect=(64, 0, 81.3, 100))
         c.ax.add_patch(
             st.mpatches.Rectangle((bar_x, y), value * unit, 5.0,
@@ -378,7 +378,7 @@ def adapter() -> None:
         )
         c.text(bar_x + value * unit + 1.0, y + 2.5, str(value), size=BODY_PT,
                colour=st.INK, ha="left", weight="600")
-        y -= 10.0
+        y -= 9.0
 
     c.text(64, 30,
            f"{facts.ADAPTERS_REQUIRING_ACK} of them ship disabled until\n"

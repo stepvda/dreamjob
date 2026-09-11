@@ -387,16 +387,13 @@ _LLM_COLUMNS_NO_TEXT = (
 )
 
 
-def list_llm_calls(
-    *,
-    campaign_id: str | None = None,
-    job_seeker_id: str | None = None,
-    task: str | None = None,
-    status: str | None = None,
-    entity_id: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> list[dict]:
+def _llm_call_filters(
+    campaign_id: str | None,
+    job_seeker_id: str | None,
+    task: str | None,
+    status: str | None,
+    entity_id: str | None,
+) -> tuple[str, list[Any]]:
     where: list[str] = []
     params: list[Any] = []
     for column, value in (
@@ -410,6 +407,20 @@ def list_llm_calls(
             where.append(f"{column} = ?")
             params.append(value)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
+    return clause, params
+
+
+def list_llm_calls(
+    *,
+    campaign_id: str | None = None,
+    job_seeker_id: str | None = None,
+    task: str | None = None,
+    status: str | None = None,
+    entity_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
+    clause, params = _llm_call_filters(campaign_id, job_seeker_id, task, status, entity_id)
     params.extend([limit, offset])
     return query_all(
         f"SELECT {_LLM_COLUMNS_NO_TEXT} FROM llm_call {clause} "
@@ -418,11 +429,17 @@ def list_llm_calls(
     )
 
 
-def count_llm_calls(campaign_id: str | None = None) -> int:
-    if campaign_id:
-        row = query_one("SELECT COUNT(*) AS n FROM llm_call WHERE campaign_id = ?", (campaign_id,))
-    else:
-        row = query_one("SELECT COUNT(*) AS n FROM llm_call")
+def count_llm_calls(
+    campaign_id: str | None = None,
+    *,
+    job_seeker_id: str | None = None,
+    task: str | None = None,
+    status: str | None = None,
+    entity_id: str | None = None,
+) -> int:
+    """Count the calls the same filters select, so a filtered total is the truth."""
+    clause, params = _llm_call_filters(campaign_id, job_seeker_id, task, status, entity_id)
+    row = query_one(f"SELECT COUNT(*) AS n FROM llm_call {clause}", tuple(params))
     return int(row["n"]) if row else 0
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from dreamjob.adapters.base import (
     AdapterCapabilities,
@@ -91,7 +92,8 @@ class IndeedAdapter(HtmlBoardAdapter):
             for location in cfg.get("locations") or [""]:
                 url = (
                     f"{str(cfg['api_base']).rstrip('/')}/jobs"
-                    f"?q={query}&l={location}&limit={min(limit, 50)}"
+                    f"?q={quote(str(query), safe='')}&l={quote(str(location), safe='')}"
+                    f"&limit={min(limit, 50)}"
                 )
                 result = await self._get(
                     url, headers={"Authorization": f"Bearer {cfg['api_key']}"}

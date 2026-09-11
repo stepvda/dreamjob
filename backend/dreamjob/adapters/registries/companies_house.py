@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 from dreamjob.adapters.base import AccessMethod, AdapterCapabilities, SourceType, register_adapter
 from dreamjob.adapters.registries.common import (
@@ -151,7 +152,8 @@ class CompaniesHouseAdapter(RegistryAdapter):
 
     async def search(self, name: str, *, egress: Any) -> str | None:
         payload = await self._json(
-            f"{API_BASE}/search/companies?q={name}&items_per_page=5", egress=egress
+            f"{API_BASE}/search/companies?q={quote(name, safe='')}&items_per_page=5",
+            egress=egress,
         )
         if not isinstance(payload, dict):
             # An outage, a non-2xx and an unparseable body all arrive as

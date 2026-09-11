@@ -82,6 +82,7 @@ async def enrich_campaign(
     job_seeker_id: str,
     *,
     limit: int = DEFAULT_COMPANY_LIMIT,
+    company_ids: list[str] | None = None,
     do_employer_kind: bool = True,
     do_domains: bool = True,
     do_profiles: bool = True,
@@ -91,12 +92,17 @@ async def enrich_campaign(
 ) -> EnrichmentReport:
     """Run the company-enrichment passes for one campaign's companies.
 
-    Never raises for a failed pass: each is caught and recorded, because a
-    campaign that collected thousands of vacancies is worth keeping even if the
-    register was unreachable that evening.
+    ``company_ids`` narrows the run to a named set; without it the campaign's
+    busiest companies are used.  Never raises for a failed pass: each is caught
+    and recorded, because a campaign that collected thousands of vacancies is
+    worth keeping even if the register was unreachable that evening.
     """
     report = EnrichmentReport(campaign_id=campaign_id)
-    company_ids = _campaign_companies(campaign_id, limit)
+    company_ids = (
+        [str(c) for c in company_ids if c][:limit]
+        if company_ids is not None
+        else _campaign_companies(campaign_id, limit)
+    )
     report.companies = len(company_ids)
     if not company_ids:
         report.skipped.append("no companies in this campaign")
@@ -180,7 +186,7 @@ async def enrich_companies(
         )
         report.signals = await _guarded("signals", _refresh_signals(ids), report)
         return report
-    return await enrich_campaign(campaign_id, job_seeker_id, limit=len(ids))
+    return await enrich_campaign(campaign_id, job_seeker_id, limit=len(ids), company_ids=ids)
 
 
 # ---------------------------------------------------------------------------

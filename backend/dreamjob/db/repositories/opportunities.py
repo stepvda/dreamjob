@@ -255,19 +255,34 @@ def iter_for_relevance(
 
 
 def list_unscored(
-    job_seeker_id: str, campaign_id: str, *, limit: int = 500, offset: int = 0
+    job_seeker_id: str,
+    campaign_id: str,
+    *,
+    limit: int = 500,
+    offset: int = 0,
+    ids: list[str] | None = None,
 ) -> list[dict]:
     """Opportunities in a campaign that carry no score yet (FR-281).
 
     The immediate-scoring path and the backfill both need exactly this set, and
     both need it bounded: a campaign can hold tens of thousands of rows, so this
-    pages rather than reading them all into memory at once.
+    pages rather than reading them all into memory at once.  ``ids`` narrows it
+    to a named set in SQL, so a caller that just added a few rows scores those
+    rows rather than paging past the backlog to find them.
     """
     sql = (
         f"{_LIST_SELECT} WHERE o.job_seeker_id = ? AND o.campaign_id = ? "
-        "AND o.score IS NULL ORDER BY o.created_at ASC LIMIT ? OFFSET ?"
+        "AND o.score IS NULL"
     )
-    rows = query_all(sql, (job_seeker_id, campaign_id, int(limit), int(offset)))
+    params: list[Any] = [job_seeker_id, campaign_id]
+    if ids:
+        chunk = [str(value) for value in ids][:900]
+        marks = ",".join("?" for _ in chunk)
+        sql += f" AND o.id IN ({marks})"
+        params.extend(chunk)
+    sql += " ORDER BY o.created_at ASC LIMIT ? OFFSET ?"
+    params.extend((int(limit), int(offset)))
+    rows = query_all(sql, tuple(params))
     return [decode(r) for r in rows]  # type: ignore[misc]
 
 

@@ -214,6 +214,8 @@ def list_findings(
     status_filter: str | None = Query(None, alias="status"),
     classification: str | None = Query(None),
     include_rejected: bool = Query(True),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     seeker: CurrentSeeker = Depends(current_seeker),
 ) -> list[dict]:
     return repo.list_findings(
@@ -221,6 +223,8 @@ def list_findings(
         status=status_filter,
         classification=classification,
         include_rejected=include_rejected,
+        limit=limit,
+        offset=offset,
     )
 
 

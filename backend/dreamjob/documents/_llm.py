@@ -25,7 +25,11 @@ log = logging.getLogger(__name__)
 #: DeepSeek's ceiling for a single completion.
 MAX_OUTPUT_TOKENS = 8000
 
-_DEGRADABLE = ("empty llm response", "could not parse json")
+#: Messages that mean "the strong model gave us nothing usable", so the task is
+#: worth retrying on the chat model.  ``complete`` raises "empty answer" (the
+#: string this list used to miss, making the empty-response fallback dead);
+#: ``parse_json`` raises "could not parse json".
+_DEGRADABLE = ("empty answer", "empty llm response", "could not parse json")
 
 
 def complete_json(llm: LLMClient, task: str, system: str, user: str, **kwargs: Any) -> Any:

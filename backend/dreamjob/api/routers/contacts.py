@@ -256,7 +256,9 @@ async def discover_company_contacts(
     return {
         "company_id": company_id,
         "outcome": outcome.as_dict(),
-        "contacts": repo.contacts_for_company(company_id, include_blocked=True),
+        "contacts": repo.contacts_for_company(
+            company_id, include_blocked=bool(seeker.is_admin)
+        ),
     }
 
 
@@ -351,8 +353,15 @@ def contacts_for_company(
     campaign_id: str | None = None,
     include_blocked: bool = Query(default=False),
 ) -> list[dict]:
-    """Every stored contact of a company (FR-301, NFR-302, NFR-303)."""
+    """Every stored contact of a company (FR-301, NFR-302, NFR-303).
+
+    Blocked people are only listed to an administrator: the list names the
+    individuals who invoked their NFR-302 opt-out, and the usable path is what
+    a job seeker is shown.
+    """
     if include_blocked:
+        if not seeker.is_admin:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
         return repo.contacts_for_company(company_id, include_blocked=True)
     return repo.usable_contacts_for_company(
         company_id, campaign_id=campaign_id, require_email=False

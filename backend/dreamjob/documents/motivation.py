@@ -61,6 +61,7 @@ from typing import Any
 from dreamjob.db.connection import utcnow
 from dreamjob.documents._llm import complete_json
 from dreamjob.documents.consistency import fold
+from dreamjob.documents.cv_generator import Disclosure
 from dreamjob.documents.pdf_builder import (
     PdfBuilder,
     cover_page,
@@ -623,10 +624,15 @@ def _llm_content(
     dream = inputs.get("dream_job") or {}
 
     prompt = load_prompt(PROMPT_NAME)
+    # FR-106: a field flagged "do not disclose" must not leave the building, so
+    # the payload sent to the model is redacted, not only the rendered document.
+    sections = Disclosure(set(inputs.get("do_not_disclose") or set())).redact(
+        version.get("sections") or {}
+    )
     profile_payload = {
-        "summary": (version.get("sections") or {}).get("summary"),
-        "experience": (version.get("sections") or {}).get("experience"),
-        "education": (version.get("sections") or {}).get("education"),
+        "summary": sections.get("summary"),
+        "experience": sections.get("experience"),
+        "education": sections.get("education"),
         "skills": [s.get("normalised_label") for s in inputs.get("skills") or []],
         "composite": {
             key: composite.get(key)

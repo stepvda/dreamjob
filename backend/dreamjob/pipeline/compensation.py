@@ -40,8 +40,10 @@ self-selected sample, not a measurement.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import statistics
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -52,6 +54,42 @@ log = logging.getLogger(__name__)
 
 #: Minimum comparable postings before a corpus width is considered usable.
 MIN_CORPUS_SIZE = 3
+
+
+# ---------------------------------------------------------------------------
+# Per-run lookup cache
+# ---------------------------------------------------------------------------
+#
+# Estimating one opportunity reads the corpus up to ten times: three company
+# widths, three market widths, company observations, the market observations,
+# the survey rows and the employer rating.  Across a campaign of forty-eight
+# thousand rows those filters repeat almost entirely, so the same query was run
+# tens of thousands of times and a whole-campaign pricing pass did not finish.
+# The cache only exists inside :func:`pricing_session`, so a single-opportunity
+# refresh still reads the database every time and can never serve a stale range.
+
+_LOOKUP: contextvars.ContextVar[dict[Any, Any] | None] = contextvars.ContextVar(
+    "compensation_lookup", default=None
+)
+
+
+@contextmanager
+def pricing_session():
+    """Memoise corpus lookups for the duration of a bulk pricing pass."""
+    token = _LOOKUP.set({})
+    try:
+        yield
+    finally:
+        _LOOKUP.reset(token)
+
+
+def _memo(key: Any, load: Any) -> Any:
+    cache = _LOOKUP.get()
+    if cache is None:
+        return load()
+    if key not in cache:
+        cache[key] = load()
+    return cache[key]
 
 #: Weight per source kind: how much the blended range listens to it (FR-264).
 SOURCE_WEIGHTS: dict[str, float] = {
@@ -288,12 +326,24 @@ def posted_range_sources(
     terms = _title_terms(opportunity.get("title"))
 
     def corpus(kind: str, label: str, **query: Any) -> SourceContribution | None:
-        rows = repo.posted_salary_corpus(
-            function_family=query.get("function_family"),
-            seniority=query.get("seniority"),
-            country=query.get("country"),
-            title_terms=query.get("title_terms"),
-            company_id=query.get("company_id"),
+        terms = query.get("title_terms")
+        key = (
+            "posted",
+            query.get("function_family"),
+            query.get("seniority"),
+            query.get("country"),
+            tuple(terms) if terms else (),
+            query.get("company_id"),
+        )
+        rows = _memo(
+            key,
+            lambda: repo.posted_salary_corpus(
+                function_family=query.get("function_family"),
+                seniority=query.get("seniority"),
+                country=query.get("country"),
+                title_terms=query.get("title_terms"),
+                company_id=query.get("company_id"),
+            ),
         )
         return _corpus_contribution(
             rows, label=label, kind=kind, currency=currency,
@@ -394,23 +444,34 @@ def survey_occupations(seniority: str | None) -> list[str]:
 def observation_sources(opportunity: dict, *, currency: str) -> list[SourceContribution]:
     """Salary surveys and Glassdoor/Levels rows collected by other slices (FR-264)."""
     country = opportunity.get("country")
-    rows = repo.compensation_observations(
-        function_family=opportunity.get("function_family"),
-        seniority=opportunity.get("seniority"),
-        country=country,
+    family = opportunity.get("function_family")
+    seniority = opportunity.get("seniority")
+    rows = list(
+        _memo(
+            ("obs_market", family, seniority, country),
+            lambda: repo.compensation_observations(
+                function_family=family, seniority=seniority, country=country
+            ),
+        )
     )
     # Guarded: an unfiltered call returns the whole table, so an opportunity
     # with no company linked would be priced off every observation ever
     # collected, for every country and occupation.
     if opportunity.get("company_id"):
-        rows += repo.compensation_observations(company_id=opportunity["company_id"])
+        rows += _memo(
+            ("obs_company", opportunity["company_id"]),
+            lambda: repo.compensation_observations(company_id=opportunity["company_id"]),
+        )
     # National survey rows carry an occupation rather than a function family, so
     # they are unreachable by the lookup above and are asked for by occupation.
     # Only the best-matching occupation is taken: two groups from one survey are
     # one source read twice, and would weigh on the blend as if they were two.
-    for occupation in survey_occupations(opportunity.get("seniority")):
-        survey_rows = repo.compensation_observations(
-            country=country, normalised_titles=[occupation], market_wide=True
+    for occupation in survey_occupations(seniority):
+        survey_rows = _memo(
+            ("obs_survey", country, occupation),
+            lambda occupation=occupation: repo.compensation_observations(
+                country=country, normalised_titles=[occupation], market_wide=True
+            ),
         )
         if survey_rows:
             rows += survey_rows
@@ -630,7 +691,11 @@ def employer_signal(
     rows and the campaign's own Glassdoor snapshots are both read; the snapshots
     stay campaign-scoped and are never written back into the shared base.
     """
-    rows = repo.employer_reviews(company_id) if company_id else []
+    rows = (
+        _memo(("reviews", company_id), lambda: repo.employer_reviews(company_id))
+        if company_id
+        else []
+    )
     rows = [*rows, *_advisory_employer_rows(advisory, company_name)]
     if not rows:
         return None, []
@@ -912,14 +977,18 @@ def enrich_campaign(job_seeker_id: str, campaign_id: str, *, limit: int = 1000) 
     )
     # Read once for the campaign rather than once per opportunity.
     advisory = campaign_advisory(campaign_id)
-    for opportunity in rows:
-        result = enrich_opportunity(opportunity, advisory=advisory)
-        if result.is_stated:
-            stated += 1
-        elif result.comp_max is not None:
-            priced += 1
-        else:
-            unpriced += 1
+    # Memoise the corpus lookups for the run: a campaign's rows share a handful
+    # of (family, seniority, country) shapes, so the same query was being run
+    # for every opportunity and a whole-campaign pass never finished.
+    with pricing_session():
+        for opportunity in rows:
+            result = enrich_opportunity(opportunity, advisory=advisory)
+            if result.is_stated:
+                stated += 1
+            elif result.comp_max is not None:
+                priced += 1
+            else:
+                unpriced += 1
     return {
         "campaign_id": campaign_id,
         "opportunities": len(rows),

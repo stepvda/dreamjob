@@ -141,13 +141,16 @@ class PersonioAdapter(ATSAdapter):
         # The feed is third-party input; cap it before handing it to expat so a
         # hostile or broken tenant cannot exhaust memory (NFR-205).
         if len(xml_body) > MAX_FEED_BYTES:
+            # Raise rather than return []: an empty list here would be recorded
+            # as "the employer states no openings" (empty_parse_is_stated) and a
+            # broken or oversized feed would be invisible to NFR-403.
             log.warning("Personio feed exceeds %d bytes; refusing to parse", MAX_FEED_BYTES)
-            return []
+            raise ValueError(f"Personio feed exceeds {MAX_FEED_BYTES} bytes")
         try:
             root = ElementTree.fromstring(xml_body)
         except ElementTree.ParseError as exc:
             log.warning("Personio feed is not well-formed XML: %s", exc)
-            return []
+            raise ValueError(f"Personio feed is not well-formed XML: {exc}") from exc
         out: list[dict[str, Any]] = []
         for node in root.iter("position"):
             fields: dict[str, Any] = {}

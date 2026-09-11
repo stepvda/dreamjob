@@ -572,6 +572,37 @@ def test_an_ordinary_page_is_not_a_challenge():
     ).detected
 
 
+def test_a_page_that_merely_loads_the_recaptcha_script_is_not_a_captcha():
+    """LinkedIn references the reCAPTCHA script on ordinary pages.
+
+    Scanning the whole HTML for the bare word flagged every run as blocked on a
+    captcha the job seeker could not see (FR-203).
+    """
+    html = (
+        '<html><head><script src="https://www.google.com/recaptcha/api.js" async>'
+        "</script></head><body><h1>People</h1></body></html>"
+    )
+    verdict = pacing_mod.detect_challenge(
+        "https://www.linkedin.com/search/results/people?keywords=architect",
+        html,
+        status=200,
+    )
+    assert not verdict.detected
+
+
+def test_a_phrase_inside_a_script_is_not_a_challenge():
+    html = '<html><body><p>People</p><script>var msg = "try again later";</script></body></html>'
+    assert not pacing_mod.detect_challenge(
+        "https://www.linkedin.com/in/jane", html, status=200
+    ).detected
+
+
+def test_a_rendered_captcha_widget_is_still_a_captcha():
+    html = '<div class="g-recaptcha" data-sitekey="abc"></div>'
+    verdict = pacing_mod.detect_challenge("https://www.linkedin.com/in/jane", html, status=200)
+    assert verdict.detected and verdict.kind == "captcha"
+
+
 async def test_a_run_stops_immediately_on_a_challenge(db, virtual_time):
     seeker_id = _seeker()
     targets = [

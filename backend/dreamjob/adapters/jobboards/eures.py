@@ -212,7 +212,7 @@ class EuresAdapter(VacancySourceAdapter):
                 url,
                 method="POST",
                 json=self.search_body(
-                    keywords[0], countries, page, per_page,
+                    keywords, countries, page, per_page,
                     publication_period=period, sector_codes=sectors,
                 ),
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
@@ -357,7 +357,7 @@ class EuresAdapter(VacancySourceAdapter):
 
     @staticmethod
     def search_body(
-        keyword: str,
+        keyword: str | list[str],
         country_codes: list[str],
         page: int,
         per_page: int,
@@ -379,10 +379,16 @@ class EuresAdapter(VacancySourceAdapter):
         BE1 + LAST_WEEK is 1,593 of the country's 232,496 rows, and adding
         NACE section N leaves 482.
         """
+        terms = [keyword] if isinstance(keyword, str) else list(keyword)
         body: dict[str, Any] = {
-            "keywords": (
-                [{"keyword": keyword, "specificSearchCode": "EVERYWHERE"}] if keyword else []
-            ),
+            # Every keyword the plan item names, not just the first: the service
+            # accepts a list here, and dropping the rest silently collected a
+            # fraction of what the campaign asked for.
+            "keywords": [
+                {"keyword": str(term), "specificSearchCode": "EVERYWHERE"}
+                for term in terms
+                if str(term).strip()
+            ],
             "locationCodes": list(country_codes),
             "sortSearch": "BEST_MATCH",
             # The clamp is repeated here because this is a public entry point:

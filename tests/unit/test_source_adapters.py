@@ -296,8 +296,10 @@ def test_jsonld_jobposting_maps_onto_vacancy_columns():
     assert fields["location"] == "Gent, Oost-Vlaanderen"
     assert fields["country"] == "BE"
     assert fields["latitude"] == pytest.approx(51.05)
-    assert fields["salary_min"] == 4200
-    assert fields["salary_max"] == 5200
+    # unitText is MONTH, and the vacancy columns are annual (FR-261), so the
+    # stated range is annualised rather than stored as if it were yearly.
+    assert fields["salary_min"] == 4200 * 12
+    assert fields["salary_max"] == 5200 * 12
     assert fields["salary_currency"] == "EUR"
     assert fields["contract_type"] == "permanent"
     assert fields["posted_at"].startswith("2026-08-06")

@@ -182,8 +182,14 @@ async def _run_follow_ups() -> dict[str, Any]:
     """Notify about follow-ups whose date has passed (FR-327, FR-403).
 
     Notifies only.  Sending the follow-up is the mail slice's job and needs the
-    seeker's approval first (NFR-305).
+    seeker's approval first (NFR-305).  Runs in a worker thread: it is a
+    synchronous loop over every active seeker, and doing it on the serving loop
+    stalls all HTTP traffic for the duration.
     """
+    return await asyncio.to_thread(_follow_ups_sweep)
+
+
+def _follow_ups_sweep() -> dict[str, Any]:
     now = utcnow()
     since = (datetime.now(UTC) - timedelta(days=90)).isoformat(timespec="seconds")
     raised = 0
@@ -355,6 +361,9 @@ class Scheduler:
     jitter_seconds: int = JITTER_SECONDS
     _task: asyncio.Task | None = None
     _stop: asyncio.Event | None = None
+    #: One lock per task name, so a manual run and the periodic tick cannot run
+    #: the same sweep at once (two watchlist passes, double network and writes).
+    _locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     started_at: str | None = None
     runs: int = 0
 
@@ -367,6 +376,14 @@ class Scheduler:
 
     async def run_task(self, task: Task) -> dict[str, Any]:
         """Run one task, recording its outcome either way."""
+        lock = self._locks.setdefault(task.name, asyncio.Lock())
+        if lock.locked():
+            log.info("Scheduler task %s is already running; skipping this trigger", task.name)
+            return {"skipped": "already running"}
+        async with lock:
+            return await self._run_task_locked(task)
+
+    async def _run_task_locked(self, task: Task) -> dict[str, Any]:
         started = datetime.now(UTC)
         try:
             result = task.run()

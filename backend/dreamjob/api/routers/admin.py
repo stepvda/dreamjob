@@ -674,7 +674,13 @@ def list_llm_calls(
         offset=offset,
     )
     return {
-        "total": repo.count_llm_calls(campaign_id),
+        "total": repo.count_llm_calls(
+            campaign_id,
+            job_seeker_id=job_seeker_id,
+            task=task,
+            status=call_status,
+            entity_id=entity_id,
+        ),
         "limit": limit,
         "offset": offset,
         "items": rows,

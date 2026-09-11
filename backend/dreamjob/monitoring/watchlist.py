@@ -450,7 +450,11 @@ async def check_entry(
 
         if "news" in enabled or "signals" in enabled:
             _, error = await _news_and_signals(entry, company)
-            report.channels.append(ChannelResult("news", True, 0, error))
+            # Report the channel that actually ran; labelling a signals-only
+            # pass "news" hides which channel was silent.
+            report.channels.append(
+                ChannelResult("news" if "news" in enabled else "signals", True, 0, error)
+            )
 
         if "filings" in enabled:
             refresh = _needs_filing_refresh(company_id)
@@ -463,6 +467,7 @@ async def check_entry(
             await client.__aexit__(None, None, None)
 
     # What is actually new, measured against the previous pass.
+    new_vacancy_rows = repo.vacancies_since(company_id, since)
     report.new_vacancies = [
         {
             "id": v["id"],
@@ -471,7 +476,7 @@ async def check_entry(
             "source_url": v.get("source_url"),
             "posted_at": v.get("posted_at") or v.get("collected_at"),
         }
-        for v in repo.vacancies_since(company_id, since)
+        for v in new_vacancy_rows
     ]
     report.new_signals = [
         {
@@ -493,9 +498,8 @@ async def check_entry(
         log.debug("Could not recompute the timing window for %s", company_id)
 
     if entry.get("campaign_id") and report.new_vacancies:
-        vacancy_rows = repo.vacancies_since(company_id, since)
         report.opportunities_added = add_to_ranked_list(
-            job_seeker_id, entry["campaign_id"], vacancy_rows
+            job_seeker_id, entry["campaign_id"], new_vacancy_rows
         )
 
     if notify:
