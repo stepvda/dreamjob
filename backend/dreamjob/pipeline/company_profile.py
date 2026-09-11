@@ -145,6 +145,14 @@ def size_band_for(fte: Any) -> str | None:
 
 
 def home_url_for(company: dict) -> str | None:
+    """Where to start reading about this company.
+
+    The company's own site first.  When there is none, its ATS board: a board is
+    a real page about the employer - its name, often a logo and a link out, and
+    job descriptions that name the products and the stack - so it is a poor
+    source that beats no source.  Before this the crawl simply gave up, which is
+    why 57 of 66 employers behind one seeker's opportunities had no profile.
+    """
     domain = (company.get("domain") or "").strip()
     if domain:
         if domain.startswith(("http://", "https://")):
@@ -153,7 +161,13 @@ def home_url_for(company: dict) -> str | None:
     source = (company.get("source") or "").strip()
     if source.startswith(("http://", "https://")):
         return source
-    return None
+    careers = (company.get("careers_url") or "").strip()
+    if careers.startswith(("http://", "https://")):
+        return careers
+    # Last resort: build the board URL from what the ATS detection recorded.
+    from dreamjob.pipeline.domain_resolver import board_url  # noqa: PLC0415
+
+    return board_url(company)
 
 
 # ---------------------------------------------------------------------------

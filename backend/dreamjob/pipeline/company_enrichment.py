@@ -55,6 +55,7 @@ SWEEP_COMPANY_LIMIT = 60
 class EnrichmentReport:
     campaign_id: str | None = None
     companies: int = 0
+    domains: dict[str, Any] = field(default_factory=dict)
     employer_kind: dict[str, Any] = field(default_factory=dict)
     profiles: dict[str, Any] = field(default_factory=dict)
     signals: dict[str, Any] = field(default_factory=dict)
@@ -65,6 +66,7 @@ class EnrichmentReport:
         return {
             "campaign_id": self.campaign_id,
             "companies": self.companies,
+            "domains": self.domains,
             "employer_kind": self.employer_kind,
             "profiles": self.profiles,
             "signals": self.signals,
@@ -79,6 +81,7 @@ async def enrich_campaign(
     *,
     limit: int = DEFAULT_COMPANY_LIMIT,
     do_employer_kind: bool = True,
+    do_domains: bool = True,
     do_profiles: bool = True,
     do_signals: bool = True,
     do_financials: bool = True,
@@ -95,6 +98,13 @@ async def enrich_campaign(
     if not company_ids:
         report.skipped.append("no companies in this campaign")
         return report
+
+    if do_domains:
+        # Before the crawl: the crawl needs a URL, and most of these companies
+        # have no domain recorded even though a vacancy URL or an ATS tenant
+        # name says what it is. Without this the profile pass reports success
+        # and stores nothing.
+        report.domains = await _guarded("domains", _fill_domains(company_ids), report)
 
     if do_employer_kind:
         report.employer_kind = await _guarded(
@@ -162,6 +172,13 @@ async def enrich_companies(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+async def _fill_domains(company_ids: list[str]) -> dict:
+    """Find the websites of the companies about to be profiled (FR-221)."""
+    from dreamjob.pipeline import domain_resolver  # noqa: PLC0415
+
+    return await domain_resolver.backfill(len(company_ids), company_ids=company_ids)
 
 
 async def _guarded(name: str, awaitable: Any, report: EnrichmentReport) -> dict:
