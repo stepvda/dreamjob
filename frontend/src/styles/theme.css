@@ -799,3 +799,42 @@ tr.row-disabled td:first-child { opacity: 0.75; }
 }
 
 .wfstrip-sep { color: var(--steps-sep); font-size: 14px; padding: 0 2px; }
+
+/* --------------------------------------------------------------------------
+   Journey strip - contrast, explicitly
+
+   The first pass let the current pill take its colour from --hue. Where that
+   variable did not resolve the background fell back to the soft tint of an
+   earlier rule while the text stayed white, which is white on pale lavender -
+   the least readable element on the page. These rules name their colours, so
+   nothing depends on a cascade that can half-apply, and the current phase is a
+   white pill with near-black text: the highest contrast pair available on a
+   dark band, and unmistakable against the muted rest.
+   -------------------------------------------------------------------------- */
+
+.wfstrip-node { color: #cbccd6; }
+.wfstrip-node:hover { background: rgba(255, 255, 255, 0.14); color: #ffffff; }
+.wfstrip-node.wfmap-done,
+.wfstrip-node.wfmap-active { color: #ffffff; }
+
+.wfstrip-node.wfmap-current,
+.wfstrip-node.wfmap-current:hover {
+  background: #ffffff;
+  border-color: #ffffff;
+  color: #14141a;
+  font-weight: 700;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+}
+
+.wfstrip-node.wfmap-current .wfmap-dot {
+  background: var(--hue, #4f57cf);
+  border-color: var(--hue, #4f57cf);
+  color: #ffffff;
+}
+
+.wfstrip-node.wfmap-done .wfmap-dot {
+  background: var(--hue, #4f57cf);
+  border-color: var(--hue, #4f57cf);
+}
+
+.wfstrip-sep { color: rgba(255, 255, 255, 0.45); }

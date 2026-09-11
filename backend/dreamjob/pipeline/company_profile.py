@@ -426,7 +426,13 @@ def _synthesise(
             user=user,
             untrusted=untrusted,
             prefer_strong=False,
-            max_tokens=6000,
+            # 6000 was the whole of the model's answer budget and the answers
+            # were landing at 5,585 on average - so a third of them were cut off
+            # mid-JSON, complete_json raised, and the company was stored with no
+            # business summary and therefore no sector, size, stage or
+            # trajectory: everything scoring reads about an employer.  The
+            # schema this prompt asks for does not fit in 6,000 tokens.
+            max_tokens=8000,
             entity_type="company",
             entity_id=company["id"],
             prompt_template=template.name,
