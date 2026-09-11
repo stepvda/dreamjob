@@ -253,15 +253,15 @@ export function SendReport({ result, error, onDismiss, onSendNow }) {
 
           <span className="muted">Attached</span>
           <span>
-            {result.attachments?.length > 0 ? (
+            {Array.isArray(result.attachments) && result.attachments.length > 0 ? (
               result.attachments.map((name) => (
                 <Badge tone="info" key={name}>
                   <Icon name="document" /> {name}
                 </Badge>
               ))
-            ) : (
+            ) : Array.isArray(result.attachments) ? (
               <span className="muted">nothing — this package has no CV attached</span>
-            )}
+            ) : null}
             <span className="tiny muted">
               The briefing and the motivation document are not in this list, and cannot be.
             </span>

@@ -531,6 +531,12 @@ def test_a_send_outside_the_window_is_queued_not_lost(world):
     )
     assert result["status"] == "queued"
     assert result["scheduled_for"]
+    # The queued report names the recipient and the attachment, so the UI does
+    # not show a blank recipient or claim the CV is missing while it waits.
+    assert result["recipient"] == "marie@acme.test"
+    assert result["recipient_name"] == "Marie Dupont"
+    assert result["subject"] == "Head of Analytics at Acme"
+    assert result["attachments"] == ["CV-Stephane-van-der-Aa.pdf"]
     row = repo.get_dispatch(result["dispatch_id"], world["seeker_id"])
     assert row["delivery_status"] == "queued"
     assert world["backend"].sent == []

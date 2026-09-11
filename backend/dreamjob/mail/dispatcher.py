@@ -542,6 +542,13 @@ def _send_package_locked(
             "reason": decision.reason,
             "scheduled_for": decision.retry_at,
             "timezone": decision.timezone,
+            "recipient": message.to_email,
+            "recipient_name": message.to_name,
+            "subject": message.subject,
+            "attachments": message.attachment_names,
+            "message": (
+                f"Queued for {decision.retry_at} so it arrives inside the recipient's send window."
+            ),
         }
 
     return _deliver(
