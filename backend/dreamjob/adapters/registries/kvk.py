@@ -26,6 +26,7 @@ from dreamjob.adapters.registries.common import (
     RegistryResult,
     SubsidiaryLink,
     identity_record,
+    stated_none,
 )
 
 log = logging.getLogger(__name__)
@@ -123,9 +124,22 @@ class KvKAdapter(RegistryAdapter):
     async def search(self, name: str, *, egress: Any) -> str | None:
         payload = await self._json(f"{SEARCH_URL}?naam={name}&pagina=1&resultatenPerPagina=5",
                                    egress=egress)
-        for item in (payload or {}).get("resultaten") or []:
+        if not isinstance(payload, dict):
+            # ``_json`` answers ``None`` for an outage, a non-2xx and a body
+            # that is not JSON alike.  None of those is the register saying it
+            # holds nothing, so nothing is claimed here (FR-181, NFR-403).
+            return None
+        for item in payload.get("resultaten") or []:
             if item.get("kvkNummer"):
                 return str(item["kvkNummer"])
+        if stated_none(payload, listing="resultaten", total="totaal"):
+            # ``totaal`` is the Handelsregister's own count of what it found,
+            # and zero is it answering that it holds no company of this name.
+            # An empty ``resultaten`` on its own would not do: it also reads
+            # empty when the field the hits arrive in is renamed, and a stated
+            # ``totaal`` of three with nothing readable under it is a breakage
+            # that must keep saying so (FR-181, NFR-403).
+            self.record_stated_empty()
         return None
 
     def to_identity(self, profile: dict, number: str, company: dict) -> dict[str, Any]:

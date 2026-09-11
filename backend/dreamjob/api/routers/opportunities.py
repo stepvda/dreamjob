@@ -25,6 +25,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
+from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import compensation as comp_mod
@@ -88,6 +89,21 @@ class RecalculateRequest(CampaignRequest):
     use_llm: bool = True
     language: str | None = None
     background: bool = True
+
+
+class ScoreUnscoredRequest(BaseModel):
+    """FR-281 backfill.  No campaign means every campaign that needs it."""
+
+    campaign_id: str | None = None
+    limit: int | None = Field(default=None, ge=1)
+    page: int = Field(default=500, ge=50, le=2000)
+
+
+class PruneRequest(BaseModel):
+    """FR-142/FR-144 clean-up.  Previews unless ``dry_run`` is turned off."""
+
+    campaign_id: str | None = None
+    dry_run: bool = True
 
 
 class WeightsIn(BaseModel):
@@ -394,6 +410,11 @@ async def synthesise(seeker: Seeker, payload: SynthesiseRequest) -> dict:
         # nothing, and a freshly synthesised list that shows no range anywhere
         # reads as a missing feature rather than as a pass not yet run.
         result["compensation"] = comp_mod.enrich_campaign(seeker.id, payload.campaign_id)
+        # FR-281, last and for the same reason: a synthesised opportunity with no
+        # score sorts to the bottom of the ranked list and reads as broken.  The
+        # rows just created are scored immediately, so the list is usable the
+        # moment synthesis returns.
+        result["scored"] = scoring.score_unscored(seeker.id, payload.campaign_id)
         return result
 
     return await _run("scoring", campaign, work, background=payload.background)
@@ -410,7 +431,7 @@ async def generate_speculative(seeker: Seeker, payload: SpeculativeRequest) -> d
 
     def work() -> dict:
         try:
-            return speculative.generate_campaign(
+            result = speculative.generate_campaign(
                 campaign,
                 max_companies=payload.max_companies,
                 max_openings=payload.max_openings,
@@ -418,6 +439,10 @@ async def generate_speculative(seeker: Seeker, payload: SpeculativeRequest) -> d
             ).as_dict()
         except speculative.ConsentRequired as exc:
             return {"error": "consent_required", "detail": str(exc)}
+        # FR-281: a speculative opening is an opportunity like any other and must
+        # not appear unscored either.
+        result["scored"] = scoring.score_unscored(seeker.id, payload.campaign_id)
+        return result
 
     return await _run("generation", campaign, work, background=payload.background)
 
@@ -452,6 +477,68 @@ async def recalculate(seeker: Seeker, payload: RecalculateRequest) -> dict:
         return {**report, "compensation": compensation}
 
     return await _run("scoring", campaign, work, background=payload.background)
+
+
+@router.post("/prune-irrelevant")
+def prune_irrelevant_endpoint(seeker: Seeker, payload: PruneRequest) -> dict:
+    """Delete opportunities the current directives no longer admit (FR-142, FR-144).
+
+    The gates run when a vacancy becomes an opportunity.  A campaign collected
+    before they existed - or before the directives were rebuilt - keeps rows
+    they would reject today.  This re-applies them and removes what fails,
+    never touching a row the seeker has decided about (NFR-305).
+    """
+    if payload.campaign_id:
+        _campaign_or_404(payload.campaign_id, seeker.id)
+    report = synth.prune_irrelevant(seeker.id, payload.campaign_id, dry_run=payload.dry_run)
+    return report.as_dict()
+
+
+@router.post("/score-unscored")
+def score_unscored_endpoint(seeker: Seeker, payload: ScoreUnscoredRequest) -> dict:
+    """Backfill: score the opportunities that have no score yet (FR-281).
+
+    Distinct from ``/recalculate``, which re-scores everything. This touches
+    only rows whose ``score`` is null, so it is the right tool after a change
+    that added opportunities without ranking them - and it is safe to run when
+    nothing is missing, because then it finds nothing to do.
+    """
+    if payload.campaign_id:
+        campaigns = [_campaign_or_404(payload.campaign_id, seeker.id)]
+    else:
+        campaigns = [
+            c
+            for c in (
+                campaign_repo.get_campaign_any(cid)
+                for cid in repo.campaign_ids_with_unscored(seeker.id)
+            )
+            if c is not None
+        ]
+
+    scored = 0
+    per_campaign: list[dict] = []
+    for campaign in campaigns:
+        before = repo.count_unscored(seeker.id, campaign["id"])
+        if not before:
+            continue
+        n = scoring.score_unscored(
+            seeker.id, campaign["id"], limit=payload.limit, page=payload.page
+        )
+        scored += n
+        per_campaign.append(
+            {
+                "campaign_id": campaign["id"],
+                "name": campaign.get("name"),
+                "unscored": before,
+                "scored": n,
+            }
+        )
+
+    return {
+        "scored": scored,
+        "campaigns": per_campaign,
+        "remaining_unscored": repo.count_unscored(seeker.id),
+    }
 
 
 # ---------------------------------------------------------------------------

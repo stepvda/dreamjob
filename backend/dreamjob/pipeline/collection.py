@@ -736,10 +736,19 @@ class ItemOutcome:
         that returns nothing at all is visible.  The old rate was computed per
         raw record, so an adapter with zero raw records had no rate - the
         detector could only see sources that were already working.
+
+        A page whose answer *stated* that the source holds nothing is not an
+        extraction attempt and is left out of the denominator: the parser was
+        never given anything to extract.  Without this the plan item reads
+        "done, nothing to collect" while the same page pins the catalogue's
+        rolling rate at zero and fires the breakage audit - which is how
+        ``registry.kbo`` came to sit at 0.0001 with 303 breakage events, and
+        ``board.eures`` at 0.05 with 168, both of them working.
         """
-        if not self.pages:
+        attempted = self.pages - min(self.stated_empty, self.pages)
+        if attempted <= 0:
             return None
-        return self.productive_pages / self.pages
+        return self.productive_pages / attempted
 
     def state(self) -> str:
         """The one word this item ended in, never folded into "done".
@@ -838,7 +847,26 @@ NON_FAILURE_STATES: frozenset[str] = frozenset(
 TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "skipped", "blocked", "gone"})
 
 
-def _state_message(outcome: ItemOutcome) -> str | None:
+#: What a source *holds*, keyed on ``SourceAdapter.source_type``.  A register
+#: holds records and filings, not vacancies, and telling a job seeker that the
+#: Belgian enterprise register "holds no vacancy" for a company is not what
+#: happened.  ``api.routers.campaigns._RECORD_NOUN`` names the same things for
+#: the feed; this one is the pipeline's, so the pipeline does not import a
+#: router.
+_HELD_NOUN: dict[str, str] = {
+    "ats": "vacancy",
+    "job_board": "vacancy",
+    "registry": "record",
+    "directory": "company",
+    "website": "page",
+    "news": "article",
+    "compensation": "pay benchmark",
+    "events": "event",
+    "linkedin": "profile",
+}
+
+
+def _state_message(outcome: ItemOutcome, *, holds: str = "record") -> str | None:
     state = outcome.state()
     if state == "succeeded":
         # A source that collected records and was refused some of what it asked
@@ -877,7 +905,7 @@ def _state_message(outcome: ItemOutcome) -> str | None:
     if state == "no_matches":
         return (
             f"the source answered {outcome.stated_empty} request(s) and stated it holds no "
-            "vacancy for this query: read successfully, nothing to collect"
+            f"{holds} for this query: read successfully, nothing to collect"
         )
     return "the source issued no request for this query: nothing to collect"
 
@@ -923,8 +951,34 @@ class _Unit:
         return str(self.item["adapter_key"])
 
     @property
+    def holds(self) -> str:
+        """The noun this source's answers are counted in (see ``_HELD_NOUN``)."""
+        source_type = getattr(self.adapter, "source_type", None)
+        return _HELD_NOUN.get(str(getattr(source_type, "value", source_type) or ""), "record")
+
+    @property
     def remaining(self) -> int:
         return max(0, self.pages - self.done)
+
+
+def _stated_empty(adapter: Any) -> int:
+    """How many answers this page got in which the source stated it holds nothing.
+
+    Read off the adapter rather than passed back, because the four-step contract
+    only returns records: ``SourceAdapter.record_stated_empty`` is the one way
+    an adapter can say "answered, and the answer was no" without inventing a
+    record to say it with (FR-181).
+
+    ``max`` of the two places it can be found, never a sum: the base counter is
+    the general one and ``FetchOutcome.stated_empty`` is the vacancy adapters'
+    own copy of it, kept equal by ``VacancySourceAdapter.record_stated_empty``.
+    A source that only knows the older of the two - a stub in a test, an adapter
+    written before this counter moved down to the base class - still counts.
+    """
+    return max(
+        int(getattr(adapter, "stated_empty", 0) or 0),
+        int(getattr(getattr(adapter, "fetch_outcome", None), "stated_empty", 0) or 0),
+    )
 
 
 def _record_extraction(unit: _Unit, campaign_id: str) -> float | None:
@@ -1243,11 +1297,9 @@ async def _run_page(unit: _Unit, page: int, books: _Bookkeeping) -> ItemOutcome:
     measure()
     step.attempted = attempts_after - attempts_before
     step.parsed = successes_after - successes_before
-    # ``fetch_outcome`` is reset by the adapter at the start of every ``run()``,
-    # so this counts only the answers this page received (NFR-403).
-    step.stated_empty = int(
-        getattr(getattr(unit.adapter, "fetch_outcome", None), "stated_empty", 0) or 0
-    )
+    # Reset by the adapter at the start of every ``run()``, so this counts only
+    # the answers this page received (NFR-403).
+    step.stated_empty = _stated_empty(unit.adapter)
     step.normalised = len(records)
     _link_board_company(unit, records)
     written = await _write_records(unit, records, books)
@@ -1670,67 +1722,129 @@ async def collection_worker(ctx: JobContext) -> None:
     )
     prune_raw_documents(campaign_id)
     # Collection used to end here, leaving the vacancies it had just written
-    # one un-pressed button away from being of any use.  Synthesis is what
-    # turns them into the ranked list, so it follows the run that produced
-    # them (FR-261).
-    synthesis = await _synthesise_collected(ctx, campaign, outcome)
+    # one un-pressed button away from being of any use (FR-261, FR-281).
+    ranking = await _rank_collected(ctx, campaign, outcome)
     # Last: the counters and the bar are exact at rest, whatever cadence they
     # were written on while the run was in flight.
     books.flush()
     ctx.save_checkpoint(
         completed=completed,
         stats=stats.to_dict(),
-        synthesis=synthesis,
+        ranking=ranking,
         finished_at=utcnow(),
     )
 
 
-async def _synthesise_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict | None:
-    """Normalise what this run collected into opportunities (FR-261).
+async def _rank_collected(ctx: JobContext, campaign: dict, outcome: str) -> dict | None:
+    """Turn what this run collected into a ranked list (FR-261, FR-264, FR-281).
 
-    Three things this deliberately does not do.  It does not run when the run
-    collected nothing, because there is nothing to normalise and an empty pass
-    only muddies the audit trail.  It does not fail the collection when it
-    falls over: the records are written and the run was good, so the failure is
-    recorded against the campaign and the job still ends ``done``.  And it does
-    not keep the opportunity ids, which run to tens of thousands on a large
-    campaign and would bloat both the job row and the audit event.
+    These are the same four passes the Opportunities screen runs from its own
+    buttons, in the order that screen runs them, because a collection that
+    stops short of them produces a screen reading "0 opportunities" with
+    nothing to say why.  A seeker who has just watched a campaign collect
+    42,883 vacancies has already asked for this; the buttons stay for re-runs.
+
+    Failure is per-pass and never fails the collection: the records are
+    written and the run was good, so a pass that falls over is recorded
+    against the campaign and the ones after it still get their turn.  Only
+    synthesis is load-bearing - the other three all read the opportunity rows
+    it writes - so it is the one whose failure stops the chain.
     """
     if outcome not in ("completed", "partial"):
         return None
-    synthesise = _load("dreamjob.pipeline.opportunities", "synthesise_campaign")
-    if synthesise is None:
-        return None
 
-    campaign_id = campaign["id"]
+    report: dict[str, Any] = {"synthesis": await _pass(ctx, campaign, "synthesis", _synthesise)}
+    if "error" in report["synthesis"]:
+        return report
+    # FR-149: a spontaneous-application campaign plans no job board and no ATS,
+    # so synthesis alone can only ever hand it an empty list.  The track that
+    # gives such a campaign its opportunities is the speculative one.
+    if _is_spontaneous(campaign):
+        report["speculative"] = await _pass(ctx, campaign, "speculative", _speculate)
+    # FR-264 before FR-281: the compensation sub-score reads the stored
+    # estimate rather than recomputing it, so scoring first would score every
+    # unpriced opportunity against a range nothing had filled in.
+    report["compensation"] = await _pass(ctx, campaign, "compensation", _price)
+    report["scoring"] = await _pass(ctx, campaign, "scoring", _score)
+
+    repo.record_audit(
+        "campaign.ranked",
+        job_seeker_id=ctx.job_seeker_id,
+        entity_type="campaign",
+        entity_id=campaign["id"],
+        detail=report,
+    )
+    return report
+
+
+async def _pass(ctx: JobContext, campaign: dict, name: str, fn: Any) -> dict:
+    """Run one post-collection pass off this job's loop, reporting its outcome.
+
+    The passes are synchronous and, on a campaign that collected 40k
+    vacancies, slow; they belong off the loop so the run stays cancellable
+    while they work (NFR-102).
+    """
     try:
-        # Synthesis is synchronous and, on a campaign that collected 40k
-        # vacancies, slow; it belongs off this job's loop so the run stays
-        # cancellable while it works (NFR-102).
-        report = await asyncio.to_thread(synthesise, campaign)
+        return await asyncio.to_thread(fn, campaign)
     except JobCancelled:
         raise
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
-        log.warning("Synthesis after collection failed for campaign %s: %s", campaign_id, reason)
+        log.warning("Post-collection %s failed for campaign %s: %s", name, campaign["id"], reason)
         repo.record_audit(
-            "campaign.synthesis_failed",
+            f"campaign.{name}_failed",
             job_seeker_id=ctx.job_seeker_id,
             entity_type="campaign",
-            entity_id=campaign_id,
+            entity_id=campaign["id"],
             detail={"error": reason},
         )
         return {"error": reason}
 
-    summary = {k: v for k, v in report.as_dict().items() if k != "opportunity_ids"}
-    repo.record_audit(
-        "campaign.synthesis_finished",
-        job_seeker_id=ctx.job_seeker_id,
-        entity_type="campaign",
-        entity_id=campaign_id,
-        detail=summary,
-    )
-    return summary
+
+def _synthesise(campaign: dict) -> dict:
+    """FR-261.  The opportunity ids are dropped: on a large campaign they run
+    to tens of thousands and say nothing the counts do not."""
+    fn = _load("dreamjob.pipeline.opportunities", "synthesise_campaign")
+    if fn is None:
+        return {"skipped": "no synthesis stage"}
+    return {k: v for k, v in fn(campaign).as_dict().items() if k != "opportunity_ids"}
+
+
+def _is_spontaneous(campaign: dict) -> bool:
+    fn = _load("dreamjob.pipeline.speculative", "is_spontaneous_campaign")
+    return bool(fn(campaign)) if fn is not None else False
+
+
+def _speculate(campaign: dict) -> dict:
+    """FR-262.  Consent is the seeker's to give, so its absence is an outcome
+    to report rather than an error to log."""
+    module = "dreamjob.pipeline.speculative"
+    fn = _load(module, "generate_campaign")
+    if fn is None:
+        return {"skipped": "no speculative stage"}
+    consent_required = _load(module, "ConsentRequired") or ()
+    try:
+        return fn(campaign).as_dict()
+    except consent_required as exc:  # type: ignore[misc]
+        return {"error": "consent_required", "detail": str(exc)}
+
+
+def _price(campaign: dict) -> dict:
+    """FR-264: pure corpus work, no tokens and no network."""
+    fn = _load("dreamjob.pipeline.compensation", "enrich_campaign")
+    if fn is None:
+        return {"skipped": "no compensation stage"}
+    return fn(campaign["job_seeker_id"], campaign["id"])
+
+
+def _score(campaign: dict) -> dict:
+    """FR-281.  The deterministic pass costs no tokens and scores everything;
+    the model is then spent on the top rows only, and only as far as the
+    campaign's own token budget allows (NFR-104)."""
+    fn = _load("dreamjob.pipeline.scoring", "score_campaign")
+    if fn is None:
+        return {"skipped": "no scoring stage"}
+    return fn(campaign).as_dict()
 
 
 def prune_raw_documents(campaign_id: str | None = None, limit: int = RAW_DOCUMENT_SWEEP_LIMIT) -> int:
@@ -2403,7 +2517,7 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
         return
     state = outcome.state()
     status = _STATE_STATUS.get(state, "failed")
-    message = _state_message(outcome)
+    message = _state_message(outcome, holds=unit.holds)
     if state not in NON_FAILURE_STATES and state != "failed" and message:
         # A source that fetched and produced nothing has not raised, so nothing
         # has counted an error for it yet - unlike ``failed``, whose error the

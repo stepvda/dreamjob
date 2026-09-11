@@ -57,7 +57,7 @@ from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as repo
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError, redact
-from dreamjob.pipeline import discovery, knowledge_base
+from dreamjob.pipeline import discovery, knowledge_base, top_employers
 
 log = logging.getLogger(__name__)
 
@@ -1182,13 +1182,22 @@ def _home_url(company: dict) -> str:
     return careers if careers.startswith("http") else ""
 
 
-def _collection_targets(inputs: dict, directives: dict) -> list[dict]:
-    """Companies this campaign may collect against (FR-143, FR-162).
+def _collection_targets(
+    inputs: dict, directives: dict, countries: list[str] | None = None
+) -> list[dict]:
+    """Companies this campaign may collect against (FR-143, FR-162, FR-164).
 
     Two sources, in this order: the companies the job seeker named in the
     FR-143 directives, and the companies the knowledge base already holds - the
     second is what makes a company found by discovery readable by the harvest
     stage, in this run or in the next campaign.
+
+    ``countries`` is the campaign's target geography.  A company whose country
+    is known and outside it is dropped: the knowledge base is shared and global,
+    and planning an ATS board for every company in it is how a Brussels search
+    came to fetch jobs from Oslo and Ohio.  A company whose country is unknown
+    is kept, because there is nothing to judge it by; its postings are filtered
+    on their own location when they become opportunities.
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -1210,6 +1219,7 @@ def _collection_targets(inputs: dict, directives: dict) -> list[dict]:
     if isinstance(company_type, dict):
         for named in company_type.get("include_companies") or []:
             if isinstance(named, dict) and named.get("name"):
+                # A company the seeker named explicitly is always in scope.
                 add(
                     {
                         "name": named.get("name"),
@@ -1219,10 +1229,32 @@ def _collection_targets(inputs: dict, directives: dict) -> list[dict]:
                         "ats_slug": named.get("ats_slug"),
                     }
                 )
+
+    in_scope = {c.upper() for c in (countries or []) if c}
     for row in inputs.get("companies_in_scope") or []:
-        if isinstance(row, dict) and row.get("name"):
-            add(dict(row))
-    return out
+        if not (isinstance(row, dict) and row.get("name")):
+            continue
+        if in_scope and not _company_in_scope(row, in_scope):
+            continue
+        add(dict(row))
+    # Notable employers are planned first (FR-162). A hint only: the company is
+    # still profiled from its own site like any other, and a list that does not
+    # cover the country changes nothing.
+    return top_employers.prioritise(out, countries)
+
+
+def _company_in_scope(row: dict, in_scope: set[str]) -> bool:
+    """Is a knowledge-base company plausibly inside the target geography?
+
+    Known and in scope: yes.  Known and outside: no.  Unknown: yes - the
+    knowledge base does not record a country for most companies, and dropping
+    every one of them would silently retire the ATS sources altogether.  Their
+    postings are filtered on the posting's own country at synthesis.
+    """
+    country = str(row.get("country") or "").strip().upper()
+    if not country:
+        return True
+    return country in in_scope
 
 
 def generate_plan(
@@ -1272,7 +1304,14 @@ def generate_plan(
     # A source is not a unit of work - a board is, a region-and-sector slice of
     # an aggregator is - and until this ran, every company-scoped source was
     # planned once with an empty target list and collected nothing.
-    companies = _collection_targets(inputs, directives)
+    #
+    # The inventory is re-read scoped to the campaign's geography.  It is
+    # ordered by recency and capped, so filtering it afterwards would only ever
+    # see the most-recently-touched companies anywhere in the world; reading it
+    # scoped is what makes the cap mean "the 200 in-scope companies".
+    if countries:
+        inputs["companies_in_scope"] = repo.companies_in_scope(countries=countries)
+    companies = _collection_targets(inputs, directives, countries)
     found = discovery.discover(
         selected=selection.selected,
         companies=companies,

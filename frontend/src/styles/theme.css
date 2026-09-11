@@ -546,3 +546,140 @@ a.stat:hover { box-shadow: var(--shadow-lift); transform: translateY(-1px); }
 /* Stage labels carry their icon inline; keep it from crowding the text. */
 .wfmap-stage-label { gap: 6px; }
 .wfmap-stage-label .icon { font-size: 13px; }
+
+/* A suspended account is legible as such at a glance in the user list. */
+tr.row-disabled td { opacity: 0.55; }
+tr.row-disabled td:first-child { opacity: 0.75; }
+
+/* ==========================================================================
+   The three steps
+
+   One card per step, each carrying its phase hue so the colour that runs
+   through the whole product points at where you are. Locked steps recede
+   rather than shout; the current one is the only thing at full strength.
+   ========================================================================== */
+
+.step-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--hue, var(--line-strong));
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.step-card.step-current { box-shadow: var(--shadow-lift); }
+.step-card.step-locked { opacity: 0.68; border-left-color: var(--line-strong); }
+.step-card.step-done { border-left-width: 4px; }
+
+.step-head { display: flex; align-items: flex-start; gap: 12px; }
+
+.step-index {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  background: var(--surface-sunk);
+  color: var(--ink-3);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.step-index.phase-0 { background: var(--phase-0); color: #fff; }
+.step-index.phase-1 { background: var(--phase-1); color: #fff; }
+.step-index.phase-3 { background: var(--phase-3); color: #fff; }
+.step-index.phase-4 { background: var(--phase-4); color: #fff; }
+
+.step-icon { font-size: 20px; color: var(--hue, var(--ink-3)); margin-top: 2px; }
+
+.step-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.step-summary { margin: 3px 0 0; font-size: 13px; color: var(--ink-3); line-height: 1.5; }
+
+.step-body { margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); }
+
+/* --- Folded advanced navigation ------------------------------------------- */
+
+.nav-advanced { border-top: 1px solid var(--line); padding: 12px 10px; }
+
+.nav-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0 8px 6px;
+  user-select: none;
+}
+
+.nav-advanced > summary::-webkit-details-marker { display: none; }
+.nav-advanced > summary::before {
+  content: '▸ ';
+  color: var(--ink-4);
+  font-size: 10px;
+}
+.nav-advanced[open] > summary::before { content: '▾ '; }
+
+.nav-advanced .nav-group { padding: 4px 0; }
+.nav-sub-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-4);
+  padding: 6px 8px 3px;
+}
+
+/* ==========================================================================
+   Filter bar
+
+   Fields that carry helper text used to bottom-align against controls that did
+   not, which dropped every label and input onto a different line. A grid with a
+   single control height keeps the whole bar on one baseline, and the helper
+   text moves to one line beneath it where it reads as an explanation of the row
+   rather than as part of one field.
+   ========================================================================== */
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px 14px;
+  align-items: end;
+}
+
+.filter-grid > * { min-width: 0; }
+.filter-grid .field { margin-bottom: 0; }
+.filter-grid .field > label { min-height: 17px; display: flex; align-items: center; }
+
+/* One control height across the bar, so text inputs, selects and the range
+   share a baseline instead of each sitting at its own natural height. */
+.filter-grid input[type='text'],
+.filter-grid input[type='email'],
+.filter-grid input[type='number'],
+.filter-grid select {
+  min-height: 34px;
+}
+.filter-grid input[type='range'] {
+  min-height: 34px;
+  padding: 0;
+  margin: 0;
+}
+
+/* The keyword field earns the extra width; everything else is one column. */
+.filter-grid-wide { grid-column: span 2; }
+
+.filter-note { margin: 8px 0 0; }
+
+@media (max-width: 720px) {
+  .filter-grid-wide { grid-column: span 1; }
+}

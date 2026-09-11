@@ -35,6 +35,7 @@ from dreamjob.adapters.registries.common import (
     DEFAULT_YEARS,
     RegistryAdapter,
     RegistryResult,
+    RegistryWall,
     enterprise_number,
     format_enterprise_number,
     identity_record,
@@ -111,6 +112,95 @@ _ENTERPRISE_HREF = re.compile(r"ondernemingsnummer=(\d{9,10})")
 _TAGS = re.compile(r"<[^>]+>")
 _WS = re.compile(r"[ \t\xa0]+")
 
+#: The register's own line for "I hold nothing under that name", as the four
+#: language versions of Public Search print it - and only ever inside the
+#: results ``<h1>``, which a page with results does not have at all.  Read
+#: positively, the way ``EuresAdapter._stated_total`` reads ``numberRecords``:
+#: an empty hit list on its own is indistinguishable from a layout change, and
+#: claiming emptiness there would leave this adapter unable to report its own
+#: breakage (NFR-403).  Measured over the 1,568 name searches this deployment
+#: has stored: 260 carry the English line, 20 the Dutch one, 242 carry result
+#: rows, and 1,046 - two thirds of them - are the bot wall below.  Counted by
+#: distinct cached body instead, the wall is 2 of 524: every wall response is
+#: byte-identical, so the cache folds a thousand of them into one file.  The
+#: per-search figure is the one that matters here, because it is the share of
+#: questions that came back unanswered: 56 of one campaign's own KBO fetches
+#: were the CAPTCHA form, and reading the wall as either an answer or a layout
+#: change would have mislabelled every one of them.
+_NO_RESULT_H1 = re.compile(
+    r"(?is)<h1[^>]*>\s*(?:no result|no data|geen (?:gegevens|resultaat|resultaten)"
+    r"|aucun|kein)"
+)
+
+#: The CAPTCHA interstitial, which the register serves with HTTP 200 after a
+#: run of searches.  Its form field is the marker: it is language-independent
+#: and no result page carries it.  A wall is neither an answer nor a layout
+#: change, and reporting it as either is a lie in a different direction.
+_BOT_WALL = re.compile(r"j_captcha_response|/kbopub/captchaform\.html")
+
+
+#: The three row markers the register actually prints, measured over every
+#: result row this deployment has stored: 1072 ``ENT`` (registered entity), 549
+#: ``EU`` and 75 ``VE`` (establishment units).  Anything else is a marker we do
+#: not know, and :func:`_row_kind` says so rather than guessing - see there.
+_ROW_KINDS = ("ENT", "EU", "VE")
+
+
+def _row_kind(kind_text: str) -> str:
+    """``ENT``, ``EU``, ``VE`` - or ``""`` for a marker this parser cannot read.
+
+    The empty string matters as much as the other three.  Reading an unknown
+    marker as an establishment unit would make a results table whose columns
+    moved look exactly like the register answering "I hold establishments of
+    this name but no registered entity" - a real answer, which 5 of the stored
+    result pages genuinely are.  Kept apart, a page of rows we cannot classify
+    stays a breakage, which is what NFR-403 is for (FR-181).
+    """
+    head = (kind_text or "").strip().upper()
+    for kind in _ROW_KINDS:
+        if head.startswith(kind):
+            return kind
+    return ""
+
+
+def _states_no_result(markup: str) -> bool:
+    """The register printing, in its own words, that it holds nothing (FR-181)."""
+    return bool(_NO_RESULT_H1.search(markup or ""))
+
+
+def _states_no_such_enterprise(markup: str) -> bool:
+    """The register's own page saying this enterprise number is not one of its."""
+    text = _text(markup).lower()
+    return "not found" in text and "enterprise" in text[:400]
+
+
+#: What the gate says when the register served its wall instead of an answer.
+#: ``unavailable`` rather than ``no_match`` because it is neither absence nor
+#: ambiguity, and because the employer-kind rung and the identity store already
+#: know that word (``db.repositories.registry_identity.DECISIONS``).
+BOT_WALL_REASON = (
+    "the register served its CAPTCHA wall instead of an answer: the searches "
+    "this run made were refused, and nothing about the company was learned"
+)
+
+
+def _is_bot_wall(markup: str) -> bool:
+    """The interstitial the register serves - with HTTP 200 - after a run of searches."""
+    return bool(_BOT_WALL.search(markup or ""))
+
+
+def _refuse_bot_wall(markup: str, key: str) -> None:
+    """Raise rather than read a page the register served instead of an answer.
+
+    Only the paths the collection worker drives call this: a raised failure is
+    what makes the plan item say what happened instead of "the source layout has
+    probably changed".  :meth:`KBOAdapter.match_by_name` deliberately does not -
+    the employer-kind rung calls it with no handler of its own, and it reads the
+    verdict, so the wall reaches it as ``unavailable`` (FR-182, NFR-403).
+    """
+    if _is_bot_wall(markup):
+        raise RegistryWall(f"[{key}] {BOT_WALL_REASON} (FR-182, NFR-403)")
+
 _STATUS_MAP = {
     "actief": "active", "active": "active", "actif": "active",
     "stopgezet": "ceased", "ceased": "ceased", "arrêté": "ceased", "arrete": "ceased",
@@ -159,13 +249,20 @@ class EntityMatch:
     rather than a coin flip (docs/Agency_Research_Design.md sections 2.1, 7).
     """
 
-    decision: str  # matched | ambiguous | no_match
+    decision: str  # matched | ambiguous | no_match | unavailable
     number: str | None = None
     name: str = ""
     municipality: str = ""
     postcode: str = ""
     rule: str = ""  # exact_name | extended_name
     municipality_checked: bool = False
+    #: True when this verdict was read off a body the register actually served
+    #: and this adapter actually parsed.  A transport failure, a non-2xx and a
+    #: name the register was never asked about all end in ``no_match`` too, and
+    #: the difference between "the register says no" and "the register did not
+    #: answer" is the whole of FR-181: only the first may be reported as a plan
+    #: item that was read successfully and holds nothing.
+    answered: bool = False
     #: The identifying words of the name that was asked for.  One of them is
     #: the class the phonetic search gets wrong; two or more, matched exactly,
     #: is the class it gets right (see ``employer_registry_rung``).
@@ -188,6 +285,7 @@ class EntityMatch:
             "postcode": self.postcode,
             "rule": self.rule,
             "municipality_checked": self.municipality_checked,
+            "answered": self.answered,
             "queried_tokens": list(self.queried_tokens),
             "reason": self.reason,
             "candidates": list(self.candidates),
@@ -287,7 +385,9 @@ def _matched(
             )
         ),
         candidates=(_candidate(row),),
+        answered=True,
     )
+
 
 @register_adapter
 class KBOAdapter(RegistryAdapter):
@@ -326,7 +426,20 @@ class KBOAdapter(RegistryAdapter):
         async with self.session(egress) as client:
             number = enterprise_number(company)
             if number is None and company.get("name"):
-                number = await self.search_by_name(str(company["name"]), egress=client)
+                # The verdict itself, not ``search_by_name``'s ``str | None``:
+                # "the register holds no company of this name" is an answer and
+                # settles the plan item as read-and-empty, while an outage, a
+                # bot wall and an ambiguity are not, and all four used to arrive
+                # here as the same ``None`` (FR-181, NFR-403).
+                match = await self.match_by_name(str(company["name"]), egress=client)
+                if match.decision == "unavailable":
+                    raise RegistryWall(f"[{self.key}] {match.reason} (FR-182, NFR-403)")
+                if not match.matched:
+                    if match.decision == "no_match" and match.answered:
+                        self.record_stated_empty()
+                    result.note(f"{company.get('name')!r}: {match.reason}")
+                    return result
+                number = match.number
             if number is None:
                 result.note("No enterprise number could be resolved for this company")
                 return result
@@ -356,12 +469,18 @@ class KBOAdapter(RegistryAdapter):
             return None
         if not response.ok:
             return None
-        return self.parse_company_page(response.text, number, company or {})
+        _refuse_bot_wall(response.text, self.key)
+        identity = self.parse_company_page(response.text, number, company or {})
+        if identity is None and _states_no_such_enterprise(response.text):
+            # The register's own page for this number says there is no such
+            # enterprise.  That is an answer, not a page we failed to read.
+            self.record_stated_empty()
+        return identity
 
     def parse_company_page(self, markup: str, number: str, company: dict) -> dict[str, Any] | None:
-        text = _text(markup)
-        if "not found" in text.lower() and "enterprise" in text.lower()[:400]:
+        if _states_no_such_enterprise(markup):
             return None
+        text = _text(markup)
         name = _labelled(text, "Name:", "Naam:", "Nom:", "Denomination:")
         if not name:
             return None
@@ -484,6 +603,17 @@ class KBOAdapter(RegistryAdapter):
         legal_persons_only: bool = False,
     ) -> EntityMatch:
         """The gate's own answer, so a caller can tell ambiguity from absence."""
+        unanswerable = self._unanswerable(name)
+        if unanswerable is not None:
+            # No request is issued.  A name with no identifying word in it is
+            # not a question the register can answer, and asking anyway spends a
+            # request to be told nothing.  ``answered`` stays false, so the plan
+            # item settles as "issued no request" rather than as a clean miss -
+            # 16 of the 200 companies in one campaign were board slugs like
+            # ``coeo | BE`` and ``mod:group`` (FR-181).
+            log.info("[%s] %r is not a name the register can be asked: %s",
+                     self.key, name, unanswerable.reason)
+            return unanswerable
         url = self.name_search_url(name, legal_persons_only=legal_persons_only)
         try:
             response = await egress.fetch(url)
@@ -531,7 +661,7 @@ class KBOAdapter(RegistryAdapter):
             seat = _SEAT_RE.search(address)
             out.append(
                 {
-                    "kind": "ENT" if kind_text.upper().startswith("ENT") else "VE",
+                    "kind": _row_kind(kind_text),
                     "status": "active" if "actief" in kind_text.lower() else "",
                     "number": match.group(1).zfill(10),
                     "name": _WS.sub(" ", (name_node.text() if name_node else "")).strip(),
@@ -567,6 +697,25 @@ class KBOAdapter(RegistryAdapter):
         log.info("[registry.kbo] %r not resolved: %s", wanted, match.reason)
         return None
 
+    @staticmethod
+    def _unanswerable(wanted: str) -> EntityMatch | None:
+        """Why this name is not a question the register can answer, if it is not.
+
+        A name with no identifying word in it - a board slug, a legal form on
+        its own - has no identity to compare, so the phonetic search would be
+        asked about nothing and answer with a page of unrelated sole traders.
+        ``answered`` is false on purpose: nothing was learned about the register
+        (FR-181).
+        """
+        wanted_tokens = _gate_tokens(wanted)
+        if not wanted_tokens:
+            return EntityMatch("no_match", reason="the name carries no identifying word")
+        if all(token in _GATE_STOPWORDS for token in wanted_tokens):
+            return EntityMatch(
+                "no_match", reason=f"{wanted!r} is nothing but stopwords and a legal form"
+            )
+        return None
+
     @classmethod
     def match_search_result(
         cls, markup: str, wanted: str, *, municipalities: tuple[str, ...] | list[str] = ()
@@ -596,18 +745,38 @@ class KBOAdapter(RegistryAdapter):
            but ``municipality_checked`` is false and the caller is expected to
            want corroboration before acting on it.
         """
+        if _is_bot_wall(markup):
+            # HTTP 200, and not an answer: the register asked for a CAPTCHA.
+            # Neither absence nor a layout change, and saying so is what keeps
+            # a wall from being read as either (FR-182).
+            return EntityMatch("unavailable", reason=BOT_WALL_REASON)
+        unanswerable = cls._unanswerable(wanted)
+        if unanswerable is not None:
+            return unanswerable
         wanted_tokens = _gate_tokens(wanted)
-        if not wanted_tokens:
-            return EntityMatch("no_match", reason="the name carries no identifying word")
-        if all(token in _GATE_STOPWORDS for token in wanted_tokens):
-            return EntityMatch(
-                "no_match", reason=f"{wanted!r} is nothing but stopwords and a legal form"
-            )
 
-        rows = [row for row in cls.parse_search_results(markup) if row["kind"] == "ENT"]
+        parsed = cls.parse_search_results(markup)
+        # Only rows whose marker this parser recognises are evidence that the
+        # hit list was read.  A table of rows we could not classify is a layout
+        # change wearing the shape of an answer (see ``_row_kind``).
+        read = [row for row in parsed if row["kind"]]
+        rows = [row for row in read if row["kind"] == "ENT"]
         if not rows:
+            # Two different things arrive here.  The register printing its own
+            # "no result found" line, or a hit list we parsed that holds only
+            # establishment units, are answers: the register holds no registered
+            # entity of this name.  An empty parse with neither marker is not -
+            # it is what a changed results table also looks like, and claiming
+            # emptiness there would make this adapter unable to report its own
+            # breakage (NFR-403).
             return EntityMatch(
-                "no_match", reason="the register's hit list holds no registered entity"
+                "no_match",
+                reason=(
+                    "the register's hit list holds no registered entity"
+                    if read or _states_no_result(markup)
+                    else "nothing could be read from the register's answer"
+                ),
+                answered=bool(read) or _states_no_result(markup),
             )
 
         hits: list[tuple[str, dict[str, Any]]] = []
@@ -624,6 +793,7 @@ class KBOAdapter(RegistryAdapter):
                     f"(closest: {closest.get('name')!r})"
                 ),
                 candidates=tuple(_candidate(row) for row in rows[:5]),
+                answered=True,
             )
 
         confirmed = [(rule, row) for rule, row in hits if _seat_matches(row, municipalities)]
@@ -643,6 +813,7 @@ class KBOAdapter(RegistryAdapter):
                     "the same place; the register cannot say which one posted the vacancies"
                 ),
                 candidates=tuple(_candidate(row) for _, row in confirmed[:5]),
+                answered=True,
             )
 
         # Nothing was confirmed by the seat.  That is only fatal when the seat
@@ -656,6 +827,7 @@ class KBOAdapter(RegistryAdapter):
                     "seated where the vacancies are"
                 ),
                 candidates=tuple(_candidate(row) for _, row in hits[:5]),
+                answered=True,
             )
         rule, row = single[0]
         if rule != "exact_name":
@@ -666,6 +838,7 @@ class KBOAdapter(RegistryAdapter):
                     f"({row.get('municipality') or 'unknown'}) does not appear in the vacancies"
                 ),
                 candidates=(_candidate(row),),
+                answered=True,
             )
         # One exactly-named entity, and the seat did not confirm it - either
         # because no location was known or because the vacancies are somewhere

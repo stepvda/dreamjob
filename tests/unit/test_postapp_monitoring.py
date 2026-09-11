@@ -740,7 +740,11 @@ def test_new_vacancies_join_the_ranked_list_under_the_campaign_directives() -> N
     opportunity = opp_repo.get_opportunity(added[0], data["seeker_id"])
     assert opportunity["title"] == "Analytics Engineer"
     assert opportunity["kind"] == "vacancy"
-    assert opportunity["score"] is None, "the watchlist adds; the scorer scores"
+    # The watchlist scores what it adds. It used to leave the row unscored for a
+    # separate pass to pick up, which meant a freshly watched vacancy sorted to
+    # the bottom of the ranked list and read as broken until someone pressed a
+    # button. A new opportunity is scored when it appears (FR-401, FR-281).
+    assert opportunity["score"] is not None, "a watched vacancy is scored as it is added"
 
     # Re-running finds it already there rather than adding it twice.
     assert watchlist.add_to_ranked_list(data["seeker_id"], data["campaign_id"], [fresh]) == []

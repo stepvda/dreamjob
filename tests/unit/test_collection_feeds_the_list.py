@@ -211,8 +211,8 @@ def test_a_finished_collection_leaves_opportunities_on_the_ranked_list(db):
         "SELECT title FROM opportunity WHERE campaign_id = ?", (campaign_id,)
     )
     assert len(opportunities) == 3, "and every one of them reached the ranked list"
-    assert ctx.checkpoint["synthesis"]["created"] == 3
-    assert ctx.checkpoint["synthesis"]["rejected"] == 0
+    assert ctx.checkpoint["ranking"]["synthesis"]["created"] == 3
+    assert ctx.checkpoint["ranking"]["synthesis"]["rejected"] == 0
 
 
 def test_the_synthesis_that_ran_is_on_the_audit_trail(db):
@@ -230,10 +230,10 @@ def test_the_synthesis_that_ran_is_on_the_audit_trail(db):
             "SELECT action FROM audit_event WHERE entity_id = ? ORDER BY created_at", (campaign_id,)
         )
     ]
-    assert "campaign.synthesis_finished" in actions
+    assert "campaign.ranked" in actions
     assert actions.index("campaign.collection_finished") < actions.index(
-        "campaign.synthesis_finished"
-    ), "synthesis follows the collection whose records it normalised"
+        "campaign.ranked"
+    ), "the ranking passes follow the collection whose records they read"
 
 
 def test_the_opportunity_ids_are_kept_out_of_the_job_row(db):
@@ -245,7 +245,7 @@ def test_the_opportunity_ids_are_kept_out_of_the_job_row(db):
 
     ctx = _run(campaign_id, seeker)
 
-    assert "opportunity_ids" not in ctx.checkpoint["synthesis"]
+    assert "opportunity_ids" not in ctx.checkpoint["ranking"]["synthesis"]
 
 
 def test_a_run_that_collected_nothing_does_not_synthesise(db):
@@ -258,11 +258,11 @@ def test_a_run_that_collected_nothing_does_not_synthesise(db):
     ctx = _run(campaign_id, seeker)
 
     assert query_all("SELECT id FROM vacancy") == []
-    assert ctx.checkpoint["synthesis"] is None
+    assert ctx.checkpoint["ranking"] is None
     actions = [
         r["action"] for r in query_all("SELECT action FROM audit_event WHERE entity_id = ?", (campaign_id,))
     ]
-    assert "campaign.synthesis_finished" not in actions
+    assert "campaign.ranked" not in actions
 
 
 def test_a_synthesis_that_falls_over_does_not_fail_the_collection(db, monkeypatch):
@@ -283,7 +283,7 @@ def test_a_synthesis_that_falls_over_does_not_fail_the_collection(db, monkeypatc
 
     assert len(query_all("SELECT id FROM vacancy")) == 3, "the collection still stands"
     assert campaign_repo.get_campaign(campaign_id, seeker)["status"] == "completed"
-    assert "synthesis is broken" in ctx.checkpoint["synthesis"]["error"]
+    assert "synthesis is broken" in ctx.checkpoint["ranking"]["synthesis"]["error"]
     actions = [
         r["action"] for r in query_all("SELECT action FROM audit_event WHERE entity_id = ?", (campaign_id,))
     ]

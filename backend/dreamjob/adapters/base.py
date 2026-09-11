@@ -133,6 +133,7 @@ class SourceAdapter(ABC):
         self.egress = egress
         self._extraction_attempts = 0
         self._extraction_successes = 0
+        self._stated_empty = 0
 
     # --- the four-step contract (NFR-601) ---------------------------------
     @abstractmethod
@@ -187,8 +188,37 @@ class SourceAdapter(ABC):
             return None
         return self._extraction_successes / self._extraction_attempts
 
+    @property
+    def stated_empty(self) -> int:
+        """Answers in which the source itself stated it holds nothing (FR-181)."""
+        return self._stated_empty
+
+    def record_stated_empty(self, count: int = 1) -> None:
+        """The source answered, and its answer was "I hold nothing for this query".
+
+        Call it once per *answered* request whose body says so - a stated result
+        count of zero, a register's own "no result found" line - and never for a
+        request that failed, was refused, or was never issued.  "I fetched bytes
+        and parsed nothing out of them" stays ``extracted_nothing`` on purpose
+        (NFR-403): an adapter that claims emptiness there can no longer report
+        its own breakage.
+
+        It lives here rather than on the vacancy adapter because a register
+        misses cleanly far more often than a board does - it is asked a closed
+        question about one named company, and for most of them the honest answer
+        is that it holds no such company.  Reporting those as breakages made 180
+        of 200 KBO plan items read as "the source layout has probably changed"
+        while the Belgian register was simply, correctly, empty for a Swedish
+        kitchen manufacturer.
+        """
+        self._stated_empty += max(0, int(count))
+
     async def run(self, item: PlanItem) -> list[NormalisedRecord]:
         """Convenience: fetch -> parse -> normalise for one plan item."""
+        # The collection worker reads this counter after every page and adds it
+        # to the item's total, so a counter that is not reset per run double
+        # counts (dreamjob.pipeline.collection._stated_empty).
+        self._stated_empty = 0
         out: list[NormalisedRecord] = []
         raws = await self.fetch(item)
         for raw in raws:

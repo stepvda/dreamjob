@@ -377,6 +377,19 @@ def add_to_ranked_list(
         )
         if created:
             added.append(opportunity_id)
+
+    # A watched company's new vacancy is added to the ranked list, and "ranked"
+    # has to mean scored: an unscored row sorts to the bottom of the list and
+    # reads as broken (FR-401, FR-281).  Scoring the rows it just added keeps
+    # the promise that a new opportunity is scored when it appears, without
+    # recomputing the campaign's whole backlog from a watch check.
+    if added:
+        try:
+            from dreamjob.pipeline import scoring as scoring_mod  # noqa: PLC0415
+
+            scoring_mod.score_unscored(job_seeker_id, campaign_id, only_ids=added)
+        except Exception:  # noqa: BLE001 - a scoring failure must not fail the watch
+            log.exception("Could not score %d newly-added watched vacancy(ies)", len(added))
     return added
 
 

@@ -50,6 +50,11 @@ def main() -> int:
     parser.add_argument("--name", default=OWNER_NAME)
     parser.add_argument("--password", default=None, help="defaults to $DREAMJOB_BOOTSTRAP_PASSWORD")
     parser.add_argument("--reset-password", action="store_true")
+    parser.add_argument(
+        "--keep-other-admins",
+        action="store_true",
+        help="do not demote other administrators (default: the owner is the sole admin)",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -108,7 +113,23 @@ def main() -> int:
                 print(f"Password   : {password}   <- shown once; store it now")
         print(f"Exists     : {args.email} (id {seeker_id})")
 
-    print(f"Accounts   : {repo.count_seekers()}")
+    # By default the owner is the *sole* administrator, which is what a
+    # single-tenant installation wants: one accountable operator. Pass
+    # --keep-other-admins to leave any others in place.
+    if not args.keep_other_admins:
+        demoted = 0
+        for account in repo.list_seekers(include_disabled=True):
+            if account["id"] != seeker_id and account["is_admin"]:
+                repo.set_admin(account["id"], False)
+                record_audit(
+                    "admin.role_changed", "job_seeker", account["id"], seeker_id=seeker_id,
+                    actor="bootstrap", detail={"is_admin": False, "reason": "sole-admin policy"},
+                )
+                demoted += 1
+        if demoted:
+            print(f"Demoted    : {demoted} other administrator(s); {args.email} is now the sole admin")
+
+    print(f"Accounts   : {repo.count_seekers()} ({repo.count_admins()} administrator(s))")
     print(
         "Next       : start the API with `python3 -m dreamjob.main` (PYTHONPATH=backend), "
         "log in, and record the CR-410 consent before running a campaign."

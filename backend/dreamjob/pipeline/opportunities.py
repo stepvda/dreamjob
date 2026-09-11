@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from dreamjob.db.connection import from_json
+from dreamjob.db.connection import from_json, query_all
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.pipeline import directives as dir_mod
@@ -351,8 +351,24 @@ def rejection_reason(
             if industry.strip() and industry.strip().lower() in haystack:
                 return f"industry_excluded:{industry.strip()}"
 
+    # FR-142: is this the kind of work the seeker wants at all?  Without this
+    # gate every vacancy a scraped board held became a ranked opportunity.
+    out_of_scope = dir_mod.role_relevance(
+        directives,
+        record.get("title"),
+        record.get("function_family"),
+        record.get("description"),
+    )
+    if out_of_scope:
+        return out_of_scope
+
+    remote = str(record.get("work_arrangement") or "").lower() == "remote"
     if not dir_mod.location_matches(
-        directives, record.get("latitude"), record.get("longitude"), record.get("country")
+        directives,
+        record.get("latitude"),
+        record.get("longitude"),
+        record.get("country"),
+        remote=remote,
     ):
         return "outside_location_directives"
     return None
@@ -466,5 +482,162 @@ def synthesise_campaign(
         "Synthesised %d opportunities for campaign %s (%d new, %d refreshed, %d rejected)",
         len(report.opportunity_ids), campaign_id, report.created, report.refreshed,
         report.rejected,
+    )
+    return report
+
+
+# ---------------------------------------------------------------------------
+# FR-142/FR-144: re-applying the gates to what was already collected
+# ---------------------------------------------------------------------------
+
+
+def _companies_by_id(company_ids: set[str]) -> dict[str, dict]:
+    """Bulk-load company rows for a page of opportunities.
+
+    The gate reads a company's name, sectors and markets, so a naive clean-up
+    issued one query per row - 50,000 of them. This is one query per page.
+    """
+    if not company_ids:
+        return {}
+    out: dict[str, dict] = {}
+    ids = [i for i in company_ids if i]
+    for start in range(0, len(ids), 400):
+        chunk = ids[start : start + 400]
+        marks = ",".join("?" for _ in chunk)
+        for row in query_all(
+            f"SELECT id, name, country, business_summary, sector_codes, markets "
+            f"FROM company WHERE id IN ({marks})",
+            tuple(chunk),
+        ):
+            out[str(row["id"])] = dict(row)
+    return out
+
+
+def _judge_batch(
+    batch: list[dict],
+    company_ids: set[str],
+    directives_model: Any,
+    report: PruneReport,
+    doomed: list[str],
+) -> None:
+    """Apply the gates to one chunk, batching the company reads."""
+    companies = _companies_by_id(company_ids)
+    for row in batch:
+        company = companies.get(row.get("company_id"))
+        reason = rejection_reason(row, company, directives_model)
+        if reason is None:
+            continue
+        report.reasons[reason] = report.reasons.get(reason, 0) + 1
+        doomed.append(str(row["id"]))
+
+
+@dataclass
+class PruneReport:
+    """What a relevance clean-up did, for the screen and the job log."""
+
+    campaign_id: str | None = None
+    considered: int = 0
+    deleted: int = 0
+    kept_user_decided: int = 0
+    reasons: dict[str, int] = field(default_factory=dict)
+    dry_run: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "campaign_id": self.campaign_id,
+            "considered": self.considered,
+            "deleted": self.deleted,
+            "kept_user_decided": self.kept_user_decided,
+            "reasons": self.reasons,
+            "dry_run": self.dry_run,
+        }
+
+
+def prune_irrelevant(
+    job_seeker_id: str,
+    campaign_id: str | None = None,
+    *,
+    dry_run: bool = True,
+    page: int = 500,
+    use_latest_directives: bool = True,
+) -> PruneReport:
+    """Remove opportunities the directives no longer admit (FR-142, FR-144).
+
+    The gates in :func:`rejection_reason` run when a vacancy becomes an
+    opportunity.  A campaign collected *before* they existed - or before the
+    directives were rebuilt - keeps rows those gates would not let through
+    today: a Brussels search holding a Norwegian waiting job.  This re-applies
+    them and deletes what fails.
+
+    By default the judgement uses the seeker's **latest** directive set, not the
+    one the campaign was planned under.  The question this answers is "does this
+    row match what I want *now*", and the whole reason to run it is that the
+    older directives were wrong; judging by them would reproduce the mistake.
+
+    Two safeguards, because a clean-up is destructive:
+
+    * **A user decision outranks relevance.**  A row that is pinned, selected,
+      hand-ranked, tagged, rejected, applied to, or has a pipeline card is
+      never removed (NFR-305).
+    * **``dry_run`` defaults to true**, so the caller sees the count and the
+      reasons before anything goes.
+    """
+    report = PruneReport(campaign_id=campaign_id, dry_run=dry_run)
+    campaigns = (
+        [campaign_repo.get_campaign_any(campaign_id)]
+        if campaign_id
+        else [campaign_repo.get_campaign_any(c["id"]) for c in campaign_repo.list_campaigns(job_seeker_id)]
+    )
+
+    latest = None
+    if use_latest_directives:
+        from dreamjob.db.repositories import directives as directive_repo  # noqa: PLC0415
+
+        ordered = directive_repo.list_for_seeker(job_seeker_id)
+        latest = ordered[0] if ordered else None
+
+    for campaign in campaigns:
+        if campaign is None:
+            continue
+        directive_set = latest
+        if directive_set is None:
+            inputs = campaign_repo.load_planning_inputs(campaign)
+            directive_set = inputs.get("directives")
+        # Coerce once.  ``rejection_reason`` normalises its argument on every
+        # call, which for 50,000 rows is 50,000 parses of the same directive set.
+        directives_model = dir_mod.coerce_directive_set(directive_set) if directive_set else None
+
+        # Walk with keyset pagination over the columns the gate reads, batching
+        # the company look-ups per chunk.  The wide list query joins the badge
+        # and sorts in a temporary B-tree on every page, which made this take
+        # minutes over 50,000 rows.
+        doomed: list[str] = []
+        company_ids: set[str] = set()
+        batch: list[dict] = []
+        for row in repo.iter_for_relevance(job_seeker_id, campaign["id"], batch=page):
+            report.considered += 1
+            batch.append(row)
+            if row.get("company_id"):
+                company_ids.add(row["company_id"])
+            if len(batch) >= page:
+                _judge_batch(batch, company_ids, directives_model, report, doomed)
+                batch, company_ids = [], set()
+        if batch:
+            _judge_batch(batch, company_ids, directives_model, report, doomed)
+
+        protected = repo.ids_touching_user_decisions(job_seeker_id, doomed)
+        report.kept_user_decided += len(protected)
+        removable = [i for i in doomed if i not in protected]
+        if not dry_run and removable:
+            report.deleted += repo.delete_opportunities(job_seeker_id, removable)
+        else:
+            report.deleted += len(removable)
+
+    log.info(
+        "Prune %s: %s considered, %s removable, %s kept (user decided)",
+        "preview" if dry_run else "applied",
+        report.considered,
+        report.deleted,
+        report.kept_user_decided,
     )
     return report

@@ -28,6 +28,7 @@ from dreamjob.adapters.registries.common import (
     RegistryResult,
     SubsidiaryLink,
     identity_record,
+    stated_none,
 )
 from dreamjob.pipeline import filing_extract as fx
 
@@ -152,9 +153,19 @@ class CompaniesHouseAdapter(RegistryAdapter):
         payload = await self._json(
             f"{API_BASE}/search/companies?q={name}&items_per_page=5", egress=egress
         )
-        for item in (payload or {}).get("items") or []:
+        if not isinstance(payload, dict):
+            # An outage, a non-2xx and an unparseable body all arrive as
+            # ``None``; none of them is an answer (FR-181, NFR-403).
+            return None
+        for item in payload.get("items") or []:
             if item.get("company_number"):
                 return str(item["company_number"])
+        if stated_none(payload, listing="items", total="total_results"):
+            # ``total_results`` is the register's own count, and zero is it
+            # saying it holds no company of this name.  Read from the count
+            # rather than from an empty ``items``, which a renamed field
+            # produces just as readily (FR-181, NFR-403).
+            self.record_stated_empty()
         return None
 
     async def profile(self, number: str, *, egress: Any) -> dict | None:

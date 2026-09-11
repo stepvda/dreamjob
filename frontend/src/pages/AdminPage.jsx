@@ -33,8 +33,10 @@ import DataTab from './admin/DataTab'
 import LogsTab from './admin/LogsTab'
 import ModelsTab from './admin/ModelsTab'
 import SourcesTab from './admin/SourcesTab'
+import UsersTab from './admin/UsersTab'
 
 const TABS = [
+  { key: 'users', label: 'Users' },
   { key: 'models', label: 'Models' },
   { key: 'sources', label: 'Sources' },
   { key: 'activity', label: 'Activity' },
@@ -80,6 +82,7 @@ export default function AdminPage() {
 
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
+      {tab === 'users' && <UsersTab />}
       {tab === 'models' && <ModelsTab />}
       {tab === 'sources' && <SourcesTab />}
       {tab === 'activity' && <ActivityTab onGoToSources={() => setTab('sources')} />}

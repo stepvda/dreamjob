@@ -229,12 +229,94 @@ def count_seekers() -> int:
     return int(row["n"]) if row else 0
 
 
-def list_seekers() -> list[dict]:
-    return query_all(
-        "SELECT id, email, display_name, locale, is_admin, created_at, updated_at, "
-        "       (totp_secret_enc IS NOT NULL) AS mfa_enrolled "
-        "FROM job_seeker ORDER BY created_at"
+def count_admins(*, enabled_only: bool = True) -> int:
+    """How many administrators remain.
+
+    The guard against removing the last administrator reads this: an
+    installation with no admin cannot reach the screens that would appoint a
+    new one, so the last one can never be demoted, disabled or deleted.
+    """
+    sql = "SELECT COUNT(*) AS n FROM job_seeker WHERE is_admin = 1"
+    if enabled_only:
+        sql += " AND disabled = 0"
+    row = query_one(sql)
+    return int(row["n"]) if row else 0
+
+
+def list_seekers(query: str | None = None, *, include_disabled: bool = True) -> list[dict]:
+    """Every account, newest first, with the fields the user list shows.
+
+    ``query`` matches the e-mail or the display name, case-insensitively. The
+    session count and the last sign-in come along so an operator can tell an
+    account that is in use from one that never was.
+    """
+    sql = (
+        "SELECT j.id, j.email, j.display_name, j.locale, j.is_admin, "
+        "       j.disabled, j.disabled_at, j.last_login_at, j.created_at, j.updated_at, "
+        "       (j.totp_secret_enc IS NOT NULL) AS mfa_enrolled, "
+        "       (j.password_hash IS NULL) AS passwordless, "
+        "       (SELECT COUNT(*) FROM session s "
+        "        WHERE s.job_seeker_id = j.id AND s.expires_at > ?) AS active_sessions "
+        "FROM job_seeker j"
     )
+    params: list[Any] = [utcnow()]
+    clauses: list[str] = []
+    if query:
+        like = f"%{query.strip().lower()}%"
+        clauses.append("(LOWER(j.email) LIKE ? OR LOWER(j.display_name) LIKE ?)")
+        params += [like, like]
+    if not include_disabled:
+        clauses.append("j.disabled = 0")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY j.disabled, j.is_admin DESC, j.created_at DESC"
+    return query_all(sql, tuple(params))
+
+
+def get_seeker_row(seeker_id: str) -> dict | None:
+    """The full row, including the columns the public view hides."""
+    return query_one("SELECT * FROM job_seeker WHERE id = ?", (seeker_id,))
+
+
+def set_disabled(seeker_id: str, disabled: bool) -> None:
+    update_seeker(
+        seeker_id,
+        {"disabled": 1 if disabled else 0, "disabled_at": utcnow() if disabled else None},
+    )
+
+
+def set_last_login(seeker_id: str) -> None:
+    update_seeker(seeker_id, {"last_login_at": utcnow()})
+
+
+def list_users_without_sessions(
+    *, exclude_admins: bool = True, exclude_ids: tuple[str, ...] = ()
+) -> list[dict]:
+    """Accounts with no *open* session, for a bulk clean-up.
+
+    "No session" means no unexpired row in ``session``, which is the same
+    figure the user list displays - so an operator can see in the interface
+    exactly which accounts a purge would remove before running it. The acting
+    administrator is excluded by the caller, and admins are excluded by
+    default because a dormant administrator is a legitimate thing to keep and
+    removing the last one would lock the installation out.
+    """
+    sql = (
+        "SELECT j.id, j.email, j.display_name, j.is_admin, j.disabled, j.created_at "
+        "FROM job_seeker j WHERE NOT EXISTS ("
+        "  SELECT 1 FROM session s WHERE s.job_seeker_id = j.id AND s.expires_at > ?"
+        ")"
+    )
+    params: list[Any] = [utcnow()]
+    if exclude_admins:
+        sql += " AND j.is_admin = 0"
+    if exclude_ids:
+        marks = ",".join("?" for _ in exclude_ids)
+        sql += f" AND j.id NOT IN ({marks})"
+        params += list(exclude_ids)
+    sql += " ORDER BY j.created_at DESC"
+    return query_all(sql, tuple(params))
+
 
 
 def update_seeker(seeker_id: str, values: dict[str, Any]) -> None:

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker
 from dreamjob.config import get_settings
@@ -32,6 +32,7 @@ from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import admin as repo
 from dreamjob.db.repositories import seekers as seeker_repo
 from dreamjob.llm.client import invalidate_admin_config
+from dreamjob.security import auth_service as auth
 from dreamjob.security.audit import log_metric, record_audit
 
 router = APIRouter()
@@ -67,6 +68,45 @@ class LLMConfigIn(BaseModel):
     local_tasks: list[str] | None = None
     budget_degrade_at: float | None = Field(None, gt=0, le=1)
     log_retention_days: int | None = Field(None, ge=1, le=3650)
+
+
+class UserCreateIn(BaseModel):
+    """Administrator-created account (FR-362)."""
+
+    email: EmailStr
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str | None = Field(
+        None, description="Optional; a strong one is generated when omitted"
+    )
+    is_admin: bool = False
+    locale: str = Field("en", min_length=2, max_length=10)
+
+
+class UserUpdateIn(BaseModel):
+    """Partial change to another account.  Fields left out are untouched."""
+
+    display_name: str | None = Field(None, min_length=1, max_length=120)
+    is_admin: bool | None = None
+    disabled: bool | None = None
+    locale: str | None = Field(None, min_length=2, max_length=10)
+
+
+class UserPasswordIn(BaseModel):
+    """A reset.  Left empty, a strong password is generated and returned once."""
+
+    new_password: str | None = None
+
+
+class PurgeIn(BaseModel):
+    """Bulk clean-up of unused accounts (FR-362).
+
+    ``dry_run`` defaults to true so a caller has to ask deliberately before
+    anything is deleted; the count comes back either way.
+    """
+
+    exclude_admins: bool = True
+    dry_run: bool = True
+
 
 
 class SourceConfigIn(BaseModel):
@@ -737,3 +777,205 @@ def set_admin_flag(
         detail={"is_admin": payload.is_admin},
     )
     return {"id": seeker_id, "is_admin": payload.is_admin}
+
+
+# ---------------------------------------------------------------------------
+# User management (FR-362, FR-101, NFR-202)
+#
+# The administrator's view of the people on this installation: who is here,
+# who may administer, and the handful of actions an operator needs when an
+# account has to be closed, recovered or handed on. Everything acts through
+# ``security.auth_service`` so the policy (password strength, session
+# revocation, the last-administrator guard) lives in one place rather than in
+# this router.
+# ---------------------------------------------------------------------------
+
+
+def _user_view(row: dict) -> dict:
+    """One account for the administration list — never the password or secret."""
+    return {
+        "id": row["id"],
+        "email": row["email"],
+        "display_name": row["display_name"],
+        "locale": row.get("locale"),
+        "is_admin": bool(row.get("is_admin")),
+        "disabled": bool(row.get("disabled")),
+        "disabled_at": row.get("disabled_at"),
+        "last_login_at": row.get("last_login_at"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "mfa_enrolled": bool(row.get("mfa_enrolled")),
+        "passwordless": bool(row.get("passwordless")),
+        "active_sessions": int(row.get("active_sessions") or 0),
+    }
+
+
+def _translate(exc: Exception) -> HTTPException:
+    """Map an auth-service refusal onto the right status code."""
+    if isinstance(exc, auth.LastAdministrator):
+        return HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    if isinstance(exc, auth.WeakPassword):
+        return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    if isinstance(exc, seeker_repo.EmailAlreadyRegistered):
+        return HTTPException(
+            status.HTTP_409_CONFLICT, "An account already exists for this e-mail address"
+        )
+    return HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+
+@router.get("/users")
+def list_users(
+    q: str | None = Query(None, description="Match the e-mail or the name"),
+    include_disabled: bool = True,
+    admin: CurrentSeeker = Depends(current_admin),
+) -> dict:
+    """Every account, searched and ordered for the management screen (FR-362)."""
+    rows = seeker_repo.list_seekers(q, include_disabled=include_disabled)
+    return {
+        "users": [_user_view(r) for r in rows],
+        "total": len(rows),
+        "administrators": seeker_repo.count_admins(enabled_only=True),
+        "me": admin.id,
+    }
+
+
+@router.post("/users", status_code=status.HTTP_201_CREATED)
+def create_user(
+    payload: UserCreateIn, admin: CurrentSeeker = Depends(current_admin)
+) -> dict:
+    """Create an account on behalf of someone else (FR-362)."""
+    password = payload.password or auth.suggest_password()
+    try:
+        row = auth.admin_create_user(
+            str(payload.email),
+            payload.display_name,
+            password,
+            is_admin=payload.is_admin,
+            locale=payload.locale,
+            actor=admin.id,
+        )
+    except Exception as exc:  # noqa: BLE001 - translated to a status code
+        raise _translate(exc) from exc
+    # The generated password is shown once, here, and never stored in clear.
+    return {
+        "user": _user_view({**row, "active_sessions": 0}),
+        "password": password,
+        "password_generated": payload.password is None,
+    }
+
+
+@router.get("/users/{seeker_id}")
+def get_user(seeker_id: str, admin: CurrentSeeker = Depends(current_admin)) -> dict:
+    row = seeker_repo.get_seeker_row(seeker_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    row.setdefault("active_sessions", len(seeker_repo.list_sessions(seeker_id)))
+    return _user_view(row)
+
+
+@router.patch("/users/{seeker_id}")
+def update_user(
+    seeker_id: str,
+    payload: UserUpdateIn,
+    admin: CurrentSeeker = Depends(current_admin),
+) -> dict:
+    """Change a role, suspend or restore an account (FR-362).
+
+    An administrator cannot suspend or demote their own account here: doing so
+    would end the session they are working in. They can do it from another
+    administrator's account, or by signing in as someone else. The last active
+    administrator cannot be demoted or suspended by anyone.
+    """
+    row = seeker_repo.get_seeker_row(seeker_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    if seeker_id == admin.id and (payload.is_admin is False or payload.disabled is True):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Refusing to remove administrator access or suspend your own account",
+        )
+
+    if payload.display_name is not None or payload.locale is not None:
+        values = {
+            k: v
+            for k, v in {"display_name": payload.display_name, "locale": payload.locale}.items()
+            if v is not None
+        }
+        seeker_repo.update_seeker(seeker_id, values)
+        record_audit(
+            "admin.user_updated", "job_seeker", seeker_id, seeker_id=admin.id,
+            actor=admin.id, detail=values,
+        )
+    try:
+        if payload.is_admin is not None:
+            auth.admin_set_admin(seeker_id, payload.is_admin, actor=admin.id)
+        if payload.disabled is not None:
+            auth.admin_set_disabled(seeker_id, payload.disabled, actor=admin.id)
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+    updated = seeker_repo.get_seeker_row(seeker_id) or {}
+    updated.setdefault("active_sessions", len(seeker_repo.list_sessions(seeker_id)))
+    return _user_view(updated)
+
+
+@router.post("/users/{seeker_id}/reset-password")
+def reset_user_password(
+    seeker_id: str,
+    payload: UserPasswordIn,
+    admin: CurrentSeeker = Depends(current_admin),
+) -> dict:
+    """Set a new password for another account and end its sessions (NFR-202)."""
+    if seeker_repo.get_seeker_row(seeker_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    password = payload.new_password or auth.suggest_password()
+    try:
+        auth.admin_reset_password(seeker_id, password, actor=admin.id)
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+    return {"id": seeker_id, "password": password, "password_generated": payload.new_password is None}
+
+
+@router.post("/users/{seeker_id}/logout")
+def logout_user(seeker_id: str, admin: CurrentSeeker = Depends(current_admin)) -> dict:
+    """End every session an account has open."""
+    try:
+        revoked = auth.admin_logout(seeker_id, actor=admin.id)
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+    return {"id": seeker_id, "sessions_revoked": revoked}
+
+
+@router.delete("/users/{seeker_id}")
+def delete_user(seeker_id: str, admin: CurrentSeeker = Depends(current_admin)) -> dict:
+    """Delete an account and erase its private data (FR-108).
+
+    Irreversible. The shared knowledge base is left intact, as it carries no
+    link back to any job seeker (FR-344).
+    """
+    if seeker_id == admin.id:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Refusing to delete your own account"
+        )
+    try:
+        counts = auth.admin_delete_user(seeker_id, actor=admin.id)
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+    return {"id": seeker_id, "deleted": True, "counts": counts}
+
+
+@router.post("/users/purge-without-sessions")
+def purge_users_without_sessions(
+    payload: PurgeIn, admin: CurrentSeeker = Depends(current_admin)
+) -> dict:
+    """Delete every account that has no open session (FR-362).
+
+    Always preview first: the same call with ``dry_run`` left at its default
+    returns the count and a sample without deleting anything. Only accounts
+    with no unexpired session are candidates - the same figure the user list
+    shows - administrators are excluded by default, and the caller is always
+    excluded.
+    """
+    return auth.purge_users_without_sessions(
+        admin.id, exclude_admins=payload.exclude_admins, dry_run=payload.dry_run
+    )
