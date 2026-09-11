@@ -22,8 +22,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker
+from dreamjob.api.deps import (
+    CurrentSeeker,
+    current_admin,
+    current_seeker,
+    owned_or_404,
+)
+from dreamjob.db.connection import to_json, update_row
+from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as repo
+from dreamjob.jobs.runner import runner
+from dreamjob.pipeline import apply_contacts as scale_pipeline
 from dreamjob.pipeline import contacts as pipeline
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
@@ -53,6 +62,37 @@ class DiscoverRequest(BaseModel):
 
 class CampaignDiscoverRequest(DiscoverRequest):
     limit: int = Field(default=25, ge=1, le=200)
+
+
+class CompanyDiscoverRequest(BaseModel):
+    """FR-301 for one named company, with the same network switches.
+
+    ``allow_smtp`` defaults off, like the batch pass: one screen button must not
+    open thousands of probes to other people's mail servers (FR-305, CR-402).
+    """
+
+    crawl_site: bool = True
+    allow_smtp: bool = False
+    derive_domains: bool = True
+    allow_generic: bool = True
+
+
+class DiscoverAllRequest(BaseModel):
+    """FR-301 for a seeker's whole shortlist, as a resumable job (FR-185).
+
+    ``limit`` counts vacancies, not companies, matching
+    :func:`apply_contacts.ensure_apply_contacts`: the pass stops as soon as that
+    many vacancies have somebody to write to.
+    """
+
+    limit: int = Field(default=500, ge=1, le=5000)
+    campaign_id: str | None = None
+    crawl_site: bool = True
+    allow_smtp: bool = False
+    derive_domains: bool = True
+    allow_generic: bool = True
+    refresh: bool = False
+    order: str = Field(default="vacancies", pattern="^(vacancies|recency)$")
 
 
 class ValidateRequest(BaseModel):
@@ -182,6 +222,92 @@ async def discover_for_campaign(
         "opportunities": len(reports),
         "with_contact": sum(1 for r in reports if r.candidates),
         "reports": [r.as_dict() for r in reports],
+    }
+
+
+# ---------------------------------------------------------------------------
+# FR-301 from the Contacts screen: scrape a company, or the whole shortlist
+# ---------------------------------------------------------------------------
+
+
+@router.post("/companies/{company_id}/discover")
+async def discover_company_contacts(
+    company_id: str, seeker: Seeker, request: CompanyDiscoverRequest | None = None
+) -> dict[str, Any]:
+    """Walk the FR-301 ladder for one company and return what it found.
+
+    This is the Contacts screen's "Find contacts" control.  It reads the company
+    from the database rather than accepting its name and domain from the caller,
+    so the ladder cannot be pointed at a company it is not looking at, and it
+    honours the same FR-303/FR-304/NFR-302 rules as the batch pass because it
+    calls the same code.
+    """
+    body = request or CompanyDiscoverRequest()
+    try:
+        outcome = await scale_pipeline.resolve_company_by_id(
+            company_id,
+            crawl_site=body.crawl_site,
+            allow_smtp=body.allow_smtp,
+            derive_domains=body.derive_domains,
+            allow_generic=body.allow_generic,
+        )
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return {
+        "company_id": company_id,
+        "outcome": outcome.as_dict(),
+        "contacts": repo.contacts_for_company(company_id, include_blocked=True),
+    }
+
+
+@router.post("/discover", status_code=status.HTTP_202_ACCEPTED)
+async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker) -> dict[str, Any]:
+    """Start the FR-301 pass for a seeker's shortlist as a resumable job (FR-185).
+
+    The Contacts screen used to list whatever contacts happened to exist and
+    offered no way to find more; the Apply Browser's control only covered its
+    current page.  This is the missing trigger, and it is a job rather than a
+    request because a bounded pass over many companies is not something a screen
+    should wait for (NFR-502).  The options travel in the checkpoint, so a run
+    interrupted by a restart resumes with the same limits (NFR-401).
+    """
+    options = body.model_dump()
+    options.pop("campaign_id", None)
+    job_id = runner.create(
+        scale_pipeline.DISCOVERY_JOB_KIND,
+        job_seeker_id=seeker.id,
+        campaign_id=body.campaign_id,
+        total=1,
+        # A ladder step budgets about eight seconds per company (FR-182 pacing).
+        estimated_seconds=max(60, min(body.limit, 1000) * 8),
+    )
+    update_row("job_run", job_id, {"checkpoint": to_json({"options": options})})
+    await runner.start(job_id)
+    return {
+        "job_id": job_id,
+        "kind": scale_pipeline.DISCOVERY_JOB_KIND,
+        "campaign_id": body.campaign_id,
+        "limit": body.limit,
+    }
+
+
+@router.get("/discover/{job_id}")
+def discovery_status(job_id: str, seeker: Seeker) -> dict[str, Any]:
+    """Progress of a contacts pass started above, owned by this seeker (FR-344)."""
+    return owned_or_404("job_run", job_id, seeker.id)
+
+
+@router.get("/coverage")
+def contacts_coverage(seeker: Seeker) -> dict[str, Any]:
+    """How much of the corpus has somebody to write to, and how it was found.
+
+    Reads the same repository summary the FR-301 report uses, so the screen can
+    say what is reachable, what was found and by which FR-303 method, rather
+    than showing an unexplained count.
+    """
+    return {
+        "resolutions": apply_repo.resolution_summary(),
+        "coverage": apply_repo.coverage_by_method(),
     }
 
 

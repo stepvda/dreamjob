@@ -512,6 +512,43 @@ def company_people(company_id: str) -> dict[str, Any]:
     return row
 
 
+def company_for_resolution(company_id: str) -> dict[str, Any] | None:
+    """One company in the shape :func:`apply_contacts.resolve_company` expects.
+
+    The FR-301 ladder is a company question, and running it for a single company
+    - what the Contacts screen's "Find contacts" control asks for - needs the
+    same fields :func:`companies_needing_contact` hands the batch pass, without
+    the batch pass's work-list filters.  A company that already carries a usable
+    address is reported as such so the caller can reuse it rather than re-crawl.
+
+    Returns ``None`` when the company does not exist, which the caller turns
+    into a 404 rather than an invented row.
+    """
+    row = query_one(
+        """
+        SELECT co.id            AS company_id,
+               co.name          AS company_name,
+               co.domain        AS company_domain,
+               co.careers_url   AS careers_url,
+               co.country       AS company_country,
+               (SELECT COUNT(*) FROM vacancy v WHERE v.company_id = co.id) AS vacancy_count,
+               EXISTS (
+                   SELECT 1 FROM usable_contact u
+                    WHERE u.company_id = co.id
+                      AND u.email IS NOT NULL AND u.email != ''
+               ) AS has_contact
+          FROM company co
+         WHERE co.id = ?
+        """,
+        (company_id,),
+    )
+    if row is None:
+        return None
+    row["vacancy_count"] = int(row.get("vacancy_count") or 0)
+    row["has_contact"] = bool(row.get("has_contact"))
+    return row
+
+
 def set_company_domain(company_id: str, domain: str) -> None:
     """Write back a domain the ladder confirmed, so the next pass is free."""
     execute(

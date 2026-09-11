@@ -95,6 +95,7 @@ from dreamjob.db.repositories import company_domains as domain_repo
 from dreamjob.db.repositories import contacts as contacts_repo
 from dreamjob.db.repositories import registry_identity as identity_repo
 from dreamjob.egress.client import EgressClient, RobotsDisallowed
+from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import contacts as discovery
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
@@ -897,6 +898,49 @@ def _resolution(outcome: CompanyOutcome) -> dict[str, Any]:
     }
 
 
+async def resolve_company_by_id(
+    company_id: str,
+    *,
+    campaign_id: str | None = None,
+    allow_smtp: bool = False,
+    crawl_site: bool = True,
+    derive_domains: bool = True,
+    allow_generic: bool = True,
+    egress: EgressClient | None = None,
+) -> CompanyOutcome:
+    """Walk the FR-301 ladder for one company named by id (FR-301, FR-303).
+
+    The batch pass (:func:`ensure_apply_contacts`) has its own work list and its
+    own politeness budget; this is the same ladder asked about one named
+    company, which is what the Contacts screen needs when somebody picks a
+    company and presses "Find contacts".  The company row is read here rather
+    than accepted from the caller, so no caller can hand the ladder a company
+    name and domain that do not belong together.
+
+    Raises :class:`LookupError` when the company does not exist, which the
+    router turns into a 404.
+    """
+    company = await asyncio.to_thread(repo.company_for_resolution, company_id)
+    if company is None:
+        raise LookupError(f"No company {company_id}")
+
+    async def walk(client: EgressClient) -> CompanyOutcome:
+        return await resolve_company(
+            company,
+            egress=client,
+            campaign_id=campaign_id,
+            allow_smtp=allow_smtp,
+            crawl_site=crawl_site,
+            derive_domains=derive_domains,
+            allow_generic=allow_generic,
+        )
+
+    if egress is None:
+        async with EgressClient(store_raw=False) as client:
+            return await walk(client)
+    return await walk(egress)
+
+
 # ---------------------------------------------------------------------------
 # The pass
 # ---------------------------------------------------------------------------
@@ -1128,3 +1172,36 @@ async def ensure_apply_contacts(
 def run_ensure_apply_contacts(job_seeker_id: str, limit: int = 500, **kwargs: Any) -> dict[str, Any]:
     """Synchronous entry point, for scripts and the job runner."""
     return asyncio.run(ensure_apply_contacts(job_seeker_id, limit, **kwargs)).as_dict()
+
+
+# ---------------------------------------------------------------------------
+# The job the Contacts screen starts (FR-185, NFR-401, NFR-502)
+# ---------------------------------------------------------------------------
+
+#: Job kind for a contacts pass started from the Contacts screen.  Registered
+#: at import time to match every other job kind, so a run interrupted by a
+#: restart is picked up again rather than abandoned.  The pass is idempotent -
+#: companies already covered cost nothing and resolved companies are skipped -
+#: so a resumed run continues rather than duplicating work.
+DISCOVERY_JOB_KIND = "contacts_discovery"
+
+
+async def contacts_discovery_worker(ctx: JobContext):
+    """Run the FR-301 pass for a seeker, reporting the coverage it reached.
+
+    The caller stores the pass options in the job checkpoint (``{"options":
+    {...}}``), which is what makes the worker resumable without a closure.
+    """
+    options = dict((ctx.checkpoint or {}).get("options") or {})
+    limit = int(options.pop("limit", 500) or 500)
+    campaign_id = options.pop("campaign_id", None) or ctx.campaign_id
+    report = await ensure_apply_contacts(
+        ctx.job_seeker_id or "", limit, campaign_id=campaign_id, **options
+    )
+    payload = report.as_dict()
+    ctx.save_checkpoint(report=payload)
+    ctx.progress(1, 1)
+    yield payload
+
+
+runner.register_worker(DISCOVERY_JOB_KIND, contacts_discovery_worker)

@@ -11,7 +11,7 @@
  * (NFR-303). Both are shown, not buried in settings.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
@@ -21,6 +21,7 @@ import {
   Badge,
   Empty,
   ErrorBox,
+  JobProgress,
   Loading,
   Modal,
   Tabs,
@@ -66,6 +67,11 @@ export default function ContactsPage() {
 
 /* --- Contacts -------------------------------------------------------------- */
 
+/** How often the screen asks the server how a discovery pass is getting on. */
+const DISCOVERY_POLL_MS = 4000
+/** The default coverage target, in vacancies, for the whole-shortlist pass. */
+const DISCOVERY_LIMIT = 500
+
 function ContactList() {
   const [companyId, setCompanyId] = useState('')
   const companies = useFetch(() => api.get(`/companies?limit=${COMPANY_CHOICES}`), [])
@@ -73,7 +79,13 @@ function ContactList() {
     () => (companyId ? api.get(`/contacts/companies/${companyId}`) : Promise.resolve(null)),
     [companyId],
   )
+  const coverage = useFetch(() => api.get('/contacts/coverage').catch(() => null), [])
   const [validating, setValidating] = useState(null)
+  const [scraping, setScraping] = useState(false)
+  const [scrapeResult, setScrapeResult] = useState(null)
+  const [scrapeError, setScrapeError] = useState(null)
+  const [batch, setBatch] = useState(null)
+  const [batchError, setBatchError] = useState(null)
 
   const list = Array.isArray(companies.data)
     ? companies.data
@@ -90,168 +102,327 @@ function ContactList() {
     }
   }
 
+  /** FR-301 for one company: walk the ladder and show what it concluded. */
+  async function findForCompany() {
+    if (!companyId) return
+    setScraping(true)
+    setScrapeResult(null)
+    setScrapeError(null)
+    try {
+      const result = await api.post(`/contacts/companies/${companyId}/discover`, {})
+      setScrapeResult(result)
+      contacts.reload()
+      coverage.reload()
+    } catch (error) {
+      setScrapeError(error)
+    } finally {
+      setScraping(false)
+    }
+  }
+
+  /** FR-301 for the whole shortlist, as a resumable background job (FR-185). */
+  async function findForShortlist() {
+    setBatchError(null)
+    try {
+      const started = await api.post('/contacts/discover', { limit: DISCOVERY_LIMIT })
+      setBatch({ job_id: started.job_id, job: null, done: false, startedAt: Date.now() })
+    } catch (error) {
+      setBatchError(error)
+    }
+  }
+
+  // A pass over many companies is a job, not a request. Poll it while it runs
+  // and reload the list the moment it finishes (NFR-502).
+  useEffect(() => {
+    if (!batch?.job_id || batch.done) return undefined
+    const timer = setInterval(async () => {
+      try {
+        const job = await api.get(`/contacts/discover/${batch.job_id}`)
+        const finished = ['done', 'failed', 'cancelled'].includes(job.status)
+        setBatch((current) => (current ? { ...current, job, done: finished } : current))
+        if (finished) {
+          contacts.reload()
+          companies.reload()
+          coverage.reload()
+        }
+      } catch (error) {
+        setBatchError(error)
+      }
+    }, DISCOVERY_POLL_MS)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch?.job_id, batch?.done])
+
   if (companies.loading) return <Loading />
   // A refused lookup is not an empty knowledge base: swallowing the failure
   // would show "no companies yet" to a job seeker whose companies are all
   // there, and no contact could ever be reached from this screen.
   if (companies.error) return <ErrorBox error={companies.error} onRetry={companies.reload} />
-  if (!list.length) {
-    return (
-      <FirstRun
-        pathname="/contacts"
-        title="No companies to look through yet"
-        action={
-          <Link className="btn btn-primary" to="/campaigns">
-            <Icon name="campaign" /> Run a campaign
-          </Link>
-        }
-      >
-        Contacts are found per company, so a campaign has to have collected some first.
-      </FirstRun>
-    )
-  }
+
+  const running = batch && !batch.done
+  const covered = coverage.data?.coverage
 
   return (
     <>
       <div className="card">
-        <div className="row">
-          <div className="field" style={{ flex: 1, marginBottom: 0 }}>
-            <label>
-              Company
-              <HelpTip term="reachability" />
-            </label>
-            <select value={companyId} onChange={(e) => setCompanyId(e.target.value)}>
-              <option value="">Choose a company…</option>
-              {list.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="card-header">
+          <Icon name="search" />
+          <h3>Find contacts</h3>
+          <div className="spacer" />
+          {covered && (
+            <span className="small muted">
+              {covered.vacancies_with_contact} of {covered.vacancies} vacancies reachable
+            </span>
+          )}
         </div>
-        {total > list.length && (
-          <p className="small muted" style={{ marginBottom: 0 }}>
-            Showing the {list.length} most recently collected of {total} companies. Search
-            the full knowledge base on <Link to="/companies">Companies</Link> if the one you
-            want is not here.
-          </p>
+        <p className="small muted">
+          Scraping walks each company&apos;s own website and press pages for a named hiring
+          manager or a published careers mailbox, then validates every address it finds
+          (FR-301, FR-303, FR-304). It is rate-limited per domain, so it runs as a
+          background job you can leave.
+        </p>
+        <div className="row row-wrap" style={{ gap: 8 }}>
+          <button className="btn btn-primary" disabled={running} onClick={findForShortlist}>
+            {running ? <span className="spinner" /> : <Icon name="search" />} Find contacts for
+            my shortlist
+          </button>
+          <HelpTip term="reachability" />
+        </div>
+        {batchError && <ErrorBox error={batchError} onRetry={() => setBatchError(null)} />}
+        {batch && (
+          <div style={{ marginTop: 12 }}>
+            <JobProgress
+              job={
+                batch.job || {
+                  kind: 'Finding hiring contacts',
+                  status: 'running',
+                  progress_done: 0,
+                  progress_total: 1,
+                }
+              }
+            />
+            {batch.done && batch.job?.checkpoint?.report && (
+              <p className="small muted" style={{ margin: '8px 0 0' }}>
+                {batch.job.checkpoint.report.companies_reachable || 0} reachable ·{' '}
+                {batch.job.checkpoint.report.companies_unreachable || 0} nothing found ·{' '}
+                {batch.job.checkpoint.report.vacancies_covered || 0} vacancies newly covered
+              </p>
+            )}
+          </div>
         )}
       </div>
 
-      {!companyId && (
-        <Empty title="Pick a company">
-          Contacts are ranked per company: the hiring manager of the relevant department
-          where one can be identified, then talent acquisition, then a generic careers
-          mailbox.
-        </Empty>
-      )}
-
-      {companyId && contacts.loading && <Loading rows={4} />}
-      {contacts.error && <ErrorBox error={contacts.error} onRetry={contacts.reload} />}
-
-      {companyId && contacts.data && (
-        <div className="card">
-          <div className="card-header">
-            <Icon name="contacts" />
-            <h3>Ranked contacts</h3>
-            <div className="spacer" />
-            <span className="small muted">
-              {(contacts.data.contacts || contacts.data || []).length} found
-            </span>
+      {!list.length ? (
+        <FirstRun
+          pathname="/contacts"
+          title="No companies to look through yet"
+          action={
+            <Link className="btn btn-primary" to="/campaigns">
+              <Icon name="campaign" /> Run a campaign
+            </Link>
+          }
+        >
+          Contacts are found per company, so a campaign has to have collected some first.
+        </FirstRun>
+      ) : (
+        <>
+          <div className="card">
+            <div className="row row-wrap">
+              <div className="field" style={{ flex: 1, minWidth: 240, marginBottom: 0 }}>
+                <label>
+                  Company
+                  <HelpTip term="reachability" />
+                </label>
+                <select
+                  value={companyId}
+                  onChange={(e) => {
+                    setCompanyId(e.target.value)
+                    setScrapeResult(null)
+                    setScrapeError(null)
+                  }}
+                >
+                  <option value="">Choose a company…</option>
+                  {list.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>&nbsp;</label>
+                <button className="btn" disabled={!companyId || scraping} onClick={findForCompany}>
+                  {scraping ? <span className="spinner" /> : <Icon name="search" />} Find contacts
+                  for this company
+                </button>
+              </div>
+            </div>
+            {total > list.length && (
+              <p className="small muted" style={{ marginBottom: 0 }}>
+                Showing the {list.length} most recently collected of {total} companies. Search
+                the full knowledge base on <Link to="/companies">Companies</Link> if the one you
+                want is not here.
+              </p>
+            )}
           </div>
 
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Role</th>
-                  <th>
-                    Email
-                    <HelpTip term="catch_all" />
-                  </th>
-                  <th>
-                    Validation
-                    <HelpTip title="Validation result">
-                      Syntax, MX lookup, disposable and role-address detection, an SMTP
-                      probe where the server allows it, and catch-all detection. Addresses
-                      that come back invalid are never used.
-                    </HelpTip>
-                  </th>
-                  <th>
-                    Source
-                    <HelpTip title="How the address was found">
-                      From the company website, a press page, inferred from the pattern of
-                      other addresses on the same domain, or a lookup service. The method
-                      is recorded because an inferred address deserves less confidence.
-                    </HelpTip>
-                  </th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {(contacts.data.contacts || contacts.data || []).map((c) => (
-                  <tr key={c.id}>
-                    <td>
-                      <strong>{c.full_name || <span className="muted">Unnamed</span>}</strong>
-                      {c.is_generic_mailbox === 1 && (
-                        <>
-                          {' '}
-                          <Badge>
-                            <Icon name="companies" /> role address
-                          </Badge>
-                          <HelpTip term="role_address" />
-                        </>
-                      )}
-                      {c.objected === 1 && (
-                        <>
-                          {' '}
-                          <Badge tone="danger">
-                            <Icon name="lock" /> blocked
-                          </Badge>
-                        </>
-                      )}
-                    </td>
-                    <td>
-                      {c.role_title || '–'}
-                      {c.department && <div className="tiny muted">{c.department}</div>}
-                    </td>
-                    <td className="mono">{c.email || '–'}</td>
-                    <td>
-                      <ValidationBadge result={c.email_validation} />
-                      {c.email_validated_at && (
-                        <div className="tiny muted">{formatDate(c.email_validated_at)}</div>
-                      )}
-                    </td>
-                    <td className="small muted">
-                      {c.email_source_method || c.source || '–'}
-                      {c.access_method === 'browser' && (
-                        <div className="tiny">
-                          <Badge tone="warn">
-                            <Icon name="browser" /> browser
-                          </Badge>
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <button
-                        className="btn btn-sm"
-                        disabled={!c.email || validating === c.id || c.objected === 1}
-                        onClick={() => validate(c)}
-                      >
-                        {validating === c.id ? <span className="spinner" /> : <Icon name="refresh" />}
-                        Re-check
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+          {scrapeError && <ErrorBox error={scrapeError} onRetry={() => setScrapeError(null)} />}
+          {scrapeResult && <ScrapeOutcome result={scrapeResult} />}
+
+          {!companyId && (
+            <Empty title="Pick a company">
+              Contacts are ranked per company: the hiring manager of the relevant department
+              where one can be identified, then talent acquisition, then a generic careers
+              mailbox.
+            </Empty>
+          )}
+
+          {companyId && contacts.loading && <Loading rows={4} />}
+          {contacts.error && <ErrorBox error={contacts.error} onRetry={contacts.reload} />}
+
+          {companyId && contacts.data && (
+            <div className="card">
+              <div className="card-header">
+                <Icon name="contacts" />
+                <h3>Ranked contacts</h3>
+                <div className="spacer" />
+                <span className="small muted">
+                  {(contacts.data.contacts || contacts.data || []).length} found
+                </span>
+              </div>
+
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Role</th>
+                      <th>
+                        Email
+                        <HelpTip term="catch_all" />
+                      </th>
+                      <th>
+                        Validation
+                        <HelpTip title="Validation result">
+                          Syntax, MX lookup, disposable and role-address detection, an SMTP
+                          probe where the server allows it, and catch-all detection. Addresses
+                          that come back invalid are never used.
+                        </HelpTip>
+                      </th>
+                      <th>
+                        Source
+                        <HelpTip title="How the address was found">
+                          From the company website, a press page, inferred from the pattern of
+                          other addresses on the same domain, or a lookup service. The method
+                          is recorded because an inferred address deserves less confidence.
+                        </HelpTip>
+                      </th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(contacts.data.contacts || contacts.data || []).map((c) => (
+                      <tr key={c.id}>
+                        <td>
+                          <strong>{c.full_name || <span className="muted">Unnamed</span>}</strong>
+                          {c.is_generic_mailbox === 1 && (
+                            <>
+                              {' '}
+                              <Badge>
+                                <Icon name="companies" /> role address
+                              </Badge>
+                              <HelpTip term="role_address" />
+                            </>
+                          )}
+                          {c.objected === 1 && (
+                            <>
+                              {' '}
+                              <Badge tone="danger">
+                                <Icon name="lock" /> blocked
+                              </Badge>
+                            </>
+                          )}
+                        </td>
+                        <td>
+                          {c.role_title || '–'}
+                          {c.department && <div className="tiny muted">{c.department}</div>}
+                        </td>
+                        <td className="mono">{c.email || '–'}</td>
+                        <td>
+                          <ValidationBadge result={c.email_validation} />
+                          {c.email_validated_at && (
+                            <div className="tiny muted">{formatDate(c.email_validated_at)}</div>
+                          )}
+                        </td>
+                        <td className="small muted">
+                          {c.email_source_method || c.source || '–'}
+                          {c.access_method === 'browser' && (
+                            <div className="tiny">
+                              <Badge tone="warn">
+                                <Icon name="browser" /> browser
+                              </Badge>
+                            </div>
+                          )}
+                        </td>
+                        <td>
+                          <button
+                            className="btn btn-sm"
+                            disabled={!c.email || validating === c.id || c.objected === 1}
+                            onClick={() => validate(c)}
+                          >
+                            {validating === c.id ? (
+                              <span className="spinner" />
+                            ) : (
+                              <Icon name="refresh" />
+                            )}
+                            Re-check
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </>
+  )
+}
+
+/* --- Company scrape outcome ----------------------------------------------- */
+
+function ScrapeOutcome({ result }) {
+  const outcome = result?.outcome || {}
+  const reachable = outcome.status === 'reachable'
+  return (
+    <div className={`card phase-edge ${reachable ? 'phase-4' : 'phase-2'}`}>
+      <div className="card-header">
+        <Icon name={reachable ? 'check' : 'search'} />
+        <h3>{result?.company_name || 'Contact search'}</h3>
+        <div className="spacer" />
+        <Badge tone={reachable ? 'ok' : 'warn'}>{outcome.status || 'unknown'}</Badge>
+      </div>
+      {reachable ? (
+        <p className="small" style={{ marginBottom: 4 }}>
+          <span className="mono">{outcome.email}</span>
+          {outcome.is_generic_mailbox ? ' (role address)' : ''} via{' '}
+          {outcome.email_source_method || 'the knowledge base'}
+          {outcome.validation ? ` · ${outcome.validation}` : ''}
+        </p>
+      ) : (
+        <p className="small muted" style={{ marginBottom: 4 }}>
+          {outcome.reason || 'No contact could be found for this company.'}
+        </p>
+      )}
+      {outcome.domain && (
+        <p className="tiny muted" style={{ marginBottom: 0 }}>
+          Domain: {outcome.domain}
+          {outcome.domain_source ? ` (${outcome.domain_source})` : ''}
+        </p>
+      )}
+    </div>
   )
 }
 

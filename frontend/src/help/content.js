@@ -262,12 +262,14 @@ export const PAGE_HELP = {
     purpose:
       'Who to write to at a target company, and whether there is a warmer way in than a cold email. Every address is validated before it is ever used.',
     steps: [
-      'Pick a company to see its ranked contacts: the hiring manager of the relevant department where one can be identified, then talent acquisition, then a generic careers mailbox.',
+      'Run "Find contacts for my shortlist" to scrape your target companies: each company’s own site and press pages are read for a named hiring manager or a published careers mailbox, and every address is validated before it is stored. It is a background job because it is rate-limited per domain.',
+      'Pick a company to see its ranked contacts: the hiring manager of the relevant department where one can be identified, then talent acquisition, then a generic careers mailbox. "Find contacts for this company" re-runs the ladder for just that one.',
       'Check the validation result. Addresses that came back invalid are never sent to.',
       'Look at the introduction routes before settling for a cold email — a warm introduction does better.',
       'Import your own network once, so routes can be found for every company from then on.',
     ],
     tips: [
+      'A company showing "unreachable" is a real finding: the ladder was walked and nothing survived, so the screen tells you that rather than offering an address somebody made up.',
       'An inferred address — guessed from the pattern of other addresses on the same domain — is marked as such and deserves less confidence than one published on the company site.',
       'A "risky" result usually means a catch-all domain, where the server accepts anything and proves nothing.',
       'Contacts collected through browser automation expire with the campaign that collected them and are never shared.',

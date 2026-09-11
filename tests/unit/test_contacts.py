@@ -896,6 +896,67 @@ def test_the_api_covers_the_contact_lifecycle() -> None:
         assert "contacts" in client.post("/api/contacts/retention/sweep").json()
 
 
+def test_the_contacts_screen_can_scrape_a_company_and_a_shortlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The controls that were missing: scrape one company, or the whole list (FR-301).
+
+    No DNS and no SMTP: an MX answer and syntax are enough for the ladder to
+    reach a verdict, which is the point - the route wiring, the ownership guard
+    and the stored result are what this test pins down.
+    """
+    from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker
+    from dreamjob.api.routers import contacts as router_module
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    ids = _seed()
+    me = CurrentSeeker(
+        id=ids["seeker_id"], email="seeker@example.org", display_name="Stephane van der Aa",
+        is_admin=True, locale="en",
+    )
+    app = FastAPI()
+    app.include_router(router_module.router, prefix="/api/contacts")
+    app.dependency_overrides[current_seeker] = lambda: me
+    app.dependency_overrides[current_admin] = lambda: me
+
+    monkeypatch.setattr(
+        validation, "_resolve_mx",
+        lambda domain, timeout=5.0: validation.MXResult(
+            has_mx=True, hosts=["mx.acme-data.example"]
+        ),
+    )
+
+    with TestClient(app) as client:
+        # One company: the ladder runs and the found address is stored.
+        scraped = client.post(
+            f"/api/contacts/companies/{ids['company_id']}/discover",
+            json={"crawl_site": False, "allow_smtp": False},
+        )
+        assert scraped.status_code == 200, scraped.text
+        body = scraped.json()
+        assert body["outcome"]["status"] == "reachable"
+        assert body["outcome"]["email"]
+        assert body["contacts"], "the found address is stored and returned round-trip"
+        assert client.get(f"/api/contacts/companies/{ids['company_id']}").json()
+
+        # Coverage is readable so the screen can say how much is reachable.
+        coverage = client.get("/api/contacts/coverage")
+        assert coverage.status_code == 200
+        assert "resolutions" in coverage.json() and "coverage" in coverage.json()
+
+        # The whole shortlist is a resumable job rather than a request (FR-185).
+        started = client.post(
+            "/api/contacts/discover",
+            json={"limit": 5, "crawl_site": False, "derive_domains": False},
+        )
+        assert started.status_code == 202, started.text
+        job_id = started.json()["job_id"]
+        status = client.get(f"/api/contacts/discover/{job_id}")
+        assert status.status_code == 200
+        assert status.json()["kind"] == "contacts_discovery"
+
+
 def test_scraped_names_reach_the_model_as_data_not_instructions() -> None:
     """NFR-205: the intermediary, the contact and the company come off public pages."""
     ids = _seed()

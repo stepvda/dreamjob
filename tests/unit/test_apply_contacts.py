@@ -631,6 +631,83 @@ def test_an_objection_keeps_a_company_unreachable(monkeypatch: pytest.MonkeyPatc
 
 
 # ---------------------------------------------------------------------------
+# The Contacts screen's per-company control (FR-301)
+# ---------------------------------------------------------------------------
+
+
+def test_one_company_can_be_walked_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The screen's "Find contacts for this company" is the same ladder, one id."""
+    _offline(monkeypatch)
+    company_id = _company("Acme Data BV", domain="acme-data.example")
+    _vacancy(company_id, application_channel="email", application_target="jobs@acme-data.example")
+    outcome = asyncio.run(
+        pipeline.resolve_company_by_id(
+            company_id, crawl_site=False, derive_domains=False, allow_generic=False
+        )
+    )
+    assert outcome.reachable
+    assert outcome.email == "jobs@acme-data.example"
+    # The verdict is recorded, so the next batch pass knows about it (FR-305).
+    assert repo.get_resolution(company_id)["status"] == "reachable"
+
+
+def test_the_resolution_work_row_carries_the_ladder_inputs() -> None:
+    company_id = _company("Acme Data BV", domain="acme-data.example")
+    row = repo.company_for_resolution(company_id)
+    assert row is not None
+    assert row["company_id"] == company_id
+    assert row["company_name"] == "Acme Data BV"
+    assert row["company_domain"] == "acme-data.example"
+    assert row["vacancy_count"] == 0
+    assert row["has_contact"] is False
+
+
+def test_an_unknown_company_is_a_lookup_error() -> None:
+    with pytest.raises(LookupError):
+        asyncio.run(pipeline.resolve_company_by_id("no-such-company"))
+
+
+def test_the_discovery_job_is_registered_and_runs_a_bounded_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-185/NFR-401: the whole-shortlist pass is a job, driven from a checkpoint."""
+    from dreamjob.jobs.runner import runner
+
+    _offline(monkeypatch)
+    seed = _seeker()
+    company_id = _company("Acme Data BV", domain="acme-data.example")
+    _vacancy(company_id, application_channel="email", application_target="jobs@acme-data.example")
+
+    assert runner._workers[pipeline.DISCOVERY_JOB_KIND] is pipeline.contacts_discovery_worker
+
+    class _Ctx:
+        job_seeker_id = seed["seeker_id"]
+        campaign_id = seed["campaign_id"]
+        checkpoint = {
+            "options": {"limit": 1, "crawl_site": False, "derive_domains": False}
+        }
+
+        def __init__(self) -> None:
+            self.saved: dict | None = None
+
+        def save_checkpoint(self, **kwargs: Any) -> None:
+            self.saved = kwargs
+
+        def progress(self, done: int, total: int | None = None) -> None:
+            pass
+
+    ctx = _Ctx()
+
+    async def run() -> None:
+        async for _ in pipeline.contacts_discovery_worker(ctx):  # type: ignore[arg-type]
+            pass
+
+    asyncio.run(run())
+    assert ctx.saved is not None
+    assert ctx.saved["report"]["companies_reachable"] >= 1
+
+
+# ---------------------------------------------------------------------------
 # The pass
 # ---------------------------------------------------------------------------
 
