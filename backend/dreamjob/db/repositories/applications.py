@@ -36,6 +36,7 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+from dreamjob.db.repositories import contacts as contact_repo
 from dreamjob.security import at_rest
 
 #: Columns of ``application_package`` holding JSON, decoded on the way out.
@@ -517,7 +518,13 @@ def contacts_for_company(
     company_id: str | None, *, job_seeker_id: str | None = None
 ) -> list[dict]:
     """NFR-302/FR-344: an objecting contact is never offered as a recipient,
-    and a campaign-scoped row belonging to another seeker is invisible."""
+    and a campaign-scoped row belonging to another seeker is invisible.
+
+    The stored flag is filtered in SQL and the shared block list is consulted
+    through ``contacts.is_objected`` as well, so an address blocked after the
+    row was written - or one whose row the trigger has not reached - cannot be
+    handed to the generation slice as a recipient.
+    """
     if not company_id:
         return []
     sql = "SELECT * FROM contact WHERE company_id = ? AND objected = 0"
@@ -529,7 +536,12 @@ def contacts_for_company(
         )
         params.append(job_seeker_id)
     sql += " ORDER BY is_generic_mailbox ASC, confidence DESC"
-    return query_all(sql, tuple(params))
+    rows = query_all(sql, tuple(params))
+    return [
+        row
+        for row in rows
+        if not contact_repo.is_objected(row.get("email"), row.get("linkedin_url"))
+    ]
 
 
 def get_contact(contact_id: str | None) -> dict | None:

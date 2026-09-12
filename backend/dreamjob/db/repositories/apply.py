@@ -27,6 +27,8 @@ telling the truth.
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from dreamjob.db.connection import (
@@ -38,6 +40,8 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+
+log = logging.getLogger(__name__)
 
 #: The live package for an opportunity - a discarded one never counts, matching
 #: ``applications.latest_for_opportunity``.
@@ -483,16 +487,31 @@ def companies_needing_contact(
     return query_all(sql, tuple(params))
 
 
+#: How long a company's resolution verdict keeps it out of the ``scope='all'``
+#: sweep.  A sweep that re-walks every company whose verdict it wrote on the
+#: previous sweep never reaches the companies it has never looked at; seven
+#: days is long enough that one sweep buys the next one new ground and short
+#: enough that a fixed ladder re-tries a dead company within the month.
+ALL_COMPANIES_FRESHNESS_DAYS = 7
+
+
+def _stale_before(days: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
 #: How ``all_companies_for_contact`` orders the whole company table.  The
-#: default ``vacancies`` is the same currency the sweep counts in: never-attempted
-#: companies first, then the never-contacted ones with the most vacancies, so one
-#: site crawl covers as many postings as possible.  ``name`` stays as a stable
-#: alphabetical view of the same pool.
+#: default ``vacancies`` is the same currency the sweep counts in:
+#: never-attempted companies first, then the oldest attempts, then the
+#: never-contacted ones with the most vacancies, so one site crawl covers as
+#: many postings as possible.  ``name`` stays as a stable alphabetical view of
+#: the same pool.
 _ALL_COMPANY_ORDERINGS: dict[str, str] = {
     "name": "COALESCE(co.name, '') COLLATE NOCASE ASC",
-    "vacancies": "has_contact ASC, (r.resolved_at IS NULL) DESC, vacancy_count DESC,"
-                 " latest_vacancy_at DESC, COALESCE(co.name, '') COLLATE NOCASE ASC",
-    "recency": "backs_opportunity DESC, has_contact ASC, latest_vacancy_at DESC,"
+    "vacancies": "has_contact ASC, (r.resolved_at IS NULL) DESC, r.resolved_at ASC,"
+                 " vacancy_count DESC, latest_vacancy_at DESC,"
+                 " COALESCE(co.name, '') COLLATE NOCASE ASC",
+    "recency": "backs_opportunity DESC, has_contact ASC, (r.resolved_at IS NULL) DESC,"
+               " r.resolved_at ASC, latest_vacancy_at DESC,"
                " COALESCE(co.name, '') COLLATE NOCASE ASC",
 }
 
@@ -516,12 +535,17 @@ def all_companies_for_contact(
     nobody is writing to it yet.
 
     Selection is on the *contact*, not on the resolution row: a company with no
-    usable contact is always eligible, so a verdict of "unreachable" - including
-    the ATS-vendor domains the FR-301 ladder can never resolve - is retried
-    rather than filtered out.  ``include_covered=True`` is the refresh: it also
-    returns companies that already have somebody to write to, so a caller can
-    re-check them.  ``limit`` is therefore the only ceiling besides
-    ``max_companies`` in the caller.
+    usable contact is always eligible.  A company whose latest verdict is newer
+    than :data:`ALL_COMPANIES_FRESHNESS_DAYS` is skipped, however - re-walking a
+    company the ladder resolved an hour ago spends the pass' budget on a verdict
+    it already has instead of on the companies it has never looked at
+    (FR-305) - and the queue orders never-attempted companies first and the
+    oldest attempts next, so a resumed or repeated sweep moves forward.
+
+    ``include_covered=True`` is the refresh: it also returns companies that
+    already have somebody to write to and ignores the freshness backoff, so a
+    caller can explicitly re-check them.  ``limit`` is therefore the only
+    ceiling besides ``max_companies`` in the caller.
 
     The row shape and the usable-contact predicate are deliberately identical to
     :func:`companies_needing_contact`, so the ladder receives the same company
@@ -553,11 +577,16 @@ def all_companies_for_contact(
                AND u.company_id IS NOT NULL
         )
     """
-    # No resolution-freshness predicate: a company without a contact is always
-    # worth another walk, however recently the ladder last said so.
-    covered = "" if include_covered else (
-        " AND co.id NOT IN (SELECT company_id FROM covered)"
-    )
+    # ``include_covered`` is the refresh: companies with a contact come back and
+    # the freshness backoff is off, because the caller is asking for a re-walk.
+    # Without it, a company whose verdict is younger than the window is not a
+    # company this sweep has anything new to say about.
+    covered = ""
+    freshness = ""
+    if not include_covered:
+        covered = " AND co.id NOT IN (SELECT company_id FROM covered)"
+        freshness = " AND (r.company_id IS NULL OR r.resolved_at < ?)"
+        params.append(_stale_before(ALL_COMPANIES_FRESHNESS_DAYS))
 
     sql = f"""
         {covered_cte}
@@ -587,7 +616,7 @@ def all_companies_for_contact(
           ) vac ON vac.company_id = co.id
           LEFT JOIN apply_contact_resolution r ON r.company_id = co.id
           {seeker_join}
-         WHERE co.name IS NOT NULL AND co.name != ''{covered}
+         WHERE co.name IS NOT NULL AND co.name != ''{covered}{freshness}
          GROUP BY co.id
          ORDER BY {_ALL_COMPANY_ORDERINGS.get(order, _ALL_COMPANY_ORDERINGS["vacancies"])}
          LIMIT ?
@@ -745,7 +774,33 @@ def record_resolution(company_id: str, values: dict[str, Any]) -> None:
     ``attempts`` and ``first_seen_at`` accumulate rather than reset, so the
     interface can say "searched three times, still nothing" instead of
     presenting every re-run as the first.
+
+    The one invariant enforced here rather than left to the callers: a
+    resolution may only point at a contact of the *same* company.  Live data
+    had 731 rows where the best address was another company's contact row
+    (``jobs@arbeitnow.fr`` under 497 companies); a resolution that carried that
+    id was how one company's mailbox became hundreds of companies' "reachable".
+    A mismatched id is dropped and the row is recorded unreachable instead.
     """
+    contact_id = values.get("contact_id")
+    if contact_id:
+        owner = query_one("SELECT company_id FROM contact WHERE id = ?", (contact_id,))
+        if owner is None or str(owner.get("company_id") or "") != str(company_id):
+            log.warning(
+                "Refusing to record contact %s under company %s: it belongs to %s",
+                contact_id, company_id, (owner or {}).get("company_id"),
+            )
+            values = {
+                **values,
+                "status": "unreachable",
+                "contact_id": None,
+                "email": None,
+                "method": None,
+                "reason": (
+                    "the address matched a contact of another company, so it is "
+                    "not this company's way in"
+                ),
+            }
     now = utcnow()
     payload = {
         "company_id": company_id,

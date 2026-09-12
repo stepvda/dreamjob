@@ -496,7 +496,7 @@ def test_backfill_endpoint_reports_company_progress_end_to_end(
             time.sleep(0.02)
         assert row.get("progress_total") == 3, f"never saw total=3; last row={row}"
 
-        start_report = (row.get("checkpoint") or {}).get("report") or {}
+        start_report = row.get("report") or {}
         assert start_report.get("considered") == 3, start_report
 
         release.set()
@@ -517,7 +517,7 @@ def test_backfill_endpoint_reports_company_progress_end_to_end(
         assert terminal["last_error"] is None, terminal
         assert max(observed_done) >= 1, f"progress_done never advanced; saw {observed_done}"
 
-        report = (terminal.get("checkpoint") or {}).get("report") or {}
+        report = terminal.get("report") or {}
         assert report.get("companies_visited") == 3, report
         assert report.get("considered") == 3, report
         assert report.get("updated") == 3, report

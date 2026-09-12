@@ -300,6 +300,43 @@ def get_adapter(key: str, egress: EgressClient | None = None) -> SourceAdapter:
     return _REGISTRY[key](egress=egress)
 
 
+def adapter_unavailable_reason(adapter: Any) -> str | None:
+    """Why this adapter cannot run in this deployment, or ``None`` when it can.
+
+    The availability contract is ``available()`` plus ``unavailable_reason()``,
+    implemented by the registry adapters for a key the deployment does not hold
+    (FR-245, RK-06).  ``unavailable_reason()`` alone is not the signal: the
+    registry base returns its text whether or not the key is present, so only a
+    failed ``available()`` makes that text an answer.
+
+    Both callers read it through here so they cannot disagree: the planner
+    (which must not plan a source that can only raise ``UnusableQuery``) and
+    the collection worker (which must not charge it a page and an error).  An
+    adapter that does not implement the contract is runnable; a health probe
+    that raises is treated as runnable too, with the failure logged.
+    """
+    available = getattr(adapter, "available", None)
+    if not callable(available):
+        return None
+    try:
+        if available():
+            return None
+    except Exception:  # noqa: BLE001 - a broken probe must not disable a source
+        log.exception(
+            "Availability probe failed for %s; treating it as runnable",
+            getattr(adapter, "key", "adapter"),
+        )
+        return None
+    reason = getattr(adapter, "unavailable_reason", None)
+    text = ""
+    if callable(reason):
+        try:
+            text = str(reason() or "").strip()
+        except Exception:  # noqa: BLE001 - the description is optional
+            log.exception("Could not describe why %s is unavailable", getattr(adapter, "key", "adapter"))
+    return text or f"{getattr(adapter, 'key', 'adapter')} is unavailable in this deployment"
+
+
 def all_adapters() -> dict[str, type[SourceAdapter]]:
     return dict(_REGISTRY)
 

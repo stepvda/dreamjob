@@ -6,7 +6,7 @@ This drives the real endpoint, the real runner and the real pipeline through
 an authenticated TestClient, with only the two boundaries that would reach the
 outside world - the company work list and ``resolve_company`` - replaced by
 fast fakes.  If the job never publishes ``progress_total > 1`` or a running
-``checkpoint.report``, this test fails and names what was seen.
+``report``, this test fails and names what was seen.
 """
 
 from __future__ import annotations
@@ -164,7 +164,7 @@ def test_contacts_discovery_reports_incremental_progress(
 
         assert row.get("progress_total") == 4, f"never saw total=4; last row={row}"
 
-        start_report = (row.get("checkpoint") or {}).get("report") or {}
+        start_report = row.get("report") or {}
         assert start_report.get("scope") == "all", start_report
 
         release.set()
@@ -178,7 +178,7 @@ def test_contacts_discovery_reports_incremental_progress(
             row = status()
             observed_done.add(int(row.get("progress_done") or 0))
             observed_totals.add(int(row.get("progress_total") or 0))
-            report = (row.get("checkpoint") or {}).get("report") or {}
+            report = row.get("report") or {}
             if int(report.get("companies_visited") or 0) > 0:
                 saw_running_report = True
             if row["status"] in ("done", "failed", "cancelled"):
@@ -190,7 +190,7 @@ def test_contacts_discovery_reports_incremental_progress(
         assert terminal["status"] == "done", terminal
         assert 4 in observed_totals, f"progress_total never reached 4; saw {sorted(observed_totals)}"
         assert max(observed_done) >= 3, f"progress_done did not advance; saw {sorted(observed_done)}"
-        assert saw_running_report, "no checkpoint.report with running counters was ever visible"
+        assert saw_running_report, "no report with running counters was ever visible"
 
-        final_report = (terminal.get("checkpoint") or {}).get("report") or {}
+        final_report = terminal.get("report") or {}
         assert final_report.get("companies_visited") == 4, final_report

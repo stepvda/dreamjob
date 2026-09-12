@@ -339,6 +339,22 @@ def _name_match(domain: str, company_name: str | None) -> int:
     return 1 if any(token in label for token in tokens) else 0
 
 
+def _names_the_company(domain: str, company_name: str | None) -> bool:
+    """May this recovered host be adopted as the employer's own domain?
+
+    A board page and a posting link their partners, their vendors and their
+    town as readily as their employer, and the live corpus is the proof: the
+    backup stage adopted ``any.in`` (a fragment of "at any point in"),
+    ``wikipedia.org``, ``greenhouse.com``, ``team.blue`` and
+    ``feather-insurance.com`` as employer domains, none of which carries a word
+    of the company's name.  Recovered domains therefore have to pass the same
+    identity question rung 1 of the domain ladder asks - does the label carry a
+    word of the company's name - before anything is crawled or spelled on them
+    (FR-303, CR-405).  A host that cannot be tied to the company is not adopted.
+    """
+    return bool(domain) and bool(_name_match(domain, company_name))
+
+
 def _page_domains(html: str, page_url: str, company_name: str | None) -> list[tuple[str, int]]:
     """``(domain, weight)`` pairs a board page names as its employer."""
     out: list[tuple[str, int]] = []
@@ -430,14 +446,13 @@ async def _board_findings(
             domains[domain] += weight
 
     recovered = ""
-    if domains:
-        recovered = max(
-            domains.items(),
-            key=lambda item: (
-                item[1],
-                _name_match(item[0], company.get("company_name")),
-            ),
-        )[0]
+    matching = {
+        candidate: weight
+        for candidate, weight in domains.items()
+        if _name_match(candidate, company.get("company_name"))
+    }
+    if matching:
+        recovered = max(matching.items(), key=lambda item: item[1])[0]
     log.debug("Backup board for %s: %d page(s), domain %r", company.get("company_id"), pages, recovered)
     return findings, recovered
 
@@ -531,6 +546,18 @@ async def harvest_backup_addresses(
         board_domain = ""
 
     domain = board_domain or stored_domain
+    if domain and not _names_the_company(domain, company.get("company_name")):
+        # The recovered host does not name the company: it is a vendor, a
+        # partner, a board or a prose fragment, and adopting it is how the
+        # corpus got ``any.in``, ``wikipedia.org`` and ``greenhouse.com`` as
+        # employer domains.  The findings may still be useful, but nothing is
+        # crawled or spelled on a host that cannot be tied to the company.
+        log.info(
+            "Backup recovered %s for %s but it carries no word of the company name; "
+            "not adopting it",
+            domain, company_id or company.get("company_name") or "?",
+        )
+        domain = ""
     if domain and crawl_site:
         if egress is not None:
             findings.extend(

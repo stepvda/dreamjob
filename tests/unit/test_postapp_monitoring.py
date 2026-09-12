@@ -878,6 +878,158 @@ def test_a_failing_task_is_recorded_and_does_not_stop_the_others() -> None:
     assert loop.status()["tasks"][0]["last_run"]["error"]
 
 
+def test_a_slow_enrichment_tick_does_not_block_the_event_loop(monkeypatch) -> None:
+    """The 309 s stall: the sweep may block its worker, never the API loop.
+
+    ``company_enrichment`` looks async but its leaves are not - the profile
+    synthesis calls the synchronous LLM client and the signals pass is plain
+    database work - so a stubbed slow call is exactly what the serving loop
+    used to eat.  The heartbeat below has to keep beating throughout.
+    """
+    import asyncio
+    import time
+
+    from dreamjob.monitoring import scheduler as scheduler_mod
+    from dreamjob.pipeline import company_enrichment
+
+    data = seed()
+    calls: list[list[str]] = []
+
+    async def slow(company_ids: list[str], **kwargs: object) -> object:
+        calls.append(list(company_ids))
+        time.sleep(0.3)  # synchronous, like llm/client.py's complete_json
+        return company_enrichment.EnrichmentReport(companies=len(company_ids))
+
+    monkeypatch.setattr(company_enrichment, "enrich_companies", slow)
+
+    async def scenario() -> int:
+        beats = 0
+
+        async def heartbeat() -> None:
+            nonlocal beats
+            while True:
+                beats += 1
+                await asyncio.sleep(0.005)
+
+        beat = asyncio.create_task(heartbeat())
+        try:
+            result = await scheduler_mod._run_company_enrichment()
+        finally:
+            beat.cancel()
+        assert result["companies"] == 1
+        return beats
+
+    beats = asyncio.run(scenario())
+    assert calls == [[data["company_id"]]]
+    assert beats >= 5, (
+        f"the event loop beat only {beats} time(s) while the sweep ran; running the "
+        "sweep on the serving loop is the 309 s stall this test exists for"
+    )
+
+
+def test_a_raising_task_does_not_stop_the_scheduler_loop() -> None:
+    """A task that raises is retried on its next tick; the loop survives."""
+    import asyncio
+
+    from dreamjob.monitoring import scheduler as scheduler_mod
+
+    async def boom() -> dict:
+        raise RuntimeError("registry unreachable")
+
+    async def scenario() -> None:
+        loop = scheduler_mod.Scheduler(
+            tasks=[scheduler_mod.Task("boom", 0, boom)],
+            tick_seconds=0.05,
+            jitter_seconds=0,
+        )
+        loop.start()
+        try:
+            await asyncio.sleep(0.3)
+            assert loop.running, "the scheduler loop died with its task"
+            assert loop.runs >= 2, "the scheduler stopped ticking after the failure"
+        finally:
+            await loop.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["collection", "contacts_discovery"])
+def test_enrichment_defers_while_a_heavy_job_is_running(monkeypatch, kind: str) -> None:
+    import asyncio
+
+    from dreamjob.db.connection import insert_row, utcnow
+    from dreamjob.monitoring import scheduler as scheduler_mod
+    from dreamjob.pipeline import company_enrichment
+
+    seed()
+    insert_row("job_run", {"kind": kind, "status": "running", "created_at": utcnow()})
+    called: list[str] = []
+
+    async def never(*args: object, **kwargs: object) -> object:
+        called.append("enrich")
+        return company_enrichment.EnrichmentReport()
+
+    monkeypatch.setattr(company_enrichment, "enrich_companies", never)
+
+    result = asyncio.run(scheduler_mod._run_company_enrichment())
+
+    assert called == [], "the sweep ran while a heavy job owned the resources"
+    assert kind in result["deferred"]
+
+    task = scheduler_mod.Task(
+        "company_enrichment", 6 * 3600, scheduler_mod._run_company_enrichment
+    )
+    asyncio.run(scheduler_mod.Scheduler(tasks=[task], jitter_seconds=0).run_due())
+    assert scheduler_mod._last_run("company_enrichment") is None, (
+        "a deferred sweep must stay due, so the next tick can try again"
+    )
+
+
+def test_enrichment_yields_between_companies_when_a_job_starts(monkeypatch) -> None:
+    import asyncio
+
+    from dreamjob.db.connection import insert_row, utcnow
+    from dreamjob.monitoring import scheduler as scheduler_mod
+    from dreamjob.pipeline import company_enrichment
+
+    data = seed()
+    other_company = insert_row(
+        "company",
+        {"normalised_name": "contoso", "name": "Contoso", "collected_at": utcnow()},
+    )
+    insert_row(
+        "opportunity",
+        {
+            "job_seeker_id": data["seeker_id"],
+            "campaign_id": data["campaign_id"],
+            "company_id": other_company,
+            "kind": "vacancy",
+            "title": "Data Engineer",
+            "description": "Build pipelines.",
+            "user_status": "new",
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+        },
+    )
+    calls: list[str] = []
+
+    async def one_then_busy(company_ids: list[str], **kwargs: object) -> object:
+        calls.append(company_ids[0])
+        insert_row(
+            "job_run",
+            {"kind": "collection", "status": "running", "created_at": utcnow()},
+        )
+        return company_enrichment.EnrichmentReport(companies=1)
+
+    monkeypatch.setattr(company_enrichment, "enrich_companies", one_then_busy)
+
+    result = asyncio.run(scheduler_mod._run_company_enrichment())
+
+    assert len(calls) == 1, "the sweep kept going after a heavy job started"
+    assert result["companies"] == 1
+    assert "collection" in result["deferred"]
+
+
 def test_follow_up_reminders_notify_but_never_send() -> None:
     import asyncio
 

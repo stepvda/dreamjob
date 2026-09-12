@@ -102,6 +102,26 @@ class GenerationOptions:
 # ---------------------------------------------------------------------------
 
 
+def _objected_contact(contact: dict[str, Any] | None) -> str | None:
+    """NFR-302: the address (or name) of this contact when they are objected.
+
+    The shared block list is the authority (:func:`contacts.is_objected`), and
+    the flag on the row is read as well so a row the migration's triggers
+    already marked is refused identically.  Reading the predicate here rather
+    than at each caller is what makes an objection that arrived *after* a
+    package was built stop the package being rebuilt or regenerated.
+    """
+    if not contact:
+        return None
+    if not contact.get("objected") and not contact_repo.is_objected(
+        contact.get("email"), contact.get("linkedin_url")
+    ):
+        return None
+    return str(
+        contact.get("email") or contact.get("full_name") or contact.get("id") or "The contact"
+    )
+
+
 def llm_for(job_seeker_id: str, campaign_id: str | None) -> tuple[LLMClient | None, str | None]:
     """A client, or ``(None, reason)`` - never an exception (NFR-104, CR-410).
 
@@ -167,6 +187,17 @@ def generate(
         if package_id
         else repo.latest_for_opportunity(job_seeker_id, opportunity_id)
     )
+    # NFR-302: the recipient is refused whether it was chosen in this request
+    # or is the one an existing package is already addressed to.  This is the
+    # guard that catches an objection recorded after the package was built.
+    objected = _objected_contact(contact) or _objected_contact(
+        repo.get_contact((existing or {}).get("contact_id"))
+    )
+    if objected:
+        raise GenerationError(
+            f"{objected} has objected to being contacted (NFR-302); a package cannot be "
+            "generated or regenerated for them."
+        )
     # FR-329 wants the briefing refreshable just before an interview, which is
     # normally *after* the application went out.  Only the two artefacts that
     # would change what was sent are refused on a sent package.
@@ -426,6 +457,13 @@ def edit(job_seeker_id: str, package_id: str, changes: dict[str, Any]) -> dict[s
         job_seeker_id, allowed["contact_id"]
     ):
         raise GenerationError("That contact belongs to another job seeker")
+    if allowed.get("contact_id"):
+        objected = _objected_contact(repo.get_contact(allowed["contact_id"]))
+        if objected:
+            raise GenerationError(
+                f"{objected} has objected to being contacted (NFR-302); they cannot be made "
+                "the recipient of a package."
+            )
 
     allowed["status"] = "draft"
     allowed["approved_at"] = None
@@ -451,6 +489,7 @@ def approval_blockers(package: dict[str, Any]) -> list[dict[str, Any]]:
     """Why this package may not be dispatched yet (FR-322, NFR-206, NFR-302)."""
     blockers: list[dict[str, Any]] = []
     report = package.get("consistency_report") or {}
+    notes = package.get("generation_notes") or {}
     if package.get("status") == "sent":
         blockers.append({"kind": "status", "detail": "Already sent.", "overridable": False})
     if package.get("status") == "discarded":
@@ -468,7 +507,13 @@ def approval_blockers(package: dict[str, Any]) -> list[dict[str, Any]]:
                 "findings": report.get("leaks") or [],
             }
         )
-    if package.get("contact_objected"):
+    # The row's flag and the shared block list are both read: the objection
+    # may have arrived after generation, and the recipient may live only in
+    # the stored e-mail notes if the contact row has since been swept.
+    recipient_email = package.get("contact_email") or (notes.get("email") or {}).get(
+        "recipient_email"
+    )
+    if package.get("contact_objected") or contact_repo.is_objected(recipient_email):
         blockers.append(
             {
                 "kind": "objection",

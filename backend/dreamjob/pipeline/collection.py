@@ -98,7 +98,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from dreamjob.adapters.base import PlanItem, get_adapter
+from dreamjob.adapters.base import PlanItem, adapter_unavailable_reason, get_adapter
 from dreamjob.adapters.vacancy_source import SourceUnavailable
 from dreamjob.config import get_settings
 from dreamjob.db.connection import utcnow
@@ -450,6 +450,13 @@ class Caps:
 @dataclass
 class CollectionStats:
     pages: int = 0
+    #: Planned pages completed, which is what the progress bar counts.  Kept
+    #: apart from ``pages`` because that is the *budget*, charged in requests
+    #: (FR-186), and one planned page may cost several of them - a partitioned
+    #: search, a website crawl.  Using the budget as the numerator is what let
+    #: a real job report ``progress_done=244 / progress_total=85``: the
+    #: denominator counted planned pages while the numerator counted requests.
+    pages_done: int = 0
     records: int = 0
     #: Things that actually went wrong (5xx, transport, crashes).  Refusals we
     #: made on principle and targets that are gone are counted next door, so
@@ -487,6 +494,7 @@ class CollectionStats:
     def to_dict(self) -> dict:
         return {
             "pages": self.pages,
+            "pages_done": self.pages_done,
             "records": self.records,
             "errors": self.errors,
             # NFR-401: the checkpoint carries these, so a resumed job reports
@@ -1414,9 +1422,23 @@ class _Bookkeeping:
 
     # -- the progress bar (FR-185) -----------------------------------------
     def progress(self, done: int, total: int | None = None) -> None:
-        self._done = done
+        """Publish the bar, clamped to the denominator and never backwards.
+
+        Both sides count planned pages now, but the bar sits at the end of a
+        resumed run's restored counters, of a plan that grows while a harvest
+        stage runs, and of a unit whose pages shrink when it fails early: any
+        of those can hand it a pair that reads as more than full.  A screen
+        that says 287% is a screen that has stopped being evidence, so the
+        numerator is clamped to the denominator, and it never decreases - the
+        one property a progress bar can still promise when the plan changes.
+        """
+        done = max(0, int(done))
         if total is not None:
+            total = max(0, int(total))
             self._total = total
+        if self._total is not None:
+            done = min(done, self._total)
+        self._done = max(self._done, done)
         self._flush_progress()
 
     def _flush_progress(self, *, force: bool = False) -> None:
@@ -1544,6 +1566,13 @@ async def collection_worker(ctx: JobContext) -> None:
     stats.pages = int((saved or {}).get("pages") or 0) or sum(
         int(v) for v in completed.values()
     )
+    # The progress numerator counts *planned pages done*, restored on the same
+    # terms as the budget above: a checkpoint written before this counter
+    # existed falls back to the per-item ``completed`` page counts, which are
+    # exactly the planned pages the interrupted attempt finished (NFR-401).
+    stats.pages_done = int((saved or {}).get("pages_done") or 0) or sum(
+        int(v) for v in completed.values()
+    )
     # FR-185 / NFR-401: the records, failures, refusals and dead targets the
     # interrupted attempt counted are work this attempt will not repeat, so a
     # resumed job reports the same totals as an uninterrupted one.
@@ -1579,8 +1608,10 @@ async def collection_worker(ctx: JobContext) -> None:
             # FR-186: the denominator is settled once, after the sources with no
             # work have been taken out, so the bar cannot end at "1 of 8" on a
             # run in which seven of the eight sources were never runnable.
-            total_pages = stats.pages + sum(u.remaining for u in units)
-            books.progress(stats.pages, total_pages)
+            # Both terms count planned pages, never charged requests, so the
+            # numerator can never overtake the denominator (FR-185).
+            total_pages = stats.pages_done + sum(u.remaining for u in units)
+            books.progress(stats.pages_done, total_pages)
 
             # FR-186: every runnable source is guaranteed a floor of the budget
             # before any source is allowed to take more than its share, so an
@@ -1601,7 +1632,7 @@ async def collection_worker(ctx: JobContext) -> None:
                                                 caps, admin_caps, books,
                                                 budget=max(0, caps.max_pages - stats.pages))
                 )
-                return stats.pages + sum(u.remaining for u in units)
+                return stats.pages_done + sum(u.remaining for u in units)
 
             for pass_limit in (floor, caps.max_pages_per_source):
                 # One wave per collection stage, in stage order: the sources
@@ -1616,7 +1647,7 @@ async def collection_worker(ctx: JobContext) -> None:
                     stage = min(u.stage for u in pending)
                     if stage >= repo.STAGE_HARVEST and not harvested:
                         total_pages = await harvest_now()
-                        books.progress(stats.pages, total_pages)
+                        books.progress(stats.pages_done, total_pages)
                         continue
                     ran_stages.add(stage)
                     # FR-186: the stage takes its reservation of what is left,
@@ -1646,7 +1677,7 @@ async def collection_worker(ctx: JobContext) -> None:
                     # first campaign, when no company had a known board yet.  The
                     # discovery stages have now run, so ask again.
                     total_pages = await harvest_now()
-                    books.progress(stats.pages, total_pages)
+                    books.progress(stats.pages_done, total_pages)
 
             # The verdicts.  Two writes per plan item over the whole plan is
             # thousands of transactions in one stretch, so the pass yields:
@@ -2027,6 +2058,7 @@ async def _build_units(
     completed: dict[str, int],
     admin_caps: dict[str, dict],
     books: _Bookkeeping,
+    skip_logged: set[str] | None = None,
 ) -> list[_Unit]:
     """Turn the plan into runnable work, settling what cannot run (IR-101).
 
@@ -2037,11 +2069,17 @@ async def _build_units(
     until the first page had been fetched (FR-185).
     """
     units: list[_Unit] = []
+    # One line per unavailable or browser-only source, however many of its plan
+    # items this run holds (a 379-item registry plan used to warn once per item,
+    # and to log an ERROR with a traceback once per page it was charged).
+    logged: set[str] = skip_logged if skip_logged is not None else set()
     for index, item in enumerate(items):
         if index and not index % PREPARE_BATCH:
             await books.barrier()
         try:
-            unit = _build_unit(item, catalogue, egress, campaign_id, caps, completed, admin_caps)
+            unit = _build_unit(
+                item, catalogue, egress, campaign_id, caps, completed, admin_caps, logged
+            )
         except Exception as exc:  # noqa: BLE001 - the item fails, the campaign does not
             # Every decision about one plan item belongs to that plan item.  The
             # skip decision used to sit outside all exception handling, so a
@@ -2073,6 +2111,14 @@ async def _build_units(
     return units
 
 
+def _log_skip_once(logged: set[str], adapter_key: str, reason: str) -> None:
+    """One skip line per source per plan, not one per item and not one per page."""
+    if adapter_key in logged:
+        return
+    logged.add(adapter_key)
+    log.info("[%s] skipped in collection: %s", adapter_key, reason)
+
+
 def _build_unit(
     item: dict,
     catalogue: dict[str, dict],
@@ -2081,13 +2127,37 @@ def _build_unit(
     caps: Caps,
     completed: dict[str, int],
     admin_caps: dict[str, dict],
+    skip_logged: set[str] | None = None,
 ) -> _Unit | None:
     """Prepare one plan item, or settle it and return ``None``."""
     entry = catalogue.get(item["adapter_key"], {})
+    key = item["adapter_key"]
+    logged = skip_logged if skip_logged is not None else set()
+    if key in repo.BROWSER_STRATEGY_KEYS:
+        # FR-165: the network crawl is a browser strategy, not an adapter, and
+        # its plan item is the browser run's target allowlist (FR-205).
+        # Collection has nothing to run for it, and saying "no adapter
+        # registered" once per item was noise about a source that is working
+        # exactly as designed.
+        reason = (
+            f"{key} is a browser strategy, not a collection adapter: its plan item is "
+            "the browser run's allowlist, and collection leaves it to that run (FR-165, FR-205)"
+        )
+        repo.update_plan_item(
+            item["id"],
+            {
+                "status": "skipped",
+                "last_error": reason,
+                "outcome_state": "skipped",
+                "outcome_reason": reason,
+            },
+        )
+        _log_skip_once(logged, key, reason)
+        return None
     # The adapter fetches through this item's own view of the shared client, so
     # its requests and refusals are its own even when other buckets are running.
     view = _UnitEgress(egress)
-    adapter = _load_adapter(item["adapter_key"], view)
+    adapter = _load_adapter(key, view)
     if adapter is None:
         repo.update_plan_item(
             item["id"],
@@ -2100,6 +2170,26 @@ def _build_unit(
                 "outcome_reason": "no adapter registered for this source",
             },
         )
+        return None
+    unavailable = adapter_unavailable_reason(adapter)
+    if unavailable:
+        # FR-245 / RK-06: a required API key this deployment does not hold
+        # makes the source unusable, not broken.  It is left *runnable* (like
+        # an ATS item with no board yet) so that configuring the key lets the
+        # next run collect it - but this run does not charge it a page, count
+        # an error, or raise the ``UnusableQuery`` traceback it used to per
+        # page.  The planner already leaves it out of new plans.
+        reason = f"adapter unavailable: {unavailable}"
+        repo.update_plan_item(
+            item["id"],
+            {
+                "status": "planned",
+                "last_error": reason,
+                "outcome_state": "skipped",
+                "outcome_reason": reason,
+            },
+        )
+        _log_skip_once(logged, key, reason)
         return None
     # An ATS plan item with no board slug has nothing to read.  It is left
     # runnable rather than skipped: the company whose board it needs may be
@@ -2397,6 +2487,11 @@ async def _drive_unit(
             step = ItemOutcome(errors=1, last_error=f"{type(exc).__name__}: {exc}")
         _absorb(unit, step)
         unit.done = page
+        # FR-185: the bar's numerator is one *planned page* completed, whatever
+        # that page cost the budget in requests.  Counting ``step.charged`` here
+        # instead is what let an adapter issuing three requests per page report
+        # 287% of a plan whose denominator counted pages.
+        stats.pages_done += 1
 
         if step.errors:
             books.count(unit.id, errors=step.errors, last_error=step.last_error)
@@ -2450,7 +2545,7 @@ async def _drive_unit(
         # NFR-401 fixes this one's cadence: after the unit of work, every time.
         books.ctx.save_checkpoint(completed=completed, stats=stats.to_dict())
         # ... and this one's is a preference, so it is coalesced (NFR-102).
-        books.progress(stats.pages, total_pages)
+        books.progress(stats.pages_done, total_pages)
         if step.errors:
             return
 

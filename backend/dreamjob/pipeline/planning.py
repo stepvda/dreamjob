@@ -46,7 +46,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from dreamjob.adapters.base import PlanItem as AdapterPlanItem
-from dreamjob.adapters.base import SourceAdapter, get_adapter
+from dreamjob.adapters.base import SourceAdapter, adapter_unavailable_reason, get_adapter
 from dreamjob.adapters.vacancy_source import (
     country_terms,
     location_terms,
@@ -551,6 +551,14 @@ def adapter_for(adapter_key: str) -> SourceAdapter | None:
     except Exception:  # noqa: BLE001 - a broken adapter must not stop the plan
         log.exception("Adapter %s could not be constructed for planning", adapter_key)
         return None
+
+
+def _adapter_unavailable(entry: dict) -> str | None:
+    """Why this catalogue row's adapter cannot run, or ``None`` when it can."""
+    adapter = adapter_for(entry.get("adapter_key") or "")
+    if adapter is None:
+        return None
+    return adapter_unavailable_reason(adapter)
 
 
 def adapter_plan_items(
@@ -1401,8 +1409,21 @@ def generate_plan(
     # A source that was asked and reported no work is left out, with the reason
     # shown on the review screen.  It used to be planned with an empty query and
     # then recorded as "done, 0 records, 0 errors" - a failure dressed as a run.
+    #
+    # A source whose adapter is unavailable in this deployment - a registry
+    # whose API key is not configured - is left out here, before it is charged
+    # anything.  Its own ``plan()`` already answers ``[]`` for that, but a
+    # keyword-searchable source used to survive on the fall-back query alone,
+    # so every collection run retried one unusable item per plan, logged an
+    # ERROR with a traceback per page and counted the key's absence as a
+    # collection fault (FR-245, NFR-403).
     runnable: list[dict] = []
     for entry in selection.selected:
+        unavailable = _adapter_unavailable(entry)
+        if unavailable:
+            log.info("[%s] not planned: %s", entry["adapter_key"], unavailable)
+            selection.reject(entry, unavailable)
+            continue
         items = adapter_items.get(entry["adapter_key"])
         if items or items is None or _keyword_searchable(entry):
             runnable.append(entry)
@@ -1516,6 +1537,13 @@ def generate_plan(
     # browser session's allowlist was therefore always empty, and the run
     # planner's "Start run" could never leave its disabled state.  The seeker's
     # CR-401 consent is the gate, and it is the only one there should be.
+    #
+    # The item therefore stays in the plan even though no *collection* adapter
+    # can serve it: it is the browser run's target allowlist (FR-205), built by
+    # ``browser.linkedin.linkedin_plan_items``.  Collection recognises the key
+    # as browser strategy and skips it once per plan, at INFO, without an error
+    # (``BROWSER_STRATEGY_KEYS``); removing the item here would leave the
+    # browser run with nothing to crawl.
     if linkedin_allowed:
         network_entry = next(
             (e for e in selection.selected if e.get("source_type") == "linkedin"), None

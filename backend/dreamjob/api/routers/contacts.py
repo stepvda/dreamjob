@@ -98,6 +98,14 @@ class DiscoverAllRequest(BaseModel):
     ``max_companies`` is an optional ceiling on the work list, independent of
     ``scope``; it is most useful with ``all``, where the pool is the whole
     company table.
+
+    ``refresh`` is the only control over the ``all`` scope's freshness backoff:
+    a company whose last verdict is younger than
+    :data:`~dreamjob.db.repositories.apply.ALL_COMPANIES_FRESHNESS_DAYS` is
+    normally skipped, and ``refresh=true`` re-walks it anyway (and includes
+    companies that already have a contact).  In the ``shortlist`` scope it
+    keeps its original meaning - re-check a company whose verdict is older than
+    :data:`~dreamjob.pipeline.apply_contacts.RESOLUTION_MAX_AGE_DAYS`.
     """
 
     limit: int = Field(default=500, ge=1, le=5000)
@@ -445,12 +453,16 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
 def discovery_status(job_id: str, seeker: Seeker) -> dict[str, Any]:
     """Progress of a contacts pass started above, owned by this seeker (FR-344).
 
-    The checkpoint is decoded here rather than in the screen: the pass stores
-    its coverage report there, and a JSON string is not something the interface
-    should have to parse.
+    The response carries only what the screen reads: the job row (status,
+    progress, ``last_error``) and the coverage ``report`` top-level.  It never
+    returns the checkpoint itself - that holds ``visited_company_ids``, a list
+    of up to 30,000 ids that grows to ~100 KB, and every poll of this endpoint
+    used to ship the whole blob to the browser for a counter it does not show
+    (NFR-502).
     """
     row = owned_or_404("job_run", job_id, seeker.id)
-    return {**row, "checkpoint": from_json(row.get("checkpoint"), {}) or {}}
+    checkpoint = from_json(row.pop("checkpoint", None), {}) or {}
+    return {**row, "report": checkpoint.get("report")}
 
 
 @router.get("/coverage")
@@ -754,10 +766,15 @@ async def start_emails_backfill(body: BackfillRequest, seeker: Seeker) -> dict[s
 
 @router.get("/emails/backfill/{job_id}")
 def emails_backfill_status(job_id: str, seeker: Seeker) -> dict[str, Any]:
-    """Progress of a backfill started above, owned by this seeker (FR-344)."""
+    """Progress of a backfill started above, owned by this seeker (FR-344).
+
+    Like the contacts status route, the checkpoint blob is not returned: the
+    report it holds is promoted to the top level and the resume state stays on
+    the server.
+    """
     row = owned_or_404("job_run", job_id, seeker.id)
-    checkpoint = from_json(row.get("checkpoint"), {}) or {}
-    return {**row, "checkpoint": checkpoint, "report": checkpoint.get("report")}
+    checkpoint = from_json(row.pop("checkpoint", None), {}) or {}
+    return {**row, "report": checkpoint.get("report")}
 
 
 # ---------------------------------------------------------------------------

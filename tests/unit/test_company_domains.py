@@ -194,6 +194,25 @@ def test_a_board_is_never_a_candidate() -> None:
     assert pipeline._employer_domain("acmedata.be") == "acmedata.be"
 
 
+def test_boilerplate_hosts_and_prose_fragments_are_never_candidates() -> None:
+    """FR-303: a host many companies shared, or an extraction fragment, is not an id.
+
+    The backup stage adopted these as employer domains on the live corpus -
+    ``any.in`` was a fragment of "at any point in", ``greenhouse.com`` and
+    ``employinc.com`` were the ATS vendors, ``wikipedia.org`` and ``team.blue``
+    were links in page chrome - and addresses were then spelled on them.
+    """
+    for host in (
+        "any.in", "ive.er", "ion.for", "ional.of", "ion.and", "ive.of",
+        "greenhouse.com", "employinc.com", "wikipedia.org", "team.blue",
+        "bruxellesformation.be", "actiris.brussels", "esempio.com",
+        "feather-insurance.com",
+    ):
+        assert pipeline._employer_domain(host) == "", host
+        assert pipeline._employer_domain(f"jobs.{host}") == "", host
+    assert pipeline._employer_domain("acmedata.be") == "acmedata.be"
+
+
 # ---------------------------------------------------------------------------
 # The gate
 # ---------------------------------------------------------------------------

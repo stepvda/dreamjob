@@ -62,6 +62,7 @@ from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import admin as admin_repo
 from dreamjob.db.repositories import applications as repo
+from dreamjob.db.repositories import contacts as contacts_repo
 from dreamjob.db.repositories import dispatch as dispatch_repo
 from dreamjob.documents import intro_email
 from dreamjob.documents import package as package_module
@@ -114,6 +115,37 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 class SendBlocked(RuntimeError):
     """The dry-run guard refused to let a message leave the machine."""
+
+
+# ---------------------------------------------------------------------------
+# NFR-302: an objected recipient blocks generation, approval and dispatch
+# ---------------------------------------------------------------------------
+
+
+def _objected_recipient(contact_id: str | None) -> str | None:
+    """The address of a stored recipient who has objected, if any (NFR-302).
+
+    Answers through :func:`dreamjob.documents.package._objected_contact`, which
+    reads the shared block list and the flag on the row - the same predicate
+    the approval gate and the send rails use, so the three cannot disagree.
+    """
+    return package_module._objected_contact(repo.get_contact(contact_id))
+
+
+def _package_objection(package: dict[str, Any]) -> str | None:
+    """Why this package's recipient may not be written to, if so (NFR-302).
+
+    The stored contact is checked through the shared predicate, and the
+    address on the package against the block list as well, because an
+    objection may have arrived after the contact row was swept or re-collected.
+    """
+    who = _objected_recipient(package.get("contact_id"))
+    if who:
+        return f"{who} has objected to being contacted (NFR-302); this package cannot be sent."
+    address = package.get("contact_email")
+    if address and contacts_repo.is_objected(address):
+        return f"{address} has objected to being contacted (NFR-302); this package cannot be sent."
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +315,22 @@ def generate_package(
         return _result(existing, reused=True, degradation=["Already sent; not regenerated."])
     if existing is not None and not regenerate and _is_complete(existing):
         return _result(existing, reused=True, degradation=["Already generated; reused as it is."])
+
+    # NFR-302: building or regenerating for an objected recipient is refused
+    # here, before any document or model call, whether the recipient came from
+    # the request or was pinned on the package that is about to be rebuilt.
+    # A contact id the seeker does not own is left to the ownership refusal
+    # in ``documents/package.generate`` rather than read here (NFR-303).
+    objected = _objected_recipient((existing or {}).get("contact_id"))
+    if not objected and opts.contact_id and contacts_repo.contact_owned_by(
+        job_seeker_id, opts.contact_id
+    ):
+        objected = _objected_recipient(opts.contact_id)
+    if objected:
+        raise GenerationError(
+            f"{objected} has objected to being contacted (NFR-302); a package cannot be "
+            "generated or regenerated for them."
+        )
 
     llm: LLMClient | None = None
     reason: str | None = "Model use was switched off for this run."
@@ -564,6 +612,12 @@ def _write_email(
         opts.language or package.get("language") or opportunity.get("language")
     )
     contact = repo.get_contact(opts.contact_id or package.get("contact_id"))
+    objected = package_module._objected_contact(contact)
+    if objected:
+        raise GenerationError(
+            f"{objected} has objected to being contacted (NFR-302); the application e-mail "
+            "cannot be written for them."
+        )
 
     draft = compose_apply_email(
         inputs,
@@ -631,6 +685,15 @@ def compose_apply_email(
     speculative = str(opportunity.get("kind") or "") == "speculative"
     role = str(opportunity.get("title") or "")
     recipient = contact or intro_email._pick_contact(inputs)
+    # NFR-302: the model is never asked to write to an objected address, even
+    # when a caller assembled its own inputs instead of going through the
+    # repository query that already excludes them.
+    objected = package_module._objected_contact(recipient)
+    if objected:
+        raise GenerationError(
+            f"{objected} has objected to being contacted (NFR-302); the application e-mail "
+            "cannot be written for them."
+        )
 
     notes: list[str] = []
     used_llm = False
@@ -1078,6 +1141,11 @@ def render_email(job_seeker_id: str, package_id: str) -> dict[str, Any]:
     package = dispatch_repo.package_for_dispatch(package_id, job_seeker_id)
     if package is None:
         raise GenerationError(f"No application package {package_id} for this job seeker")
+    # NFR-302: even assembling the .eml for an objected recipient is refused,
+    # so a refused send leaves no message on disk.
+    objected = _package_objection(package)
+    if objected:
+        raise GenerationError(objected)
     seeker = dispatch_repo.seeker_identity(job_seeker_id) or {}
     from_email = (get_settings().mail_from or seeker.get("email") or "").strip()
     if not from_email:
@@ -1139,6 +1207,13 @@ def send_package(job_seeker_id: str, package_id: str, *, actor: str) -> dict[str
         "sent": False,
         "dry_run": guard.dry_run,
     }
+    # NFR-302: an objection that arrived after approval - or after the package
+    # was built - blocks here, before the dry run can write the message.
+    objected = _package_objection(package)
+    if objected:
+        result["refused"] = objected
+        result["blockers"] = package_module.approval_blockers(package)
+        return result
     if package.get("status") != "approved":
         # FR-324: nothing is sent that the job seeker has not approved.
         result["refused"] = (

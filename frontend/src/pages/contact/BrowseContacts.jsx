@@ -291,7 +291,7 @@ function EmailBackfillPanel({ onContactsChanged }) {
             </p>
           )}
           <JobProgress
-            report={batch.job?.checkpoint?.report}
+            report={batch.job?.report}
             job={
               batch.job
                 ? { ...batch.job, kind: 'Finding missing e-mail addresses' }

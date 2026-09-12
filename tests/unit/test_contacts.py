@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 from dreamjob.config import get_settings
-from dreamjob.db.connection import insert_row, query_one, utcnow
+from dreamjob.db.connection import insert_row, query_all, query_one, utcnow
 from dreamjob.db.repositories import contacts as repo
 from dreamjob.pipeline import contact_backup, introductions
 from dreamjob.pipeline import contacts as pipeline
@@ -250,6 +250,38 @@ def test_addresses_are_extracted_from_a_page() -> None:
     assert not any(a.endswith(".png") for a in addresses)
     named = next(i for i in found if i.email == "marie.dupont@acme-data.example")
     assert named.full_name == "Marie Dupont"
+
+
+def test_prose_is_never_an_obfuscated_address() -> None:
+    """The obfuscated-address pattern must demand an explicit spelling.
+
+    Live runs adopted ``any.in``, ``ion.for``, ``ive.of`` and ``ion.and`` as
+    employer domains because the pattern read ordinary prose as an address:
+    "adjust this data privacy statement at any point in time" became
+    ``statement@any.in``.  A bare "at" and a bare "point" are English words
+    before they are a mailbox convention, so only the parenthesised (or
+    bracketed/entity) spelling counts now.
+    """
+    for text in (
+        "Personio reserves the right to adjust this data privacy statement at any point in time",
+        "You act as the central coordination point for local stakeholders",
+        "both from a technical and creative point of view",
+        "serving as a primary escalation point and on-call for relevant incidents",
+    ):
+        found = patterns.extract_addresses(text)
+        assert found == [], f"{text!r} produced {[item.email for item in found]}"
+
+    # The explicit spellings still work: parentheses, brackets, entities and an
+    # obfuscated "at" with a bare "dot".
+    for text, expected in (
+        ("press (at) acme-data (dot) example", "press@acme-data.example"),
+        ("hr [at] acme-data [dot] example", "hr@acme-data.example"),
+        ("info (at) acme-data dot example", "info@acme-data.example"),
+        ("&#40;at&#41; only applies after a local part: jobs (at) acme-data (dot) example",
+         "jobs@acme-data.example"),
+    ):
+        found = {item.email for item in patterns.extract_addresses(text)}
+        assert expected in found, f"{text!r} -> {found}"
 
 
 def test_a_page_with_an_inlined_asset_does_not_stall_the_crawl() -> None:
@@ -567,6 +599,128 @@ def test_objection_blocks_the_address_for_everyone() -> None:
     assert query_one("SELECT objected FROM contact WHERE id = ?", (new_id,))["objected"] == 1
     assert repo.usable_contacts_for_company(ids["company_id"]) == []
     assert pipeline.is_blocked("marie.dupont@acme-data.example") is True
+
+
+# ---------------------------------------------------------------------------
+# FR-303: a contact belongs to one company
+# ---------------------------------------------------------------------------
+
+
+def _other_company() -> str:
+    return insert_row(
+        "company",
+        {
+            "name": "Other Company NV",
+            "normalised_name": "other company",
+            "domain": "other-company.example",
+            "country": "BE",
+            "collected_at": utcnow(),
+        },
+    )
+
+
+def test_upserting_the_same_address_for_one_company_keeps_one_row() -> None:
+    """``(company_id, lower(email))`` is the identity, so upsert cannot fork."""
+    ids = _seed()
+    first, created = repo.upsert_contact(
+        {
+            "company_id": ids["company_id"],
+            "email": "jobs@acme-data.example",
+            "email_source_method": patterns.METHOD_WEBSITE,
+            "source": "https://acme-data.example/jobs",
+            "collected_at": utcnow(),
+        }
+    )
+    assert created
+    again, created_again = repo.upsert_contact(
+        {
+            "company_id": ids["company_id"],
+            "email": "JOBS@acme-data.example",
+            "email_source_method": patterns.METHOD_WEBSITE,
+            "source": "https://acme-data.example/contact",
+            "collected_at": utcnow(),
+        }
+    )
+    assert again == first and created_again is False
+    assert query_all(
+        "SELECT id FROM contact WHERE company_id = ? AND lower(email) = ?",
+        (ids["company_id"], "jobs@acme-data.example"),
+    ) == [{"id": first}]
+
+
+def test_the_same_address_at_two_companies_is_two_scoped_contacts() -> None:
+    """One company's mailbox never becomes another company's contact row.
+
+    ``upsert_contact`` used to match on the address alone, so resolving a second
+    company returned the first company's row and the resolution pointed at a
+    contact that was never its own (731 such rows in live data, one address
+    under 497 companies).  Each company now gets its own row.
+    """
+    ids = _seed()
+    other = _other_company()
+    shared = "jobs@arbeitnow.example"
+    mine, _ = repo.upsert_contact(
+        {
+            "company_id": ids["company_id"],
+            "email": shared,
+            "email_source_method": patterns.METHOD_WEBSITE,
+            "email_validation": validation.VALID,
+            "collected_at": utcnow(),
+            "confidence": 0.7,
+        }
+    )
+    theirs, created = repo.upsert_contact(
+        {
+            "company_id": other,
+            "email": shared,
+            "email_source_method": patterns.METHOD_WEBSITE,
+            "email_validation": validation.VALID,
+            "collected_at": utcnow(),
+            "confidence": 0.7,
+        }
+    )
+    assert created and theirs != mine
+    assert query_one("SELECT company_id FROM contact WHERE id = ?", (theirs,))[
+        "company_id"
+    ] == other
+    assert query_one("SELECT COUNT(*) AS n FROM contact WHERE lower(email) = ?", (shared,))[
+        "n"
+    ] == 2
+
+
+def test_an_existing_duplicate_pair_converges_on_the_most_confident_row() -> None:
+    """The two live duplicate pairs must not multiply while they wait for repair."""
+    ids = _seed()
+    now = utcnow()
+    inserted = [
+        insert_row(
+            "contact",
+            {
+                "company_id": ids["company_id"],
+                "email": "career@chmedia.example",
+                "email_source_method": patterns.METHOD_PRESS,
+                "collected_at": now,
+                "confidence": confidence,
+            },
+        )
+        for confidence in (0.4, 0.9)
+    ]
+    chosen, created = repo.upsert_contact(
+        {
+            "company_id": ids["company_id"],
+            "email": "career@chmedia.example",
+            "email_source_method": patterns.METHOD_PRESS,
+            "collected_at": now,
+            "confidence": 0.95,
+        }
+    )
+    assert created is False
+    assert chosen == inserted[1], "the upsert must converge on the most confident row"
+    rows = query_all(
+        "SELECT id FROM contact WHERE company_id = ? AND lower(email) = ?",
+        (ids["company_id"], "career@chmedia.example"),
+    )
+    assert len(rows) == 2, "no third row was created; the pair waits for the repair pass"
 
 
 # ---------------------------------------------------------------------------

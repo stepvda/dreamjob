@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import secrets
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from dreamjob.config import get_settings
-from dreamjob.db.connection import insert_row, query_all, query_one, utcnow
+from dreamjob.db.connection import execute, insert_row, query_all, query_one, utcnow
 from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as repo
 from dreamjob.pipeline import apply_contacts as apply_pipeline
@@ -240,13 +242,17 @@ def _company(name: str) -> str:
 
 
 def _correlated_all_companies(limit: int) -> list[dict]:
-    """The pre-152 correlated form, kept as the equivalence oracle.
+    """The correlated form, kept as the equivalence oracle.
 
-    ``all_companies_for_contact`` now folds the two per-company aggregates into
-    one grouped ``LEFT JOIN``; this is the query it replaced, run against the
-    same database so the rewrite can be checked row for row rather than by
-    reading the two SQL strings side by side.
+    ``all_companies_for_contact`` folds the two per-company aggregates into one
+    grouped ``LEFT JOIN`` and adds the seven-day freshness backoff; this is the
+    query it replaced plus that predicate, run against the same database so the
+    rewrite can be checked row for row rather than by reading the two SQL
+    strings side by side.
     """
+    cutoff = (
+        datetime.now(UTC) - timedelta(days=apply_repo.ALL_COMPANIES_FRESHNESS_DAYS)
+    ).isoformat(timespec="seconds")
     return query_all(
         """
         WITH covered AS MATERIALIZED (
@@ -273,12 +279,14 @@ def _correlated_all_companies(limit: int) -> list[dict]:
           LEFT JOIN apply_contact_resolution r ON r.company_id = co.id
          WHERE co.name IS NOT NULL AND co.name != ''
            AND co.id NOT IN (SELECT company_id FROM covered)
+           AND (r.company_id IS NULL OR r.resolved_at < ?)
          GROUP BY co.id
-         ORDER BY has_contact ASC, (r.resolved_at IS NULL) DESC, vacancy_count DESC,
-                  latest_vacancy_at DESC, COALESCE(co.name, '') COLLATE NOCASE ASC
+         ORDER BY has_contact ASC, (r.resolved_at IS NULL) DESC, r.resolved_at ASC,
+                  vacancy_count DESC, latest_vacancy_at DESC,
+                  COALESCE(co.name, '') COLLATE NOCASE ASC
          LIMIT ?
         """,
-        (limit,),
+        (cutoff, limit),
     )
 
 
@@ -631,6 +639,59 @@ def test_discover_request_accepts_and_returns_the_scope(
         ).status_code == 422
 
 
+def test_discovery_status_returns_the_report_not_the_checkpoint() -> None:
+    """The status route must not ship the ~100 KB visited list to the browser.
+
+    The checkpoint holds ``visited_company_ids`` (up to 30,000 ids) and the
+    progress poll used to return it whole.  The screen reads only the report,
+    so that is promoted to the top level and the checkpoint stays on the
+    server (NFR-502).
+    """
+    from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker
+    from dreamjob.api.routers import contacts as router_module
+    from dreamjob.db.connection import to_json
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    ids = _seed()
+    report = {"companies_visited": 12, "companies_reachable": 3, "vacancies_covered": 9}
+    job_id = insert_row(
+        "job_run",
+        {
+            "job_seeker_id": ids["seeker_id"],
+            "kind": "contacts_discovery",
+            "status": "running",
+            "progress_done": 12,
+            "progress_total": 50,
+            "checkpoint": to_json(
+                {
+                    "options": {"scope": "all", "limit": 50},
+                    "visited_company_ids": [f"company-{index}" for index in range(12)],
+                    "report": report,
+                }
+            ),
+            "created_at": utcnow(),
+        },
+    )
+    admin = CurrentSeeker(
+        id=ids["seeker_id"], email="seeker@example.org", display_name="Stephane",
+        is_admin=True, locale="en",
+    )
+    app = FastAPI()
+    app.include_router(router_module.router, prefix="/api/contacts")
+    app.dependency_overrides[current_seeker] = lambda: admin
+    app.dependency_overrides[current_admin] = lambda: admin
+    with TestClient(app) as client:
+        response = client.get(f"/api/contacts/discover/{job_id}")
+        assert response.status_code == 200, response.text
+        body = response.json()
+
+    assert body["report"] == report
+    assert body["progress_done"] == 12 and body["progress_total"] == 50
+    assert "checkpoint" not in body
+    assert "visited_company_ids" not in json.dumps(body)
+
+
 # ---------------------------------------------------------------------------
 # FR-301: the all-companies sweep pool and scope
 # ---------------------------------------------------------------------------
@@ -684,12 +745,14 @@ def test_all_companies_for_contact_excludes_a_company_with_a_usable_contact() ->
     assert refreshed[ids["company_id"]]["has_contact"] == 1
 
 
-def test_all_companies_for_contact_keeps_a_resolved_but_unreachable_company() -> None:
-    """A company can never resolve and must stay in the pool forever.
+def test_all_companies_for_contact_skips_a_recently_resolved_company() -> None:
+    """The seven-day backoff: one sweep does not spend itself on the last one.
 
-    The ATS-vendor domains ``usable_employer_domain`` refuses carry exactly this
-    verdict; filtering on resolution freshness collapsed the pool to those
-    unreachable rows, so the selection has to be on the contact instead.
+    A company can never resolve and stays in the pool forever - but not every
+    day.  Without the window every sweep re-walked exactly the companies the
+    previous sweep had just walked and never reached the rest of the corpus
+    (measured live: 3,348 companies visited, the same head of the queue).
+    ``include_covered=True`` is the explicit refresh that walks them anyway.
     """
     ids = _seed()
     apply_repo.record_resolution(
@@ -700,10 +763,57 @@ def test_all_companies_for_contact_keeps_a_resolved_but_unreachable_company() ->
             "reason": "no address survived FR-304",
         },
     )
+    by_default = {row["company_id"] for row in apply_repo.all_companies_for_contact(50)}
+    assert ids["company_id"] not in by_default
+    assert ids["empty_company_id"] in by_default
+
+    refreshed = {
+        row["company_id"]: row
+        for row in apply_repo.all_companies_for_contact(50, include_covered=True)
+    }
+    assert refreshed[ids["company_id"]]["resolution_status"] == "unreachable"
+
+
+def test_all_companies_for_contact_retries_a_verdict_older_than_the_window() -> None:
+    """The backoff is a delay, not a filter: the company comes back in seven days."""
+    ids = _seed()
+    apply_repo.record_resolution(
+        ids["company_id"],
+        {
+            "status": "unreachable",
+            "domain": "acme-data.example",
+            "reason": "no address survived FR-304",
+        },
+    )
+    stale = (
+        datetime.now(UTC) - timedelta(days=apply_repo.ALL_COMPANIES_FRESHNESS_DAYS + 1)
+    ).isoformat(timespec="seconds")
+    execute(
+        "UPDATE apply_contact_resolution SET resolved_at = ? WHERE company_id = ?",
+        (stale, ids["company_id"]),
+    )
     by_id = {row["company_id"]: row for row in apply_repo.all_companies_for_contact(50)}
     assert ids["company_id"] in by_id
     assert by_id[ids["company_id"]]["resolution_status"] == "unreachable"
-    assert by_id[ids["company_id"]]["has_contact"] == 0
+
+
+def test_all_companies_for_contact_orders_never_attempted_before_oldest() -> None:
+    """Never-attempted companies come first, then the oldest attempts."""
+    ids = _seed()
+    recent = _company("Recent Attempt BV")
+    apply_repo.record_resolution(recent, {"status": "unreachable", "reason": "nothing found"})
+    old = _company("Old Attempt BV")
+    apply_repo.record_resolution(old, {"status": "unreachable", "reason": "nothing found"})
+    stale = (datetime.now(UTC) - timedelta(days=30)).isoformat(timespec="seconds")
+    execute(
+        "UPDATE apply_contact_resolution SET resolved_at = ? WHERE company_id = ?",
+        (stale, old),
+    )
+
+    order = [row["company_id"] for row in apply_repo.all_companies_for_contact(50)]
+    assert ids["empty_company_id"] in order, "a company with no verdict is never hidden"
+    assert old in order and recent not in order
+    assert order.index(ids["empty_company_id"]) < order.index(old)
 
 
 def test_all_companies_for_contact_matches_the_correlated_form() -> None:

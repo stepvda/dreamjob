@@ -200,10 +200,10 @@ export function JobProgress({ job, report, onPause, onResume, onCancel }) {
       : job.progress_total
         ? Math.round((job.progress_done / job.progress_total) * 100)
         : null
-  // Live counters: the explicit prop wins, otherwise read the lightweight copy
-  // the worker keeps in the checkpoint while it runs. Absent entirely, nothing
-  // extra is rendered.
-  const liveLine = formatJobReport(report || job.checkpoint?.report)
+  // Live counters: the explicit prop wins, otherwise read the lightweight
+  // report the status endpoint returns (the checkpoint fallback keeps older
+  // server versions working). Absent entirely, nothing extra is rendered.
+  const liveLine = formatJobReport(report || job.report || job.checkpoint?.report)
 
   return (
     <div className="card">

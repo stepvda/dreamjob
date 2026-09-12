@@ -235,6 +235,44 @@ def test_aggregator_and_freemail_domains_are_not_employer_domains() -> None:
     assert pipeline.usable_employer_domain("acme-data.example") == "acme-data.example"
 
 
+def test_live_boilerplate_hosts_are_not_employer_domains() -> None:
+    """The hosts the contacts sweep adopted as employers on the live corpus.
+
+    ``arbeitnow.fr`` alone carried 497 resolutions, one per company, and the
+    public employment services, the ATS vendors, a hosting provider and one
+    employer's benefit scheme account for the rest.  An address on any of them
+    is the platform's or a third party's, never the posting company's domain.
+    """
+    for host in (
+        "arbeitnow.fr",
+        "bruxellesformation.be",
+        "actiris.brussels",
+        "greenhouse.com",
+        "employinc.com",
+        "wikipedia.org",
+        "team.blue",
+        "esempio.com",
+        "feather-insurance.com",
+        "businesswire.com",
+        "website-files.com",
+    ):
+        assert pipeline.usable_employer_domain(host) == "", host
+        assert pipeline.usable_employer_domain(f"jobs.{host}") == "", host
+
+
+def test_prose_fragments_are_not_employer_domains() -> None:
+    """``any.in``/``ive.er``/``ion.for`` were prose before they were domains.
+
+    The backup stage adopted them because the obfuscated-address pattern read
+    "at any point in", "point for" and "point of view" as addresses.  The
+    pattern no longer produces them; the reject set keeps a value already
+    stored in the corpus from ever being adopted again.
+    """
+    for fragment in ("any.in", "ive.er", "ion.for", "ional.of", "ion.and", "ive.of"):
+        assert pipeline.usable_employer_domain(fragment) == "", fragment
+        assert pipeline.usable_employer_domain(f"mail.{fragment}") == "", fragment
+
+
 # ---------------------------------------------------------------------------
 # CR-405: the confirmation gate
 # ---------------------------------------------------------------------------
@@ -432,6 +470,77 @@ def test_an_address_in_the_vacancy_beats_a_crawl(monkeypatch: pytest.MonkeyPatch
     assert row["full_name"] is None
 
 
+def test_resolving_a_company_never_reuses_another_companys_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-301: company A's resolution may only point at A's own contact row.
+
+    The live corpus had 731 resolutions whose ``contact_id`` belonged to a
+    different company, the largest being ``jobs@arbeitnow.fr`` under 497
+    companies, because ``upsert_contact`` matched on the address alone.  A's
+    ladder must either write A's own scoped row or refuse to call A reachable -
+    never hand back B's contact.
+    """
+    _offline(monkeypatch)
+    company_a = _company("Acme Data BV", domain="acme-data.example")
+    company_b = _company("Beta Corp NV", domain="beta-corp.example")
+    shared = "shared@outside-agency.example"
+    other_contact, _ = contacts_repo.upsert_contact(
+        {
+            "company_id": company_b,
+            "email": shared,
+            "email_source_method": patterns.METHOD_WEBSITE,
+            "email_validation": "valid",
+            "collected_at": utcnow(),
+        }
+    )
+    _vacancy(company_a, application_channel="email", application_target=shared)
+
+    outcome = asyncio.run(
+        pipeline.resolve_company(
+            _work_row(company_a, "Acme Data BV"), egress=_Egress({}), crawl_site=False
+        )
+    )
+    assert outcome.reachable
+    assert outcome.contact_id and outcome.contact_id != other_contact
+    stored = contacts_repo.get_contact(outcome.contact_id)
+    assert stored is not None and stored["company_id"] == company_a
+    # B's row is untouched and A did not point at it.
+    assert contacts_repo.get_contact(other_contact)["company_id"] == company_b
+    resolution = repo.get_resolution(company_a)
+    assert resolution["contact_id"] == outcome.contact_id
+    assert resolution["contact_id"] != other_contact
+
+
+def test_record_resolution_refuses_another_companys_contact() -> None:
+    """The repository backstop: a mismatched contact id records unreachable."""
+    company_a = _company("Acme Data BV", domain="acme-data.example")
+    company_b = _company("Beta Corp NV", domain="beta-corp.example")
+    other_contact, _ = contacts_repo.upsert_contact(
+        {
+            "company_id": company_b,
+            "email": "jobs@beta-corp.example",
+            "email_source_method": patterns.METHOD_WEBSITE,
+            "collected_at": utcnow(),
+        }
+    )
+    repo.record_resolution(
+        company_a,
+        {
+            "status": "reachable",
+            "contact_id": other_contact,
+            "email": "jobs@beta-corp.example",
+            "method": patterns.METHOD_WEBSITE,
+            "reason": "looked reachable",
+        },
+    )
+    resolution = repo.get_resolution(company_a)
+    assert resolution["status"] == "unreachable"
+    assert resolution["contact_id"] is None
+    assert resolution["email"] is None
+    assert resolution["reason"].startswith("the address matched a contact of another company")
+
+
 def test_an_unreachable_company_is_recorded_not_invented(monkeypatch: pytest.MonkeyPatch) -> None:
     """The rule the brief puts above the target: never make an address up."""
     _offline(monkeypatch)
@@ -611,6 +720,40 @@ def test_the_pass_forwards_the_backup_flag_to_the_ladder(monkeypatch: pytest.Mon
     assert seen == [True]
     # The backup attempt is visible in the report the screen reads.
     assert any(bucket.startswith("backup") for bucket in report.unreachable_reasons)
+
+
+def test_a_backup_domain_that_does_not_name_the_company_is_not_adopted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backup stage cannot turn a posting host into the employer's domain.
+
+    Live runs adopted ``any.in``, ``wikipedia.org``, ``greenhouse.com`` and
+    ``team.blue`` this way: a link or a URL field on the board page became the
+    company's domain, and addresses were then spelled on it.  A recovered host
+    has to carry a word of the company's name before the ladder adopts it or
+    crawls it (FR-303, CR-405).
+    """
+    _offline(monkeypatch)
+    company_id = _company("Acme Data BV", domain=None)
+    _vacancy(
+        company_id,
+        source_url="https://unrelated-board.example/jobs/1",
+        description="Apply through https://unrelated-agency.example/apply",
+    )
+    egress = _Egress({}, status=404)
+    outcome = asyncio.run(
+        pipeline.resolve_company(
+            _work_row(company_id, "Acme Data BV"), egress=egress,
+            crawl_site=True, derive_domains=False, backup=True,
+        )
+    )
+    assert outcome.status == "unreachable"
+    assert outcome.domain is None
+    assert outcome.domain_source is None
+    # Only the board page named by the posting was read; the rejected host was
+    # never crawled, and nothing was spelled on it.
+    assert egress.requested == ["https://unrelated-board.example"]
+    assert repo.get_resolution(company_id)["status"] == "unreachable"
 
 
 def test_a_confirmed_domain_yields_the_published_address(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1256,3 +1399,34 @@ def test_the_worker_progress_counts_from_the_visited_base(
 
     assert (4, 5) in ctx.progress_calls
     assert (5, 5) in ctx.progress_calls
+
+
+def test_the_worker_batches_the_visited_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ~100 KB visited list is written per batch, not per company.
+
+    Every company used to rewrite the whole checkpoint - report and visited
+    list - so a sweep of a thousand companies wrote a hundred kilobytes a
+    thousand times.  The list is now flushed every
+    ``VISITED_CHECKPOINT_COMPANIES`` companies (or 30 seconds) and once at the
+    end, and the resume path still sees every company exactly once.
+    """
+    _offline(monkeypatch)
+    seed = _seeker()
+    companies = [_reachable_company(index) for index in range(12)]
+
+    checkpoint = _worker_checkpoint()
+    checkpoint["options"]["limit"] = 50
+    ctx = _WorkerCtx(seed, checkpoint)
+    _run_discovery_worker(ctx)
+
+    writes = [
+        values["visited_company_ids"]
+        for values in ctx.checkpoints
+        if "visited_company_ids" in values
+    ]
+    assert len(writes) == 2, "one batch write and one final flush, not twelve"
+    assert writes[0] == writes[-1][:10], "the batch is a prefix of the full visited list"
+    assert set(writes[-1]) == set(companies)
+    assert len(writes[-1]) == 12

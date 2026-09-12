@@ -82,6 +82,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Collection
@@ -176,19 +177,45 @@ DEFAULT_TLDS: tuple[str, ...] = ("com",)
 #: tenant board redirects to (Recruitee's ``tellent.com``, Personio's
 #: ``personio.com``) - because an address published on a board as boilerplate
 #: is the platform's, not the employer's (FR-303).
+#:
+#: The live corpus added the rest: one host seen across hundreds of companies'
+#: resolutions is boilerplate however plausible it looks.  ``arbeitnow.fr``
+#: carried 497 resolutions (the French mirror of a board already listed),
+#: ``greenhouse.com`` 32 and ``employinc.com`` 21 (the vendors themselves),
+#: ``bruxellesformation.be`` 70 and ``actiris.brussels`` 5 (public employment
+#: services printing their own address in every posting), ``wikipedia.org`` 10,
+#: ``team.blue`` 9 (a hosting provider), ``esempio.com`` 5 (an ``example.com``
+#: equivalent) and ``feather-insurance.com`` 49 (one employer's benefit scheme
+#: reproduced in other employers' postings).
 AGGREGATOR_DOMAINS = frozenset(
     {
         "europa.eu", "ec.europa.eu", "eures.europa.eu", "arbeitnow.com", "arbeitnow.co.uk",
-        "greenhouse.io", "lever.co", "workday.com", "myworkdayjobs.com", "smartrecruiters.com",
+        "arbeitnow.fr",
+        "greenhouse.io", "greenhouse.com", "lever.co", "workday.com", "myworkdayjobs.com",
+        "smartrecruiters.com",
         "personio.de", "personio.com", "recruitee.com", "recruitee-cdn.com", "tellent.com",
         "teamtailor.com", "teamtailor-cdn.com", "jobs.lever.co", "bamboohr.com",
         "workable.com", "careers-page.com", "ashbyhq.com", "jobvite.com", "icims.com",
         "successfactors.com", "sapsf.com", "sapsf.eu", "taleo.net", "softgarden.io",
-        "join.com", "homerun.co",
+        "join.com", "homerun.co", "employinc.com",
         "linkedin.com", "indeed.com", "monster.com", "stepstone.de", "vdab.be", "forem.be",
-        "actiris.be", "jobat.be", "stepstone.be", "ictjob.be", "glassdoor.com", "xing.com",
-        "example.com", "example.org", "domain.com", "email.com", "sentry.io", "wixpress.com",
+        "actiris.be", "actiris.brussels", "bruxellesformation.be", "jobat.be",
+        "stepstone.be", "ictjob.be", "glassdoor.com", "glassdoor.es", "xing.com",
+        "example.com", "example.org", "esempio.com", "domain.com", "email.com",
+        "sentry.io", "wixpress.com", "wikipedia.org", "team.blue", "feather-insurance.com",
+        "businesswire.com", "website-files.com",
     }
+)
+
+#: Domains an extraction once spelled out of prose and that must never become
+#: an employer's domain again.  Each is a substring of an ordinary English
+#: sentence - "statement at any point in time" ends in ``any.in``, "coordination
+#: point for" hides ``ion.for``, "creative point of view" hides ``ive.of`` -
+#: matched by the pre-fix obfuscated-address pattern.  The pattern no longer
+#: produces them, and this set means a value already stored in the corpus
+#: cannot be adopted again either.
+JUNK_DOMAINS = frozenset(
+    {"any.in", "ive.er", "ion.for", "ional.of", "ion.and", "ive.of"}
 )
 
 #: Free mailbox providers.  A small employer really does apply from one, so the
@@ -303,14 +330,18 @@ def candidate_domains(name: str | None, country: str | None = None, limit: int =
 
 
 def usable_employer_domain(domain: str | None) -> str:
-    """The domain, unless it belongs to a board or a free mailbox provider."""
+    """The domain, unless it belongs to a board, a vendor or a free mailbox provider."""
     value = (domain or "").strip().lower().lstrip(".")
     if not value or "." not in value:
         return ""
-    if value in AGGREGATOR_DOMAINS or value in FREEMAIL_DOMAINS:
+    if value in AGGREGATOR_DOMAINS or value in FREEMAIL_DOMAINS or value in JUNK_DOMAINS:
         return ""
     registrable = crawler.registrable_domain(value)
-    if registrable in AGGREGATOR_DOMAINS or registrable in FREEMAIL_DOMAINS:
+    if (
+        registrable in AGGREGATOR_DOMAINS
+        or registrable in FREEMAIL_DOMAINS
+        or registrable in JUNK_DOMAINS
+    ):
         return ""
     return value
 
@@ -1005,6 +1036,22 @@ async def resolve_company(
     contact_id, _created = await asyncio.to_thread(
         contacts_repo.upsert_contact, candidate.as_contact_row(outcome.company_id, scope)
     )
+    # Never point one company's resolution at another company's contact row.
+    # ``upsert_contact`` is company-scoped, so this should not fire; the check
+    # is the backstop that makes the invariant true even if a future caller
+    # forgets the scope (live data had 731 resolutions linked to a contact of a
+    # different company, the largest being ``jobs@arbeitnow.fr`` under 497).
+    stored = await asyncio.to_thread(contacts_repo.get_contact, contact_id)
+    if stored is None or str(stored.get("company_id") or "") != str(outcome.company_id):
+        outcome.status = "unreachable"
+        outcome.email = None
+        outcome.contact_id = None
+        outcome.reason = (
+            "the best address already belongs to a contact recorded for another "
+            "company, so this company is not marked reachable through it"
+        )
+        await asyncio.to_thread(repo.record_resolution, outcome.company_id, _resolution(outcome))
+        return outcome
     candidate.contact_id = contact_id
 
     outcome.status = "reachable"
@@ -1246,10 +1293,14 @@ async def ensure_apply_contacts(
     including companies with no vacancy and no opportunity: ``limit`` counts
     *companies to visit*, the work list is
     :func:`apply.all_companies_for_contact` - every company that does not yet
-    have a usable contact, previously-unreachable ones included - and the pass
-    visits every selected company without stopping early on vacancy coverage.
-    ``refresh`` includes companies that already have a contact, so they are
-    re-checked; ``max_companies`` caps the work list either way.
+    have a usable contact - and the pass visits every selected company without
+    stopping early on vacancy coverage.  A company whose last verdict is
+    younger than :data:`apply.ALL_COMPANIES_FRESHNESS_DAYS` is left alone, and
+    the queue puts never-attempted companies first and the oldest attempts
+    next, so a repeated sweep spends its budget on new companies instead of
+    re-walking the ones it just walked.  ``refresh`` ignores that backoff and
+    includes companies that already have a contact, so they are re-checked;
+    ``max_companies`` caps the work list either way.
 
     ``order`` is ``vacancies`` by default because ``limit`` is: a target
     counted in vacancies is filled fastest by walking the companies that carry
@@ -1446,6 +1497,14 @@ def run_ensure_apply_contacts(job_seeker_id: str, limit: int = 500, **kwargs: An
 #: so a resumed run continues rather than duplicating work.
 DISCOVERY_JOB_KIND = "contacts_discovery"
 
+#: The visited-company checkpoint is the resume list for a whole sweep and can
+#: reach ~100 KB.  Writing it on every company made every progress tick a
+#: hundred-kilobyte transaction; it is now written every this many companies or
+#: :data:`VISITED_CHECKPOINT_SECONDS`, whichever comes first, plus once when the
+#: pass ends (or is cancelled) so a restart never loses more than a batch.
+VISITED_CHECKPOINT_COMPANIES = 10
+VISITED_CHECKPOINT_SECONDS = 30.0
+
 
 async def contacts_discovery_worker(ctx: JobContext):
     """Run the FR-301 pass for a seeker, reporting the coverage it reached.
@@ -1453,12 +1512,14 @@ async def contacts_discovery_worker(ctx: JobContext):
     The caller stores the pass options in the job checkpoint (``{"options":
     {...}}``), which is what makes the worker resumable without a closure.
     ``visited_company_ids`` in the same checkpoint is the other half of that:
-    every company the callback reports is appended and persisted, and a
-    restarted worker passes the set back to :func:`ensure_apply_contacts` so
-    the sweep continues instead of starting over (NFR-401).  The UI counter is
-    therefore reported as ``base + done``, where ``base`` is how many companies
-    earlier runs already visited, so a resumed bar keeps moving forward rather
-    than jumping back to zero.
+    every company the callback reports is appended and persisted in batches
+    (every :data:`VISITED_CHECKPOINT_COMPANIES` companies or
+    :data:`VISITED_CHECKPOINT_SECONDS` seconds, and once more when the pass
+    ends), and a restarted worker passes the set back to
+    :func:`ensure_apply_contacts` so the sweep continues instead of starting
+    over (NFR-401).  The UI counter is therefore reported as ``base + done``,
+    where ``base`` is how many companies earlier runs already visited, so a
+    resumed bar keeps moving forward rather than jumping back to zero.
     """
     options = dict((ctx.checkpoint or {}).get("options") or {})
     limit = int(options.pop("limit", 500) or 500)
@@ -1472,14 +1533,32 @@ async def contacts_discovery_worker(ctx: JobContext):
     visited = [str(cid) for cid in (ctx.checkpoint or {}).get("visited_company_ids") or []]
     visited_set = set(visited)
     base = len(visited)
+    unflushed = 0
+    last_write = time.monotonic()
+
+    def flush_visited(*, force: bool = False) -> None:
+        """Persist the visited list, at most once per batch or window."""
+        nonlocal unflushed, last_write
+        if not visited:
+            return
+        now = time.monotonic()
+        if not force and unflushed < VISITED_CHECKPOINT_COMPANIES and (
+            now - last_write < VISITED_CHECKPOINT_SECONDS
+        ):
+            return
+        ctx.save_checkpoint(visited_company_ids=visited[-30000:])
+        unflushed = 0
+        last_write = now
 
     def on_progress(payload: dict[str, Any]) -> None:
+        nonlocal unflushed, last_write
         company_id = payload.get("company_id")
         if company_id:
             company_id = str(company_id)
             if company_id not in visited_set:
                 visited.append(company_id)
                 visited_set.add(company_id)
+                unflushed += 1
         total = payload.get("total")
         if total:
             done = int(payload.get("done") or 0)
@@ -1487,18 +1566,30 @@ async def contacts_discovery_worker(ctx: JobContext):
                 ctx.progress(base + done, base + int(total))
             else:
                 ctx.progress(done, int(total))
-        if payload.get("report") or company_id:
-            extra: dict[str, Any] = {}
-            if payload.get("report"):
-                extra["report"] = payload["report"]
-            if company_id:
-                extra["visited_company_ids"] = visited[-30000:]
+        extra: dict[str, Any] = {}
+        if payload.get("report"):
+            extra["report"] = payload["report"]
+        now = time.monotonic()
+        if company_id and (
+            unflushed >= VISITED_CHECKPOINT_COMPANIES
+            or now - last_write >= VISITED_CHECKPOINT_SECONDS
+        ):
+            extra["visited_company_ids"] = visited[-30000:]
+            unflushed = 0
+            last_write = now
+        if extra:
             ctx.save_checkpoint(**extra)
 
-    report = await ensure_apply_contacts(
-        ctx.job_seeker_id or "", limit, campaign_id=campaign_id,
-        skip_company_ids=visited_set, on_progress=on_progress, **options,
-    )
+    try:
+        report = await ensure_apply_contacts(
+            ctx.job_seeker_id or "", limit, campaign_id=campaign_id,
+            skip_company_ids=visited_set, on_progress=on_progress, **options,
+        )
+    finally:
+        # A cancelled or failed pass must not lose the companies it did visit;
+        # the final flush is also what makes a crash resume from the last batch
+        # rather than from the start.
+        flush_visited(force=True)
     payload = report.as_dict()
     ctx.save_checkpoint(report=payload)
     ctx.progress(1, 1)

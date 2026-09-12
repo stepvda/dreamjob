@@ -278,6 +278,113 @@ def test_a_failed_consistency_check_blocks_and_is_shown() -> None:
 
 
 # ---------------------------------------------------------------------------
+# NFR-302: an objection blocks generation, approval and send
+# ---------------------------------------------------------------------------
+
+
+def test_generating_for_an_objected_contact_is_refused() -> None:
+    """An objected address is never chosen as a package's recipient."""
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.db.repositories import contacts as contacts_repo
+    from dreamjob.documents.package import GenerationError
+    from dreamjob.pipeline import apply_packages
+
+    ids = seed()
+    contacts_repo.record_objection(
+        "els.peeters@zenith.example", reason="asked not to be contacted"
+    )
+
+    with pytest.raises(GenerationError, match="NFR-302"):
+        apply_packages.generate_package(
+            ids["seeker"],
+            ids["opportunity"],
+            options=apply_packages.Options(contact_id=ids["contact"]),
+        )
+    assert repo.latest_for_opportunity(ids["seeker"], ids["opportunity"]) is None
+
+
+def test_regenerating_after_an_objection_is_refused() -> None:
+    """An objection that arrives later stops the package being rebuilt."""
+    from dreamjob.db.repositories import contacts as contacts_repo
+    from dreamjob.documents.package import GenerationError
+    from dreamjob.pipeline import apply_packages
+
+    ids = seed()
+    first = apply_packages.generate_package(ids["seeker"], ids["opportunity"])
+    contacts_repo.record_objection("els.peeters@zenith.example", source="reply")
+
+    with pytest.raises(GenerationError, match="NFR-302"):
+        apply_packages.generate_package(ids["seeker"], ids["opportunity"], regenerate=True)
+
+    # Reusing the untouched package is allowed, but it now shows the block.
+    reused = apply_packages.generate_package(ids["seeker"], ids["opportunity"])
+    assert reused.package_id == first.package_id and reused.reused
+    assert not reused.ready
+    assert {b["kind"] for b in reused.blockers} >= {"objection"}
+
+
+def test_objecting_after_the_package_exists_blocks_approval_and_send() -> None:
+    """The gates re-read the block list, so a later objection still stops it."""
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.db.repositories import contacts as contacts_repo
+    from dreamjob.documents import package as package_module
+    from dreamjob.pipeline import apply_packages
+
+    ids = seed()
+    result = apply_packages.generate_package(ids["seeker"], ids["opportunity"])
+    # Approve before the objection, so it is NFR-302 that refuses the send and
+    # not the FR-324 approval gate.
+    assert repo.approve_packages(
+        ids["seeker"], [result.package_id], "stephane@stepvda.com"
+    ) == [result.package_id]
+
+    contacts_repo.record_objection("els.peeters@zenith.example", source="reply")
+
+    approval = package_module.approve(
+        ids["seeker"], [result.package_id], actor="stephane@stepvda.com"
+    )
+    assert approval["approved"] == []
+    assert {"objection"} <= {b["kind"] for b in approval["refused"][0]["blockers"]}
+
+    sent = apply_packages.send_package(
+        ids["seeker"], result.package_id, actor="stephane@stepvda.com"
+    )
+    assert sent["sent"] is False
+    assert "NFR-302" in sent["refused"]
+    assert "message" not in sent, "nothing may be assembled for an objected recipient"
+
+
+def test_a_non_objected_contact_still_generates_normally() -> None:
+    from dreamjob.db.repositories import contacts as contacts_repo
+    from dreamjob.pipeline import apply_packages
+
+    ids = seed()
+    contacts_repo.record_objection("someone.else@zenith.example", source="manual")
+
+    result = apply_packages.generate_package(ids["seeker"], ids["opportunity"])
+    assert result.ready
+    assert result.recipient_email == "els.peeters@zenith.example"
+
+
+def test_an_objected_address_is_not_offered_at_recipient_selection() -> None:
+    """NFR-302: the block list removes the contact before a package picks one.
+
+    The row flag is cleared after the objection to prove the shared predicate
+    is what excludes the address, not the flag alone.
+    """
+    from dreamjob.db.connection import execute
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.db.repositories import contacts as contacts_repo
+
+    ids = seed()
+    contacts_repo.record_objection("els.peeters@zenith.example", source="reply")
+    execute("UPDATE contact SET objected = 0 WHERE id = ?", (ids["contact"],))
+
+    inputs = repo.generation_inputs(ids["seeker"], ids["opportunity"])
+    assert "els.peeters@zenith.example" not in {c.get("email") for c in inputs["contacts"]}
+
+
+# ---------------------------------------------------------------------------
 # FR-321: the briefing and the motivation document are never attached
 # ---------------------------------------------------------------------------
 

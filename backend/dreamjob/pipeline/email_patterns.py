@@ -110,10 +110,9 @@ _MAILTO_RE = re.compile(r"mailto:([^\"'?>\s]+)", re.IGNORECASE)
 
 # "name (at) example (dot) com" and friends, the usual anti-harvesting spelling.
 #
-# The two runs are **bounded**, and it is not cosmetic.  ``at`` is not anchored
-# to a word boundary - it cannot be, because the spelling being caught is
-# "jan(at)acme.be" - so every occurrence of those two letters anywhere in the
-# document is a place this pattern starts trying.  With an unbounded ``+`` in
+# The two runs are **bounded**, and it is not cosmetic.  An obfuscated "at" can
+# appear inside parentheses in the middle of a word, so every occurrence of the
+# marker is a place this pattern starts trying.  With an unbounded ``+`` in
 # front of it, each attempt first swallows the whole surrounding run of
 # local-part characters and then gives it back one character at a time, which is
 # quadratic in the length of that run: a 40 kB base64 data: URI - one image
@@ -125,10 +124,25 @@ _MAILTO_RE = re.compile(r"mailto:([^\"'?>\s]+)", re.IGNORECASE)
 # 64 and 255 are the RFC 5321 maxima for a local part and a domain, which is the
 # same bound :data:`EMAIL_RE` above already applies, so no address that could
 # exist is lost - only the backtracking is.
+#
+# The separators must be **explicitly obfuscated** - wrapped in parentheses,
+# brackets, braces or HTML entities.  That is not decoration: without it, the
+# pattern read plain prose as an address.  "adjust this data privacy statement
+# at any point in time" became ``statement@any.in``, "coordination point for"
+# became ``coordin@ion.for``, "creative point of view" became ``cre@ive.of``
+# and "escalation point and on-call" became ``escal@ion.and`` - and those
+# fragments were then adopted as employer domains by the backup stage.  A bare
+# "at" and a bare "dot" are English words in every paragraph ever written about
+# a point of view; only the parenthesised spelling is evidence that somebody
+# meant an address.  The bare ``dot``/``punt`` alternative is kept because the
+# obfuscated "at" already proves intent there.
 _OBFUSCATED_RE = re.compile(
-    r"([A-Za-z0-9._%+\-]{1,64})\s*(?:\(|\[|&#40;)?\s*(?:at|apenstaartje|arobase)\s*"
-    r"(?:\)|\]|&#41;)?\s*([A-Za-z0-9.\-]{1,255})\s*(?:\(|\[)?\s*(?:dot|punt|point)\s*"
-    r"(?:\)|\])?\s*([A-Za-z]{2,24})",
+    r"([A-Za-z0-9._%+\-]{1,64})\s*"
+    r"(?:\(|\[|\{|&#40;)\s*(?:at|apenstaartje|arobase)\s*(?:\)|\]|\}|&#41;)"
+    r"\s*([A-Za-z0-9.\-]{1,255})\s*"
+    r"(?:(?:\(|\[|\{|&#40;)\s*(?:dot|punt|point)\s*(?:\)|\]|\}|&#41;)"
+    r"|(?<![A-Za-z0-9])(?:dot|punt)(?![A-Za-z0-9]))"
+    r"\s*([A-Za-z]{2,24})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 

@@ -227,6 +227,37 @@ def contact_by_email(email: str) -> dict | None:
     return query_one("SELECT * FROM contact WHERE lower(email) = ? LIMIT 1", (email.lower(),))
 
 
+def contact_for_company_email(company_id: str | None, email: str) -> dict | None:
+    """The stored contact for one company and one address, or ``None``.
+
+    ``(company_id, lower(email))`` is the identity ``upsert_contact`` uses, not
+    the address alone: the same mailbox can be the published channel of two
+    different employers, and a shared row is how one company's contact became
+    497 companies' "reachable" (``jobs@arbeitnow.fr``).  When more than one row
+    already exists for the pair - two pairs were in the live corpus - the most
+    confident is returned and every later upsert converges on it, so the
+    duplicates stop multiplying even before a repair pass removes them.
+    """
+    if not company_id:
+        return contact_by_email(email)
+    return query_one(
+        "SELECT * FROM contact WHERE company_id = ? AND lower(email) = ? "
+        "ORDER BY confidence DESC, collected_at DESC LIMIT 1",
+        (company_id, email.lower()),
+    )
+
+
+def contact_for_company_linkedin(company_id: str | None, url: str) -> dict | None:
+    """The stored contact for one company and one LinkedIn URL, or ``None``."""
+    if not company_id:
+        return contact_by_linkedin(url)
+    return query_one(
+        "SELECT * FROM contact WHERE company_id = ? AND lower(linkedin_url) = ? "
+        "ORDER BY confidence DESC, collected_at DESC LIMIT 1",
+        (company_id, url.lower()),
+    )
+
+
 def contact_by_linkedin(url: str) -> dict | None:
     return query_one("SELECT * FROM contact WHERE linkedin_url = ? LIMIT 1", (url,))
 
@@ -548,8 +579,15 @@ def browse_facets(
 def upsert_contact(values: dict) -> tuple[str, bool]:
     """Insert or refresh one contact, minimised to FR-306.  Returns ``(id, created)``.
 
-    Identity is the e-mail address where there is one, else the LinkedIn URL,
-    else name plus company.  An existing objection is never overwritten: the
+    Identity is ``(company_id, lower(email))`` where there is a company, else
+    the e-mail address, the LinkedIn URL, or name plus company.  Scoping the
+    address to the company is the fix for the way one mailbox became many
+    companies' contact: ``contact_by_email`` used to match globally, so
+    resolving company A returned company B's row and A's resolution pointed at a
+    contact that was never A's.  A fresh address for A now creates A's own row
+    instead, and the same ``(company_id, lower(email))`` can never produce two
+    rows - two pairs already in the corpus are collapsed onto the most confident
+    row on the next upsert.  An existing objection is never overwritten: the
     row is left blocked (NFR-302) and its id returned so the caller can show
     why the contact is unavailable.
     """
@@ -557,6 +595,7 @@ def upsert_contact(values: dict) -> tuple[str, bool]:
     values.setdefault("collected_at", utcnow())
     if values.get("email"):
         values["email"] = str(values["email"]).strip().lower()
+    company_id = values.get("company_id")
 
     # FR-303/FR-304: an address composed by pattern inference is a hypothesis
     # until a validation says otherwise.  A ``valid`` verdict clears the flag;
@@ -571,14 +610,14 @@ def upsert_contact(values: dict) -> tuple[str, bool]:
 
     existing: dict | None = None
     if values.get("email"):
-        existing = contact_by_email(values["email"])
+        existing = contact_for_company_email(company_id, values["email"])
     if existing is None and values.get("linkedin_url"):
-        existing = contact_by_linkedin(values["linkedin_url"])
-    if existing is None and values.get("full_name") and values.get("company_id"):
+        existing = contact_for_company_linkedin(company_id, values["linkedin_url"])
+    if existing is None and values.get("full_name") and company_id:
         existing = query_one(
             "SELECT * FROM contact WHERE company_id = ? AND lower(full_name) = ? "
             "AND (email IS NULL OR email = '') LIMIT 1",
-            (values["company_id"], values["full_name"].lower()),
+            (company_id, values["full_name"].lower()),
         )
 
     if existing is None:

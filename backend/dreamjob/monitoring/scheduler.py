@@ -88,7 +88,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from dreamjob.config import get_settings
-from dreamjob.db.connection import query_all, utcnow
+from dreamjob.db.connection import (
+    BULK,
+    close_thread_connections,
+    query_all,
+    query_one,
+    utcnow,
+    write_lane,
+)
 from dreamjob.db.repositories import knowledge as kb_repo
 from dreamjob.db.repositories import pipeline_cards as repo
 from dreamjob.monitoring import digest as digest_mod
@@ -232,6 +239,116 @@ async def _run_llm_redaction() -> dict[str, Any]:
     return await asyncio.to_thread(run_redaction_job)
 
 
+#: How many companies one scheduled enrichment tick covers.  The sweep used to
+#: take the 60 busiest in a single pass, and because the passes under it are not
+#: actually async (``llm/client.py`` is a synchronous HTTP client, the signals
+#: pass is synchronous database work), that pass held the serving loop for
+#: 309 s and 385 s on 2026-09-12.  A tick is now bounded, runs on a worker
+#: thread, and gives way between companies if a campaign starts.
+SWEEP_COMPANIES_PER_TICK = 20
+
+#: Job kinds whose workers own the same registries, egress and single writer
+#: the enrichment passes use.  The sweep is background catch-up: it must not
+#: start on top of one of these, and it stops between companies if one starts
+#: (FR-185, NFR-102).
+HEAVY_JOB_KINDS = ("collection", "contacts_discovery")
+
+
+def _heavy_job_running() -> str | None:
+    """The kind of a running collection/discovery job, if there is one."""
+    row = query_one(
+        "SELECT kind FROM job_run WHERE status = 'running' AND kind IN (?, ?) LIMIT 1",
+        HEAVY_JOB_KINDS,
+    )
+    return str(row["kind"]) if row else None
+
+
+def _company_enrichment_tick() -> dict[str, Any]:
+    """One bounded enrichment sweep, on a worker thread (NFR-102).
+
+    The passes look async but their leaves are not - the website crawl parses
+    synchronously, ``company_profile`` synthesises with the synchronous LLM
+    client, and ``_refresh_signals`` is plain database work - so this must not
+    run on the loop that serves requests.  Deferring while a heavy job runs
+    keeps the sweep from competing with the campaign that is already using the
+    registries and the single writer.
+    """
+    from dreamjob.pipeline import company_enrichment  # noqa: PLC0415
+
+    with write_lane(BULK):
+        try:
+            busy = _heavy_job_running()
+            if busy:
+                log.info("Company enrichment deferred: a %s job is running", busy)
+                return {"deferred": f"{busy} job is running"}
+
+            rows = query_all(
+                """
+                SELECT o.company_id AS id, COUNT(*) AS n
+                FROM opportunity o
+                WHERE o.company_id IS NOT NULL
+                GROUP BY o.company_id
+                ORDER BY n DESC
+                LIMIT ?
+                """,
+                (SWEEP_COMPANIES_PER_TICK,),
+            )
+            company_ids = [str(r["id"]) for r in rows]
+            if not company_ids:
+                return {"skipped": "no companies"}
+
+            return asyncio.run(_enrich_companies_off_loop(company_enrichment, company_ids))
+        finally:
+            # The worker thread outlives the tick; its connection must not
+            # (a connection is a file handle onto a database file that may
+            # since have been replaced - see jobs/runner.py).
+            close_thread_connections()
+
+
+async def _enrich_companies_off_loop(
+    company_enrichment: Any, company_ids: list[str]
+) -> dict[str, Any]:
+    """Walk the tick's companies, giving way to a heavy job between them."""
+    enriched = 0
+    employers_resolved = 0
+    signals = 0
+    for company_id in company_ids:
+        busy = _heavy_job_running()
+        if busy:
+            log.info(
+                "Company enrichment yielded after %d company(ies): a %s job started",
+                enriched, busy,
+            )
+            return {"deferred": f"{busy} job started mid-sweep", "companies": enriched}
+        # No campaign and no seeker: the sweep runs over the shared knowledge
+        # base, which belongs to no one (FR-344), so only the passes that need
+        # neither run and the campaign-scoped ones are picked up by the next
+        # collection.
+        try:
+            report = await company_enrichment.enrich_companies(
+                [company_id],
+                campaign_id=None,
+                job_seeker_id=None,
+                limit=1,
+            )
+        except Exception:  # noqa: BLE001 - one company must not stop the tick
+            log.exception("Company enrichment failed for %s", company_id)
+            continue
+        data = report.as_dict()
+        enriched += 1
+        kinds = data.get("employer_kind") or {}
+        if isinstance(kinds, dict):
+            employers_resolved += int(kinds.get("resolved") or 0)
+        found = data.get("signals") or {}
+        if isinstance(found, dict):
+            signals += int(found.get("signals") or 0)
+    return {
+        "companies": enriched,
+        "employers_resolved": employers_resolved,
+        "signals": signals,
+    }
+
+
 async def _run_company_enrichment() -> dict[str, Any]:
     """Enrich the employers behind the most recent opportunities (FR-221..246).
 
@@ -241,41 +358,13 @@ async def _run_company_enrichment() -> dict[str, Any]:
     employer-kind ladder, the website crawl, signals and the filings over a
     larger batch, so a knowledge base that has fallen behind catches up on its
     own rather than waiting for someone to press a button.
+
+    The enrichment is awaited here, on the API's own loop, from the scheduler;
+    a 60-company pass therefore *was* the 309 s / 385 s stall of 2026-09-12.
+    It now runs on a worker thread in the bulk write lane, one bounded tick at
+    a time (:data:`SWEEP_COMPANIES_PER_TICK`).
     """
-    from dreamjob.db.connection import query_all  # noqa: PLC0415
-    from dreamjob.pipeline import company_enrichment  # noqa: PLC0415
-
-    rows = await asyncio.to_thread(
-        query_all,
-        """
-        SELECT o.company_id AS id, COUNT(*) AS n
-        FROM opportunity o
-        WHERE o.company_id IS NOT NULL
-        GROUP BY o.company_id
-        ORDER BY n DESC
-        LIMIT ?
-        """,
-        (company_enrichment.SWEEP_COMPANY_LIMIT,),
-    )
-    company_ids = [str(r["id"]) for r in rows]
-    if not company_ids:
-        return {"skipped": "no companies"}
-
-    # No campaign and no seeker: the sweep runs over the shared knowledge base,
-    # which belongs to no one (FR-344), so only the passes that need neither run
-    # and the campaign-scoped ones are picked up by the next collection.
-    report = await company_enrichment.enrich_companies(
-        company_ids,
-        campaign_id=None,
-        job_seeker_id=None,
-        limit=company_enrichment.SWEEP_COMPANY_LIMIT,
-    )
-    data = report.as_dict()
-    return {
-        "companies": data.get("companies"),
-        "employers": data.get("employer_kind"),
-        "signals": data.get("signals"),
-    }
+    return await asyncio.to_thread(_company_enrichment_tick)
 
 
 async def _run_learning() -> dict[str, Any]:
@@ -390,6 +479,13 @@ class Scheduler:
             if asyncio.iscoroutine(result):
                 result = await result
             payload = result if isinstance(result, dict) else {"result": result}
+            if payload.get("deferred") and not payload.get("error"):
+                # A task that deliberately did not run (a heavy sweep giving way
+                # to a running job) must not be stamped as run: the interval
+                # would hide it for six hours.  Leaving ``last_run`` alone makes
+                # the next tick try again.
+                log.info("Scheduler task %s deferred: %s", task.name, payload["deferred"])
+                return payload
             _record_run(task.name, payload)
             log.info(
                 "Scheduler task %s finished in %.1fs: %s",
@@ -407,11 +503,15 @@ class Scheduler:
         moment = now or datetime.now(UTC)
         outcomes: dict[str, Any] = {}
         for task in self.tasks:
-            if not task.due(_last_run(task.name), moment):
-                continue
-            if self.jitter_seconds:
-                await asyncio.sleep(random.uniform(0, self.jitter_seconds))
-            outcomes[task.name] = await self.run_task(task)
+            try:
+                if not task.due(_last_run(task.name), moment):
+                    continue
+                if self.jitter_seconds:
+                    await asyncio.sleep(random.uniform(0, self.jitter_seconds))
+                outcomes[task.name] = await self.run_task(task)
+            except Exception as exc:  # noqa: BLE001 - one task must not stop the tick
+                log.exception("Scheduler task %s could not be triggered", task.name)
+                outcomes[task.name] = {"error": str(exc)[:500]}
         self.runs += 1
         return outcomes
 

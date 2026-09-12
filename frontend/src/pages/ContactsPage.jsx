@@ -287,7 +287,7 @@ function ContactList() {
               </p>
             )}
             <JobProgress
-              report={batch.job?.checkpoint?.report}
+              report={batch.job?.report}
               job={
                 batch.job
                   ? { ...batch.job, kind: 'Finding hiring contacts' }
@@ -299,20 +299,20 @@ function ContactList() {
                     }
               }
             />
-            {batch.job?.checkpoint?.report && (
+            {batch.job?.report && (
               <p className="small muted" style={{ margin: '8px 0 0' }}>
                 {batch.scope === 'all' ? (
                   <>
-                    {batch.job.checkpoint.report.companies_reachable || 0} companies reachable ·{' '}
-                    {batch.job.checkpoint.report.companies_unreachable || 0} companies with
-                    nothing found · {batch.job.checkpoint.report.vacancies_covered || 0}{' '}
+                    {batch.job.report.companies_reachable || 0} companies reachable ·{' '}
+                    {batch.job.report.companies_unreachable || 0} companies with
+                    nothing found · {batch.job.report.vacancies_covered || 0}{' '}
                     vacancies newly covered
                   </>
                 ) : (
                   <>
-                    {batch.job.checkpoint.report.companies_reachable || 0} reachable ·{' '}
-                    {batch.job.checkpoint.report.companies_unreachable || 0} nothing found ·{' '}
-                    {batch.job.checkpoint.report.vacancies_covered || 0} vacancies newly covered
+                    {batch.job.report.companies_reachable || 0} reachable ·{' '}
+                    {batch.job.report.companies_unreachable || 0} nothing found ·{' '}
+                    {batch.job.report.vacancies_covered || 0} vacancies newly covered
                   </>
                 )}
               </p>
