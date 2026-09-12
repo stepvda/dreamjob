@@ -57,6 +57,7 @@ from typing import Any
 
 from dreamjob.db.connection import (
     from_json,
+    query_all,
     query_one,
     to_json,
     update_row,
@@ -65,11 +66,25 @@ from dreamjob.db.connection import (
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import directives as directives_repo
 from dreamjob.db.repositories import pipeline_cards as notify_repo
-from dreamjob.jobs.runner import JobContext, runner
+from dreamjob.jobs.runner import JobCancelled, JobContext, runner
 
 log = logging.getLogger(__name__)
 
 JOB_KIND = "autopilot"
+
+
+class AutopilotError(RuntimeError):
+    """A stage autopilot cannot continue past, with the evidence it judged.
+
+    Carries the child collection's assessment (:func:`_assess_collection`) so
+    the worker can write the same machine-readable reason into the report and
+    the failure notification that it hands to the runner.
+    """
+
+    def __init__(self, message: str, *, collection: dict | None = None) -> None:
+        super().__init__(message)
+        self.collection: dict[str, Any] = collection or {}
+
 
 #: How many stages the progress bar counts. Kept as a constant so the bar and
 #: the worker cannot disagree about the denominator.
@@ -353,20 +368,41 @@ async def autopilot_worker(ctx: JobContext):
     if not checkpoint.get("collected"):
         _stage(ctx, done, "collection")
         yield
-        collection_job_id = await _start_collection(campaign_id, seeker_id)
-        checkpoint["collection_job_id"] = collection_job_id
-        _save(ctx, checkpoint, report)
-
-        finished = await _await_collection(ctx, collection_job_id)
-        report["collection"] = {"job_id": collection_job_id, "outcome": finished}
-        if finished != "done":
-            # Collection is load-bearing: without it there is nothing to rank,
-            # so the run stops here and says why rather than continuing into
-            # company profiling against an empty corpus.
-            checkpoint["collected"] = finished
+        # A run that died while waiting left the child id in the checkpoint;
+        # waiting on it (or adopting it when it already finished) is what
+        # makes this a resume rather than a second collection (NFR-401).
+        collection_job_id = _reusable_collection(checkpoint)
+        if not collection_job_id:
+            collection_job_id = await _start_collection(campaign_id, seeker_id)
+            checkpoint["collection_job_id"] = collection_job_id
+            _save(ctx, checkpoint, report)
+        try:
+            collection = await _await_collection(ctx, collection_job_id, campaign_id)
+        except AutopilotError as exc:
+            # Collection is load-bearing: without it there is nothing to rank.
+            # Record what the child actually did, tell the job seeker, and let
+            # the runner settle this job ``failed`` with the real reason -
+            # rather than reporting a finished search over an empty corpus.
+            report["collection"] = exc.collection or {
+                "job_id": collection_job_id,
+                "outcome": "failed",
+                "reason": "collection_failed",
+            }
+            report["reason"] = report["collection"].get("reason") or "collection_failed"
+            if report["collection"].get("sources"):
+                report["sources"] = report["collection"]["sources"]
+            checkpoint["collected"] = "failed"
             _save(ctx, checkpoint, report)
             _finalise_notification(seeker_id, campaign_id, report, ok=False)
-            return
+            raise
+        report["collection"] = collection
+        if collection.get("reason") == "no_records":
+            # The search completed and found nothing.  It stays done, but the
+            # report says why a screen can explain: which sources answered
+            # nothing and how they were turned down.
+            report["reason"] = "no_records"
+            report["sources"] = collection.get("sources") or {}
+            report["counts"] = collection.get("counts") or _opportunity_counts(campaign_id)
         checkpoint["collected"] = True
         _save(ctx, checkpoint, report)
         done = 6
@@ -528,27 +564,217 @@ async def _start_collection(campaign_id: str, job_seeker_id: str) -> str:
     return await collection.launch(campaign_id, job_seeker_id)
 
 
-async def _await_collection(ctx: JobContext, collection_job_id: str) -> str:
-    """Wait for a collection job to reach a terminal state.
+def _reusable_collection(checkpoint: dict) -> str:
+    """The existing collection child to wait on, if there is one (NFR-401).
+
+    ``collection_job_id`` is written before the wait starts, so a run that died
+    mid-wait finds its child here on resume.  The child is reused only while it
+    can still produce an answer: running, paused, pending or already done.  A
+    failed or cancelled child is not worth waiting on - this run launches its
+    own, which is what a resume is for.
+    """
+    existing = str(checkpoint.get("collection_job_id") or "")
+    if not existing:
+        return ""
+    row = runner.status(existing)
+    status = str((row or {}).get("status") or "")
+    if status in ("running", "paused", "pending", "done"):
+        return existing
+    log.warning(
+        "Autopilot: collection %s is %s; launching a new collection instead",
+        existing,
+        status or "missing",
+    )
+    return ""
+
+
+def _top_source_errors(campaign_id: str, limit: int = 3) -> list[str]:
+    """The errors a person should read first, worst-first.
+
+    A job row only remembers the *last* error it charged; the plan items
+    remember every one, with the counts that say which mattered.  Reading them
+    back is what lets the failure report name a source instead of saying only
+    "collection did not complete".
+    """
+    if not campaign_id:
+        return []
+    try:
+        rows = query_all(
+            "SELECT last_error FROM source_plan_item "
+            "WHERE campaign_id = ? AND last_error IS NOT NULL "
+            "ORDER BY COALESCE(error_count, 0) DESC, last_error LIMIT ?",
+            (campaign_id, int(limit)),
+        )
+    except Exception:  # noqa: BLE001 - an explanation must never fail the run
+        log.debug("Could not read source errors for campaign %s", campaign_id, exc_info=True)
+        return []
+    return [str(row["last_error"])[:300] for row in rows if row.get("last_error")]
+
+
+def _sources_summary(stats: dict, last_error: str | None, campaign_id: str) -> dict:
+    """A small, machine-readable account of what the sources did (FR-185).
+
+    ``failed``, ``blocked`` and ``gone`` are the three ways a request can be
+    turned down, kept apart exactly as collection keeps them; ``errors`` names
+    the strings an operator is meant to read first.  The shape is bounded
+    because it is written into the job's checkpoint and read by the UI.
+    """
+    by_adapter = stats.get("by_adapter") if isinstance(stats.get("by_adapter"), dict) else {}
+    adapters: dict[str, dict[str, int]] = {}
+    for key, counts in by_adapter.items():
+        if not isinstance(counts, dict):
+            continue
+        adapters[str(key)] = {
+            name: int(counts.get(name) or 0)
+            for name in ("pages", "records", "errors", "blocked", "gone")
+        }
+    errors = _top_source_errors(campaign_id)
+    if last_error and last_error not in errors:
+        errors.insert(0, last_error)
+    return {
+        "failed": int(stats.get("errors") or 0),
+        "blocked": int(stats.get("blocked") or 0),
+        "gone": int(stats.get("gone") or 0),
+        "records": int(stats.get("records") or 0),
+        "pages": int(stats.get("pages") or 0),
+        "adapters": adapters,
+        "errors": errors[:4],
+    }
+
+
+def _declined_with_nothing_collected(sources: dict, child_errors: int) -> bool:
+    """A ``failed`` campaign row over a run in which nothing actually went wrong.
+
+    Collection writes ``failed`` when it collected no record and any source ran
+    at all (``collection._run_outcome``), which includes the case where every
+    source simply declined us: robots.txt, a bot wall, a target that is gone.
+    That is a completed search with nothing to rank, not a failure.  Any real
+    fault - a 5xx, a timeout, a crash - keeps the verdict ``failed``.
+    """
+    return (
+        child_errors == 0
+        and int(sources.get("records") or 0) == 0
+        and int(sources.get("failed") or 0) == 0
+        and (int(sources.get("blocked") or 0) > 0 or int(sources.get("gone") or 0) > 0)
+    )
+
+
+def _collection_failure_message(
+    collection_job_id: str,
+    status: str,
+    campaign_status: str,
+    sources: dict,
+    last_error: str | None,
+) -> str:
+    detail = last_error or (sources.get("errors") or ["no error recorded"])[0]
+    summary = (
+        f"records={sources.get('records', 0)}, failed={sources.get('failed', 0)}, "
+        f"blocked={sources.get('blocked', 0)}, gone={sources.get('gone', 0)}"
+    )
+    message = f"collection job {collection_job_id} ended {status} ({summary})"
+    if campaign_status:
+        message += f"; campaign status {campaign_status}"
+    return f"{message}; {detail}"
+
+
+def _assess_collection(collection_job_id: str, row: dict, campaign_id: str) -> dict:
+    """Judge a terminal collection child from its own evidence.
+
+    The child's ``job_run`` status is not enough: a collection whose every
+    source was refused can finish, be written ``done``, and still leave the
+    campaign row it belongs to ``failed``.  The checkpoint (the run's measured
+    counters) and the campaign row are read as well, and the answer is either
+    a small machine-readable assessment or an :class:`AutopilotError` that
+    carries one.
+    """
+    status = str(row.get("status") or "vanished")
+    checkpoint = from_json(row.get("checkpoint"), {}) or {}
+    raw_stats = checkpoint.get("stats") if isinstance(checkpoint.get("stats"), dict) else {}
+    campaign = campaign_repo.get_campaign_any(campaign_id) if campaign_id else None
+    campaign_status = str((campaign or {}).get("status") or "")
+    last_error = str(row.get("last_error") or "").strip() or None
+    sources = _sources_summary(raw_stats, last_error, campaign_id)
+    assessment: dict[str, Any] = {
+        "job_id": collection_job_id,
+        "outcome": status,
+        "campaign_status": campaign_status or None,
+        "counts": _opportunity_counts(campaign_id) if campaign_id else {},
+        "sources": sources,
+        "last_error": last_error,
+    }
+    failed = status != "done"
+    if not failed and campaign_status == "failed":
+        failed = not _declined_with_nothing_collected(
+            sources, int(row.get("error_count") or 0)
+        )
+    if failed:
+        assessment["reason"] = "collection_failed"
+        raise AutopilotError(
+            _collection_failure_message(
+                collection_job_id, status, campaign_status, sources, last_error
+            ),
+            collection=assessment,
+        )
+    if int(sources.get("records") or 0) == 0:
+        # The search completed and genuinely found nothing.  Say so in a way a
+        # screen can render: which sources were declined, how many, and why.
+        assessment["reason"] = "no_records"
+    return assessment
+
+
+async def _await_collection(ctx: JobContext, collection_job_id: str, campaign_id: str) -> dict:
+    """Wait for the collection child and judge what it actually did.
 
     Polls rather than subscribing because the job runner keeps its state in the
     database, which is also what lets this survive a restart: a resumed
-    autopilot reads the same ``job_run`` row and keeps waiting.
+    autopilot reads the same ``job_run`` row and keeps waiting (NFR-401).
+
+    A terminal child is not automatically a successful one.  Its own status,
+    its measured checkpoint and the campaign row are read together
+    (:func:`_assess_collection`); anything that is not an honest completion
+    raises :class:`AutopilotError`, so the runner settles this job ``failed``
+    with the reason the job seeker is owed.  A cancel of this job cancels the
+    child too, so a stopped run stops producing opportunities as well.
     """
     waited = 0.0
     while waited < COLLECTION_WAIT_TIMEOUT_SECONDS:
         row = runner.status(collection_job_id)
         if row is None:
-            return "vanished"
-        status = row.get("status")
+            raise AutopilotError(
+                f"collection job {collection_job_id} vanished before it finished",
+                collection={
+                    "job_id": collection_job_id,
+                    "outcome": "vanished",
+                    "reason": "collection_failed",
+                    "sources": {},
+                },
+            )
+        status = str(row.get("status") or "")
         if status in ("done", "failed", "cancelled"):
-            return status
-        # A pause or cancel of the autopilot also stops the wait.
-        await ctx.checkpoint_barrier()
+            return _assess_collection(collection_job_id, row, campaign_id)
+        try:
+            # A pause of this job stops the wait only; the child keeps its
+            # place.  A cancel stops the wait and the child with it (FR-185).
+            await ctx.checkpoint_barrier()
+        except JobCancelled:
+            try:
+                runner.cancel(collection_job_id)
+            except Exception:  # noqa: BLE001 - the cancel of this job must still win
+                log.exception("Autopilot could not cancel collection %s", collection_job_id)
+            raise
         await asyncio.sleep(POLL_SECONDS)
         waited += POLL_SECONDS
     log.warning("Autopilot gave up waiting for collection %s", collection_job_id)
-    return "timed_out"
+    raise AutopilotError(
+        f"collection job {collection_job_id} did not finish within "
+        f"{COLLECTION_WAIT_TIMEOUT_SECONDS // 60} minutes",
+        collection={
+            "job_id": collection_job_id,
+            "outcome": "timed_out",
+            "reason": "collection_failed",
+            "sources": {},
+        },
+    )
 
 
 async def _profile_companies(
@@ -648,6 +874,11 @@ def _finalise_notification(
             "Autopilot read your profile, searched the sources it judged relevant and "
             "ranked what came back. Open the ranked list to choose what to pursue."
         )
+        payload: dict[str, Any] = {"campaign_id": campaign_id, "counts": counts}
+        if report.get("reason"):
+            payload["reason"] = report["reason"]
+        if report.get("sources"):
+            payload["sources"] = report["sources"]
         notify_repo.notify(
             job_seeker_id,
             {
@@ -655,22 +886,30 @@ def _finalise_notification(
                 "severity": "info",
                 "title": title,
                 "body": body,
-                "payload": {"campaign_id": campaign_id, "counts": counts},
+                "payload": payload,
                 "dedup_key": f"autopilot-ready-{campaign_id}",
             },
         )
     else:
+        collection = report.get("collection") or {}
+        detail = collection.get("last_error")
+        if not detail:
+            errors = (collection.get("sources") or {}).get("errors") or []
+            detail = errors[0] if errors else None
+        body = (
+            "The collection stage did not complete, so there was nothing to rank. "
+            "Open the campaign to see what happened; the parts that did run are kept."
+        )
+        if detail:
+            body = f"{body} Reason: {detail}"
         notify_repo.notify(
             job_seeker_id,
             {
                 "kind": "autopilot_failed",
                 "severity": "warning",
                 "title": "Autopilot could not finish the search",
-                "body": (
-                    "The collection stage did not complete, so there was nothing to rank. "
-                    "Open the campaign to see what happened; the parts that did run are kept."
-                ),
-                "payload": {"campaign_id": campaign_id, **report.get("collection", {})},
+                "body": body,
+                "payload": {"campaign_id": campaign_id, **collection},
                 "dedup_key": f"autopilot-failed-{campaign_id}",
             },
         )

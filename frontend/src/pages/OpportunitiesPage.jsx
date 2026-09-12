@@ -19,7 +19,7 @@
  * disagree with the stored order.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { api } from '../api/client'
@@ -77,6 +77,125 @@ const AUTOPILOT_STAGE = {
   collection: 'Collecting and ranking opportunities',
   profiling: 'Looking into the companies',
   notify: 'Finishing up',
+}
+
+/**
+ * The ranked-opportunity count on a campaign row, when the API carries one.
+ * GET /campaigns currently returns the raw campaign columns, so most rows have
+ * no count; the screen then falls back to "Every campaign" rather than risk
+ * opening on a campaign whose search found nothing.
+ */
+function campaignOpportunityCount(campaign) {
+  const candidates = [
+    campaign?.opportunities,
+    campaign?.opportunity_count,
+    campaign?.opportunities_count,
+    campaign?.count,
+    campaign?.counts?.opportunities,
+  ]
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+  }
+  return null
+}
+
+/**
+ * What a zero-result run had to say about the sources. The backend marks such
+ * a run with `report.reason = "no_records"` and a `report.sources` summary;
+ * runs recorded before that fix carry neither, so every read here tolerates
+ * absence and the screen falls back to plain prose.
+ */
+function emptySearchSummary(report) {
+  const source = report?.sources
+  const counts = report?.counts || {}
+  const errors = []
+  let failed = 0
+  let blocked = 0
+
+  const number = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (Array.isArray(value)) return value.length
+    return 0
+  }
+  const addError = (label, text) => {
+    const message = String(text ?? '').trim()
+    if (!message) return
+    const name = String(label ?? '').trim()
+    errors.push(name ? `${name}: ${message}` : message)
+  }
+  const blockedOutcome = (outcome) => {
+    const value = String(outcome ?? '').toLowerCase()
+    return value.includes('block') || value.includes('consent') || value.includes('gone')
+  }
+  const failedOutcome = (outcome) => {
+    const value = String(outcome ?? '').toLowerCase()
+    return value === 'failed' || value === 'error' || value.includes('timeout')
+  }
+
+  if (Array.isArray(source)) {
+    for (const item of source) {
+      const outcome = item?.outcome ?? item?.status ?? item?.state
+      if (blockedOutcome(outcome)) blocked += 1
+      else if (failedOutcome(outcome)) failed += 1
+      else continue
+      addError(
+        item?.adapter_key || item?.source || item?.name || item?.site,
+        item?.last_error || item?.error || item?.reason,
+      )
+    }
+  } else if (source && typeof source === 'object') {
+    failed = number(source.failed ?? source.failed_count)
+    blocked =
+      number(source.blocked ?? source.blocked_count) + number(source.gone ?? source.gone_count)
+    const listed = source.errors || source.top_errors || source.failures || source.problems
+    if (Array.isArray(listed)) {
+      for (const item of listed) {
+        if (typeof item === 'string') addError('', item)
+        else {
+          addError(
+            item?.adapter_key || item?.source || item?.name || item?.site,
+            item?.last_error || item?.error || item?.reason,
+          )
+        }
+      }
+    } else if (listed && typeof listed === 'object') {
+      for (const [name, value] of Object.entries(listed)) {
+        addError(
+          name,
+          typeof value === 'string' ? value : value?.error || value?.last_error || value?.reason,
+        )
+      }
+    }
+  }
+
+  const sourceCounts = source && typeof source === 'object' && !Array.isArray(source) ? source : {}
+  const rejected = number(
+    counts.rejected_out_of_scope ??
+      counts.out_of_scope ??
+      counts.rejected ??
+      sourceCounts.rejected_out_of_scope ??
+      sourceCounts.out_of_scope ??
+      sourceCounts.rejected ??
+      report?.rejected_out_of_scope ??
+      report?.rejected,
+  )
+  return { failed, blocked, errors: errors.slice(0, 3), rejected }
+}
+
+/** The plain sentence under "no opportunity passed your directives". */
+function describeEmptySearch({ failed, blocked, rejected }) {
+  const parts = []
+  const problem = failed + blocked
+  if (problem > 0) {
+    parts.push(`${problem} source${problem === 1 ? ' was' : 's were'} blocked or failed`)
+  }
+  if (rejected > 0) {
+    parts.push(
+      `${rejected} result${rejected === 1 ? ' was' : 's were'} rejected as out of scope`,
+    )
+  }
+  if (!parts.length) return 'Every source it planned returned nothing usable.'
+  return `${parts.join(', and ')}.`
 }
 
 const EMPTY_FILTERS = {
@@ -683,6 +802,12 @@ export default function OpportunitiesPage() {
   const [recalculating, setRecalculating] = useState(null)
   const [selectionNonce, setSelectionNonce] = useState(0)
 
+  // Which campaign the screen auto-selected, and whether the seeker has since
+  // chosen one themselves. The empty-campaign fallback (below) may only move
+  // the selector while the choice is still the screen's own.
+  const autoCampaignRef = useRef(null)
+  const userPickedCampaignRef = useRef(false)
+
   const [dragId, setDragId] = useState(null)
   const [overId, setOverId] = useState(null)
 
@@ -706,7 +831,11 @@ export default function OpportunitiesPage() {
           list.reload()
           campaigns.reload()
           if (run.status === 'done') {
-            setNotice('The search finished. The campaign selector above lists the new run.')
+            setNotice(
+              run.report?.counts?.opportunities === 0 || run.report?.reason === 'no_records'
+                ? 'The search finished, but found nothing to rank. The panel above explains why.'
+                : 'The search finished. The campaign selector above lists the new run.',
+            )
           }
         }
       } catch {
@@ -716,6 +845,39 @@ export default function OpportunitiesPage() {
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finding?.status, finding?.job_id])
+
+  // A run outlives the page, so ask about it on mount too. Without this a
+  // reload hid an in-flight search - and the explanation of one that found
+  // nothing - behind a button that had already been pressed.
+  useEffect(() => {
+    let live = true
+    ;(async () => {
+      try {
+        const res = await api.get('/autopilot/status')
+        const run = res?.run
+        if (!live || !run) return
+        if (!['done', 'failed', 'cancelled'].includes(run.status)) {
+          setFinding(run)
+          return
+        }
+        // A finished run is only worth surfacing while it is recent: a failed
+        // run, and a completed one that found nothing, both explain an empty
+        // list. A completed run with results would just repeat the list.
+        const finishedAt = Date.parse(run.finished_at)
+        const recent =
+          Number.isFinite(finishedAt) && Date.now() - finishedAt < 24 * 60 * 60 * 1000
+        const empty =
+          run.report?.reason === 'no_records' || run.report?.counts?.opportunities === 0
+        if (recent && (run.status === 'failed' || empty)) setFinding(run)
+      } catch {
+        /* the status route is orientation; the button still starts a run */
+      }
+    })()
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Typing in the search box should not fire a request per keystroke.
   useEffect(() => {
@@ -733,11 +895,23 @@ export default function OpportunitiesPage() {
   // dump hides: it makes 43,000 rows look like the answer. The selector still
   // offers the union for anyone who wants it.
   useEffect(() => {
-    if (campaignId) return
+    if (userPickedCampaignRef.current || campaignId) return
     const list = Array.isArray(campaigns.data) ? campaigns.data : []
     if (!list.length) return
-    const finished = list.find((c) => c.status === 'completed')
-    setCampaignId((finished || list[0]).id)
+    const finished = list.filter((c) => c.status === 'completed')
+    const countsKnown = finished.some((c) => campaignOpportunityCount(c) != null)
+    // When the rows carry a count, never open on a campaign whose search found
+    // nothing: take the newest completed one with results, and open on the
+    // union rather than on an empty list when none has any. Without counts the
+    // choice is provisional - the summary fetch below turns it away from an
+    // empty campaign once that is known.
+    const pick = countsKnown
+      ? finished.find((c) => (campaignOpportunityCount(c) ?? 0) > 0) || null
+      : finished[0] || list[0] || null
+    const pickId = pick?.id || ''
+    autoCampaignRef.current = pickId
+    setCampaignId(pickId)
+    setOffset(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaigns.data])
 
@@ -750,6 +924,31 @@ export default function OpportunitiesPage() {
     () => (campaignId ? api.get(`/opportunities/summary?campaign_id=${campaignId}`) : null),
     [campaignId, selectionNonce],
   )
+
+  // The auto-selected campaign turned out to have no opportunities. The list
+  // does not always carry a count, so this is only knowable once the summary
+  // arrives; move to the newest completed campaign that has results, or to the
+  // union, instead of leaving the seeker on an empty list. A campaign the
+  // seeker chose themselves is always left alone.
+  useEffect(() => {
+    if (userPickedCampaignRef.current) return
+    if (!campaignId || campaignId !== autoCampaignRef.current) return
+    const total = summary.data?.total
+    if (typeof total !== 'number' || total > 0) return
+    const list = Array.isArray(campaigns.data) ? campaigns.data : []
+    // A running campaign legitimately has no opportunities yet; only a
+    // finished one with nothing to show strands the seeker.
+    const picked = list.find((c) => c.id === campaignId)
+    if (picked?.status !== 'completed') return
+    const next = list.find(
+      (c) =>
+        c.id !== campaignId && c.status === 'completed' && (campaignOpportunityCount(c) ?? 0) > 0,
+    )
+    autoCampaignRef.current = next?.id || ''
+    setCampaignId(next?.id || '')
+    setOffset(0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summary.data, campaignId, campaigns.data])
 
   const query = useMemo(() => {
     const p = new URLSearchParams()
@@ -794,6 +993,14 @@ export default function OpportunitiesPage() {
   const filtersActive = Object.keys(EMPTY_FILTERS).some(
     (k) => String(filters[k] ?? '') !== String(EMPTY_FILTERS[k]),
   )
+
+  // A finished run that found nothing carries the explanation the empty list
+  // needs. Older runs have no report, so only an explicit zero or the
+  // backend's "no_records" marker triggers it.
+  const zeroResults =
+    finding?.status === 'done' &&
+    (finding.report?.reason === 'no_records' || finding.report?.counts?.opportunities === 0)
+  const emptySearch = zeroResults ? emptySearchSummary(finding.report) : null
 
   // FR-284: set_manual_order() writes positions 1..n for the ids it is given,
   // so a drag on page two would renumber over page one. Reordering is offered
@@ -917,13 +1124,33 @@ export default function OpportunitiesPage() {
     setActionError(null)
     try {
       const res = await api.post('/autopilot/start', {})
-      setFinding({
-        status: res?.already_running ? 'running' : 'running',
-        stage: 'composite',
-        stage_index: 0,
-        total_steps: 8,
+      // The start route reports a run, not a stage: a fresh run has not
+      // checkpointed yet, and an existing one is somewhere else entirely. So
+      // never invent a stage_index here - leave it unset until the status
+      // route says where the run actually is.
+      const startState = {
+        status: res?.status || 'running',
+        stage: res?.stage ?? null,
+        stage_index: res?.stage_index ?? null,
+        total_steps: res?.total_steps || 8,
         job_id: res?.job_id,
-      })
+      }
+      if (res?.already_running) {
+        // The start route only says a run exists; the status route carries
+        // its real stage. Without this the bar restarted at 0/8 for a run
+        // that was already at the collection stage.
+        try {
+          const status = await api.get('/autopilot/status')
+          const run = status?.run
+          if (run && (!startState.job_id || run.job_id === startState.job_id)) {
+            setFinding(run)
+            return
+          }
+        } catch {
+          /* fall back to what the start route did tell us; the poll fills in */
+        }
+      }
+      setFinding(startState)
     } catch (e) {
       setActionError(e)
     } finally {
@@ -966,6 +1193,9 @@ export default function OpportunitiesPage() {
       // Point the list at what is being built, so the result lands on screen
       // instead of behind the campaign filter the seeker never changed.
       if (id !== campaignId) {
+        // An explicit aim at one campaign: the empty-campaign fallback must
+        // not move it while the synthesis pass is still filling it.
+        userPickedCampaignRef.current = true
         setCampaignId(id)
         setOffset(0)
       }
@@ -1087,6 +1317,7 @@ export default function OpportunitiesPage() {
               <select
                 value={campaignId}
                 onChange={(e) => {
+                  userPickedCampaignRef.current = true
                   setCampaignId(e.target.value)
                   setOffset(0)
                 }}
@@ -1201,8 +1432,11 @@ export default function OpportunitiesPage() {
               <strong>{AUTOPILOT_STAGE[finding.stage] || 'Finding opportunities'}</strong>
               <div className="spacer" />
               <span className="small muted">
-                step {Math.min((finding.stage_index || 0) + 1, finding.total_steps || 8)} of{' '}
-                {finding.total_steps || 8}
+                {finding.stage_index != null
+                  ? `step ${Math.min(finding.stage_index + 1, finding.total_steps || 8)} of ${
+                      finding.total_steps || 8
+                    }`
+                  : `${finding.total_steps || 8} steps`}
               </span>
               {!['done', 'failed', 'cancelled'].includes(finding.status) && (
                 <button className="btn btn-sm btn-danger" onClick={cancelFind}>
@@ -1232,14 +1466,37 @@ export default function OpportunitiesPage() {
                 }}
               />
             </div>
-            {finding.status === 'done' && (
-              <p className="small muted" style={{ margin: '8px 0 0' }}>
-                {finding.report?.counts?.opportunities
-                  ? `${finding.report.counts.opportunities} opportunities in the new search.`
-                  : 'The search finished; the list below is refreshed.'}{' '}
-                Switch the campaign above to the new one to see it.
-              </p>
-            )}
+            {finding.status === 'done' &&
+              (zeroResults ? (
+                <div className="alert alert-warn" style={{ margin: '10px 0 0' }}>
+                  <Icon name="warning" />
+                  <div>
+                    <p style={{ margin: 0 }}>
+                      <strong>The search finished, but no opportunity passed your directives.</strong>{' '}
+                      {describeEmptySearch(emptySearch)}
+                    </p>
+                    {emptySearch.errors.length > 0 && (
+                      <ul className="small" style={{ margin: '6px 0 0 16px' }}>
+                        {emptySearch.errors.map((message, i) => (
+                          <li key={i}>{message}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="small muted" style={{ margin: '6px 0 0' }}>
+                      Check the campaign&apos;s sources or widen your directives, then run the
+                      search again. Earlier campaigns keep what they found; the selector above
+                      stays off the empty list.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="small muted" style={{ margin: '8px 0 0' }}>
+                  {finding.report?.counts?.opportunities
+                    ? `${finding.report.counts.opportunities} opportunities in the new search.`
+                    : 'The search finished; the list below is refreshed.'}{' '}
+                  Switch the campaign above to the new one to see it.
+                </p>
+              ))}
             {finding.status === 'failed' && (
               <p className="small" style={{ margin: '8px 0 0', color: 'var(--danger)' }}>
                 {finding.last_error || 'The search did not finish.'}
@@ -1370,7 +1627,10 @@ export default function OpportunitiesPage() {
           </Empty>
         )}
 
-        {!list.loading && !list.error && items.length === 0 && !filtersActive && (
+        {/* With a zero-result run the panel above already explains the empty
+            list; the generic "nothing has been ranked yet" would contradict
+            it. Dismissing the panel brings the first-run guidance back. */}
+        {!list.loading && !list.error && items.length === 0 && !filtersActive && !zeroResults && (
           <div style={{ padding: 18 }}>
             <FirstRun
               pathname="/opportunities"
