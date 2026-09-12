@@ -78,6 +78,45 @@ def test_the_challenge_check_survives_no_html() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Plausible-address filtering (FR-303)
+# ---------------------------------------------------------------------------
+
+
+def test_extraction_artifacts_are_not_plausible_addresses() -> None:
+    """The three junk tokens a live run put on the candidate list."""
+    assert patterns.is_plausible_address("career@init.de\\") is False
+    assert patterns.is_plausible_address("u003ecareer@init.de") is False
+    assert patterns.is_plausible_address("fa-loc@ion-.text") is False
+
+
+def test_other_implausible_shapes_are_refused() -> None:
+    assert patterns.is_plausible_address("a@acme.be") is False          # single character
+    assert patterns.is_plausible_address("jobs@acme-.be") is False      # label ends in "-"
+    assert patterns.is_plausible_address("jobs@acme.12") is False       # numeric TLD
+    assert patterns.is_plausible_address("no-at-sign.example") is False
+    assert patterns.is_plausible_address("jobs@acme.be%20") is False    # encoded text
+    assert patterns.is_plausible_address("") is False
+
+
+def test_published_addresses_are_plausible() -> None:
+    assert patterns.is_plausible_address("career@init.de") is True
+    assert patterns.is_plausible_address("jobs@dck.com") is True
+    assert patterns.is_plausible_address("info@ewor.com") is True
+    # Surrounding punctuation and quotes are not part of the address.
+    assert patterns.is_plausible_address("<career@init.de>") is True
+    assert patterns.is_plausible_address("\"jobs@dck.com\"") is True
+
+
+def test_addresses_in_text_drops_the_live_artifacts() -> None:
+    text = (
+        "mailto:career@init.de\\ mailto:u003ecareer@init.de "
+        "mailto:fa-loc@ion-.text career@init.de jobs@dck.com info@ewor.com"
+    )
+    found = [item.email for item in patterns.addresses_in_text(text)]
+    assert found == ["career@init.de", "jobs@dck.com", "info@ewor.com"]
+
+
+# ---------------------------------------------------------------------------
 # JSON-LD (schema.org)
 # ---------------------------------------------------------------------------
 

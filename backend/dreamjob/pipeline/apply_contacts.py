@@ -171,12 +171,20 @@ DEFAULT_TLDS: tuple[str, ...] = ("com",)
 
 #: Job boards, aggregators and applicant-tracking hosts.  An address on one of
 #: these is not the *employer's* domain, so it never becomes the domain the
-#: rest of the ladder spells addresses on.
+#: rest of the ladder spells addresses on.  The vendor list covers every board
+#: host :mod:`dreamjob.adapters.ats.detect` can name - including the rebrands a
+#: tenant board redirects to (Recruitee's ``tellent.com``, Personio's
+#: ``personio.com``) - because an address published on a board as boilerplate
+#: is the platform's, not the employer's (FR-303).
 AGGREGATOR_DOMAINS = frozenset(
     {
         "europa.eu", "ec.europa.eu", "eures.europa.eu", "arbeitnow.com", "arbeitnow.co.uk",
         "greenhouse.io", "lever.co", "workday.com", "myworkdayjobs.com", "smartrecruiters.com",
-        "personio.de", "recruitee.com", "teamtailor.com", "jobs.lever.co", "bamboohr.com",
+        "personio.de", "personio.com", "recruitee.com", "recruitee-cdn.com", "tellent.com",
+        "teamtailor.com", "teamtailor-cdn.com", "jobs.lever.co", "bamboohr.com",
+        "workable.com", "careers-page.com", "ashbyhq.com", "jobvite.com", "icims.com",
+        "successfactors.com", "sapsf.com", "sapsf.eu", "taleo.net", "softgarden.io",
+        "join.com", "homerun.co",
         "linkedin.com", "indeed.com", "monster.com", "stepstone.de", "vdab.be", "forem.be",
         "actiris.be", "jobat.be", "stepstone.be", "ictjob.be", "glassdoor.com", "xing.com",
         "example.com", "example.org", "domain.com", "email.com", "sentry.io", "wixpress.com",

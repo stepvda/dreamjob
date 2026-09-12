@@ -279,6 +279,128 @@ def test_the_most_common_vacancy_host_is_the_last_board_fallback() -> None:
     assert egress.requested == ["https://acme.jobs.example"]
 
 
+def test_a_board_vendors_own_address_never_attaches_to_the_employer() -> None:
+    """``privacy@personio.com`` is Personio's boilerplate, not the tenant's."""
+    company_id = _company("Acme Data BV", ats_vendor="personio", ats_slug="acme")
+    _vacancy(company_id)
+    board = (
+        "<title>Acme Data careers</title>"
+        "<p>Questions? jobs@acmedata.be</p>"
+        "<p>Privacy: privacy@personio.com</p>"
+    )
+    egress = _Egress({"acme.jobs.personio.de": board})
+    findings, domain, _note = asyncio.run(
+        contact_backup.harvest_backup_addresses(
+            {"company_id": company_id, "company_name": "Acme Data BV"},
+            egress=egress,
+            crawl_site=False,
+        )
+    )
+    emails = {finding.address.email for finding in findings}
+    assert "jobs@acmedata.be" in emails
+    assert "privacy@personio.com" not in emails
+    # The employer's own published address named the domain, vendor address and
+    # all.
+    assert domain == "acmedata.be"
+
+
+def test_a_vendors_address_in_a_stored_posting_is_dropped() -> None:
+    company_id = _company("Acme Data BV")
+    _vacancy(
+        company_id,
+        description="Solliciteer via jobs@acmedata.be; privacy@personio.com.",
+    )
+    findings, _domain, _note = asyncio.run(
+        contact_backup.harvest_backup_addresses(
+            {"company_id": company_id, "company_name": "Acme Data BV"}, egress=_Egress({})
+        )
+    )
+    assert [finding.address.email for finding in findings] == ["jobs@acmedata.be"]
+
+
+def test_only_vendor_domains_on_a_board_recover_nothing() -> None:
+    """A Recruitee board that only names Recruitee/Tellent yields no domain."""
+    company_id = _company("Acme Data BV", ats_vendor="recruitee", ats_slug="acme")
+    _vacancy(company_id)
+    board = (
+        "<title>Acme careers</title><p>Powered by Recruitee</p>"
+        "<a href='https://tellent.com/recruitee'>Recruitee is now Tellent</a>"
+        '<script type="application/ld+json">'
+        '{"@type":"Organization","url":"https://www.tellent.com/careers"}'
+        "</script>"
+    )
+    egress = _Egress({"acme.recruitee.com": board})
+    findings, domain, note = asyncio.run(
+        contact_backup.harvest_backup_addresses(
+            {"company_id": company_id, "company_name": "Acme Data BV"},
+            egress=egress,
+            crawl_site=True,
+        )
+    )
+    assert findings == []
+    assert domain is None
+    assert "no address found" in note
+    # ``crawl_site`` was on, yet nothing was fetched or spelled on tellent.com.
+    assert egress.requested == ["https://acme.recruitee.com/"]
+
+
+def test_a_non_vendor_address_beats_a_vendor_link_for_domain_recovery() -> None:
+    """The DCK case: ``jobs@dck.com`` names dck.com, never Recruitee's rebrand."""
+    company_id = _company("DCK Group", ats_vendor="recruitee", ats_slug="dckgroup")
+    _vacancy(company_id)
+    board = (
+        "<title>DCK Group careers</title>"
+        "<p>Apply: jobs@dck.com</p>"
+        "<a href='https://tellent.com/'>Recruitee is now Tellent</a>"
+        '<script type="application/ld+json">'
+        '{"@type":"Organization","url":"https://tellent.com/dckgroup"}'
+        "</script>"
+    )
+    home = "<title>DCK Group</title><body><p>DCK builds. Write jobs@dck.com.</p></body>"
+    egress = _Egress({"dckgroup.recruitee.com": board, "dck.com": home})
+    findings, domain, _note = asyncio.run(
+        contact_backup.harvest_backup_addresses(
+            {"company_id": company_id, "company_name": "DCK Group"},
+            egress=egress,
+            crawl_site=True,
+        )
+    )
+    assert domain == "dck.com"
+    emails = {finding.address.email for finding in findings}
+    assert "jobs@dck.com" in emails
+    assert not any("tellent.com" in email for email in emails)
+    # A recovered valid employer domain still yields its crawl and generics.
+    assert any(finding.address.method == patterns.METHOD_WEBSITE for finding in findings)
+    assert any(
+        finding.address.method == patterns.METHOD_PATTERN
+        and finding.address.email.endswith("@dck.com")
+        for finding in findings
+    )
+    assert any("dck.com" in url for url in egress.requested)
+
+
+def test_extraction_artifacts_never_reach_the_backup_findings() -> None:
+    company_id = _company("Acme Data BV", ats_vendor="greenhouse", ats_slug="acme")
+    _vacancy(company_id)
+    board = (
+        "<title>Acme careers</title>"
+        "<p>career@acmedata.be\\ u003ecareer@acmedata.be fa-loc@ion-.text</p>"
+        "<p>jobs@acmedata.be</p>"
+    )
+    egress = _Egress({"job-boards.greenhouse.io/acme": board})
+    findings, _domain, _note = asyncio.run(
+        contact_backup.harvest_backup_addresses(
+            {"company_id": company_id, "company_name": "Acme Data BV"},
+            egress=egress,
+            crawl_site=False,
+        )
+    )
+    emails = {finding.address.email for finding in findings}
+    assert "career@acmedata.be" in emails
+    assert "jobs@acmedata.be" in emails
+    assert not any("\\" in email or "u003" in email or "ion-" in email for email in emails)
+
+
 # ---------------------------------------------------------------------------
 # The ladder: backup only when the normal sources found nothing
 # ---------------------------------------------------------------------------

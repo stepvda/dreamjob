@@ -128,6 +128,63 @@ def _is_employer_address(address: patterns.FoundAddress) -> bool:
     return bool(usable_employer_domain(domain)) or domain in FREEMAIL_DOMAINS
 
 
+def _vendor_domain(domain: str | None) -> str:
+    """The board/aggregator domain an address host belongs to, or ``""``."""
+    from dreamjob.pipeline.apply_contacts import AGGREGATOR_DOMAINS  # noqa: PLC0415
+
+    value = (domain or "").strip().lower().lstrip(".")
+    if not value:
+        return ""
+    registrable = crawler.registrable_domain(value)
+    if value in AGGREGATOR_DOMAINS:
+        return value
+    if registrable in AGGREGATOR_DOMAINS:
+        return registrable
+    return ""
+
+
+def _known_employer_domain(company: dict[str, Any]) -> str:
+    """The employer's own domain already on the company row, if it has one.
+
+    This is the exemption the vendor filter uses: an address on a board's own
+    domain is dropped *unless* that domain is the employer's, which is the one
+    case where the board and the employer are the same organisation.
+    """
+    from dreamjob.pipeline.apply_contacts import usable_employer_domain  # noqa: PLC0415
+
+    for raw in (
+        company.get("domain"),
+        company.get("company_domain"),
+        company.get("careers_url"),
+    ):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if not value.lower().startswith(("http://", "https://", "//")):
+            value = f"https://{value}"
+        host = patterns.domain_of(value)
+        if not host:
+            continue
+        known = usable_employer_domain(crawler.registrable_domain(host) or host)
+        if known:
+            return known
+    return ""
+
+
+def _attachable(address: patterns.FoundAddress, employer_domain: str) -> bool:
+    """Whether an address may be attributed to the employer.
+
+    An address on a board or aggregator host is the platform's own boilerplate
+    - Personio's ``privacy@``, Greenhouse's ``help@`` - and attaching it to a
+    tenant would send the job seeker to the vendor.  The one exception is a
+    board host that *is* the employer's own domain, which
+    :func:`_known_employer_domain` can only say when the company record already
+    carries it.
+    """
+    vendor = _vendor_domain(address.domain)
+    return bool(not vendor or (employer_domain and vendor == employer_domain))
+
+
 def _url_strings(value: Any, depth: int = 0) -> list[str]:
     """Every URL-ish string in a JSON-LD node, links included."""
     if depth > 4:
@@ -213,6 +270,8 @@ def _stored_findings(rows: list[dict[str, Any]]) -> tuple[list[BackupFinding], s
                 source_url=source_url,
                 method=patterns.METHOD_STORED_DOCUMENT,
             ):
+                if not patterns.is_plausible_address(address.email):
+                    continue
                 if not _is_employer_address(address):
                     continue
                 findings.append(
@@ -327,9 +386,14 @@ async def _board_findings(
         pages += 1
         html = page.text
         text = crawler.extract_text(html, drop_chrome=False)
+        board = crawler.registrable_domain(urlparse(url).netloc)
+        page_addresses: list[patterns.FoundAddress] = []
         for address in patterns.addresses_in_text(
             f"{html}\n{text}", source_url=url, method=patterns.METHOD_ATS_BOARD
         ):
+            page_addresses.append(address)
+            if not patterns.is_plausible_address(address.email):
+                continue
             if _is_employer_address(address):
                 findings.append(
                     BackupFinding(
@@ -338,6 +402,9 @@ async def _board_findings(
                     )
                 )
         for address in patterns.jsonld_contacts(html, source_url=url):
+            page_addresses.append(address)
+            if not patterns.is_plausible_address(address.email):
+                continue
             if not _is_employer_address(address):
                 continue
             address.method = patterns.METHOD_ATS_BOARD
@@ -348,6 +415,17 @@ async def _board_findings(
                     "Published in the board's structured data (FR-303 ats_board)",
                 )
             )
+        # An address the board publishes is the strongest domain evidence it
+        # carries: ``jobs@dck.com`` names ``dck.com`` even when every link on
+        # the page points at a platform rebrand.  It outweighs the JSON-LD URLs
+        # and the ordinary links, and a vendor address - rejected by
+        # ``_employer_domain`` - can never name the employer.
+        for address in page_addresses:
+            if not patterns.is_plausible_address(address.email):
+                continue
+            domain = _employer_domain(f"https://{address.domain}")
+            if domain and domain != board:
+                domains[domain] += 4
         for domain, weight in _page_domains(html, url, company.get("company_name")):
             domains[domain] += weight
 
@@ -463,6 +541,18 @@ async def harvest_backup_addresses(
                 findings.extend(
                     await _crawl_findings(domain, company, egress=client, max_pages=max_pages)
                 )
+
+    # One last gate over every source: nothing an extraction turned into junk,
+    # and nothing that belongs to a board or aggregator the employer does not
+    # own - ``privacy@personio.com`` must not attach to a Personio tenant just
+    # because the board published it (FR-303).
+    employer_domain = _known_employer_domain(company)
+    findings = [
+        finding
+        for finding in findings
+        if patterns.is_plausible_address(finding.address.email)
+        and _attachable(finding.address, employer_domain)
+    ]
 
     findings = _dedupe(findings)
     counts = Counter(finding.address.method for finding in findings)

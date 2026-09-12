@@ -135,6 +135,53 @@ _OBFUSCATED_RE = re.compile(
 #: File extensions that look like addresses once an "@" sneaks into a filename.
 _NOT_A_DOMAIN = re.compile(r"\.(png|jpe?g|gif|svg|webp|css|js|json|xml|pdf|woff2?)$", re.I)
 
+#: Fragments that betray machine text rather than an address somebody wrote: an
+#: escaped HTML/JSON character, a percent-encoded one, or a stray backslash.
+#: None of them can occur in a dot-atom local part or a DNS label, so their
+#: presence means the token was cut out of markup and is not a mailbox.
+_ESCAPE_FRAGMENTS = ("\\", "%", "u003", "u0026", "&#")
+
+#: Local parts that are extraction leftovers, not a mailbox.  ``fa-loc`` is what
+#: a CSS ``local(...)`` token becomes once the ``@`` of an at-rule is read as an
+#: address separator, and a single character is never a professional mailbox.
+_NOISE_LOCAL_RE = re.compile(r"^(?:[A-Za-z0-9]|fa-loc|fa_loc)$", re.IGNORECASE)
+
+#: The shape DNS allows a domain: labels of ASCII letters and digits with inner
+#: hyphens - never ending in one - and a letters-only TLD of at least two.
+_DOMAIN_SHAPE_RE = re.compile(
+    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,24}$"
+)
+
+#: The shape a dot-atom local part has once quotes and spaces are excluded.
+_LOCAL_SHAPE_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,62}[A-Za-z0-9])?$")
+
+
+def is_plausible_address(value: str | None) -> bool:
+    """Whether a token is a plausible professional e-mail address (FR-303).
+
+    The input is scraped text, so the question is not RFC 5322 conformance but
+    whether the token looks like something a person published.  Surrounding
+    punctuation and quotes are dropped first; then a token carrying an escape
+    fragment (``\\``, ``%``, ``u003``, ``u0026``, ``&#``), an implausible local
+    part (single-character or ``fa-loc``) or a domain no DNS could hold (a label
+    ending in ``-``, a numeric TLD) is refused.  Public because the backup stage
+    applies the same judgement to the text of a board or a stored posting.
+    """
+    email = (value or "").strip().strip(".,;:<>()[]\"'`").lower()
+    if not email or email.count("@") != 1 or len(email) > 254:
+        return False
+    if any(fragment in email for fragment in _ESCAPE_FRAGMENTS):
+        return False
+    local, _, domain = email.partition("@")
+    if not _LOCAL_SHAPE_RE.fullmatch(local) or _NOISE_LOCAL_RE.fullmatch(local):
+        return False
+    if not _DOMAIN_SHAPE_RE.fullmatch(domain) or _NOT_A_DOMAIN.search(domain):
+        return False
+    if ".." in email:
+        return False
+    # Tracking pixels and Sentry DSNs are the usual false positives.
+    return not (len(local) > 40 and not any(c in local for c in "._-"))
+
 #: Pages worth reading for an address, in the order FR-303 lists them.  The
 #: list is wider than the contact pages alone: on corporate sites the address
 #: usually sits on the imprint, the privacy notice, the team page or the
@@ -474,16 +521,6 @@ class FoundAddress:
         }
 
 
-def _plausible(email: str) -> bool:
-    local, _, domain = email.partition("@")
-    if not local or not domain or _NOT_A_DOMAIN.search(domain):
-        return False
-    if len(email) > 254 or ".." in email:
-        return False
-    # Tracking pixels and Sentry DSNs are the usual false positives.
-    return not (len(local) > 40 and not any(c in local for c in "._-"))
-
-
 def extract_addresses(text: str, *, source_url: str = "", method: str = METHOD_WEBSITE,
                       domain: str | None = None) -> list[FoundAddress]:
     """Every address in one page, de-duplicated, optionally restricted to a domain."""
@@ -492,7 +529,7 @@ def extract_addresses(text: str, *, source_url: str = "", method: str = METHOD_W
 
     def add(email: str, context: str) -> None:
         email = email.strip().strip(".,;:<>()[]\"'").lower()
-        if not _plausible(email):
+        if not is_plausible_address(email):
             return
         if domain and not email.endswith("@" + domain.lower()):
             return
@@ -669,7 +706,7 @@ def jsonld_contacts(html: str, *, domain: str | None = None, source_url: str = "
             email = email.strip().lstrip("mailto:").strip()
             if domain and not email.lower().endswith("@" + domain.lower()):
                 continue
-            if not _plausible(email):
+            if not is_plausible_address(email):
                 continue
             name = context.get("name") if isinstance(context.get("name"), str) else None
             role = _jsonld_role(context)
@@ -1253,7 +1290,7 @@ def _parse_lookup_payload(
     out: list[FoundAddress] = []
     for candidate in candidates:
         email = str(candidate.get("email") or candidate.get("value") or "").strip().lower()
-        if not _plausible(email) or not email.endswith("@" + domain.lower()):
+        if not is_plausible_address(email) or not email.endswith("@" + domain.lower()):
             continue
         raw_score = candidate.get("confidence", candidate.get("score", 70))
         try:
