@@ -40,11 +40,7 @@ from dreamjob.adapters.base import NormalisedRecord, PlanItem, RawRecord, Source
 from dreamjob.db.connection import upsert_row, utcnow
 from dreamjob.egress.client import FetchResult, RateLimited, RobotsDisallowed
 from dreamjob.llm.client import LLMClient
-
-try:  # pragma: no cover - exercised implicitly; the fallback keeps tests portable
-    from selectolax.parser import HTMLParser
-except ImportError:  # pragma: no cover
-    HTMLParser = None  # type: ignore[assignment]
+from dreamjob.pipeline import html_dom
 
 log = logging.getLogger(__name__)
 
@@ -148,8 +144,8 @@ def html_to_text(markup: str | None) -> str:
     # consumers" into three lines and shattered every emphasised sentence in the
     # middle of a briefing.  Emphasis is not a paragraph.
     marked = _BLOCK_TAG_RE.sub(lambda m: "\n" + m.group(0), markup)
-    if HTMLParser is not None:
-        tree = HTMLParser(marked)
+    if html_dom.LXML_AVAILABLE:
+        tree = html_dom.Html(marked)
         for node in tree.css("script, style, noscript"):
             node.decompose()
         text = tree.body.text(separator="") if tree.body else tree.text(separator="")

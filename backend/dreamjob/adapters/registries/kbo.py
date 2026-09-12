@@ -41,6 +41,7 @@ from dreamjob.adapters.registries.common import (
     identity_record,
 )
 from dreamjob.egress.client import RobotsDisallowed
+from dreamjob.pipeline import html_dom
 from dreamjob.pipeline.dedup import company_similarity, tokens
 
 log = logging.getLogger(__name__)
@@ -209,14 +210,12 @@ _STATUS_MAP = {
 
 def _text(markup: str) -> str:
     """The page as readable lines; the register lays its facts out as label/value rows."""
-    try:
-        from selectolax.parser import HTMLParser  # noqa: PLC0415 - optional at import time
-
-        tree = HTMLParser(markup)
+    if html_dom.LXML_AVAILABLE:
+        tree = html_dom.Html(markup)
         for node in tree.css("script, style"):
             node.decompose()
         body = tree.body.text(separator="\n") if tree.body else tree.text(separator="\n")
-    except ImportError:  # pragma: no cover - selectolax is a declared dependency
+    else:  # pragma: no cover - lxml is a declared dependency
         body = _TAGS.sub("\n", markup)
     lines = [_WS.sub(" ", line).strip() for line in body.replace("\r", "").split("\n")]
     return "\n".join(line for line in lines if line)
@@ -639,12 +638,10 @@ class KBOAdapter(RegistryAdapter):
         to have ten digits.  The rows are read structurally instead, keeping the
         registered-entity/establishment-unit distinction the register draws.
         """
-        try:
-            from selectolax.parser import HTMLParser  # noqa: PLC0415 - optional at import time
-        except ImportError:  # pragma: no cover - selectolax is a declared dependency
+        if not html_dom.LXML_AVAILABLE:  # pragma: no cover - lxml is a declared dependency
             return []
         out: list[dict[str, Any]] = []
-        for row in HTMLParser(markup).css("tr"):
+        for row in html_dom.Html(markup).css("tr"):
             cells = row.css("td")
             if len(cells) < 5:
                 continue

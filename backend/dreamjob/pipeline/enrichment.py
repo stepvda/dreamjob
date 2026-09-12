@@ -45,13 +45,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, urlparse
 
-from selectolax.parser import HTMLParser
-
 import dreamjob.llm as llm_package
 from dreamjob.config import get_settings
 from dreamjob.db.repositories import enrichment as repo
 from dreamjob.egress.client import EgressClient, RobotsDisallowed, RobotsUnavailable
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError
+from dreamjob.pipeline import html_dom
 from dreamjob.pipeline.identity_match import (
     CONFIRMED,
     ProfileAnchors,
@@ -478,7 +477,7 @@ def parse_ddg_results(html: str, query: str = "") -> list[SearchHit]:
     with a challenge modal instead of results - a silent empty list would look
     like "this person has no online presence", which is a very different fact.
     """
-    tree = HTMLParser(html)
+    tree = html_dom.Html(html)
     if tree.css_first(".anomaly-modal__title") or "bots use DuckDuckGo too" in html:
         raise SearchUnavailable("DuckDuckGo served a bot-check page")
 
@@ -533,7 +532,7 @@ async def duckduckgo_search(
 
 
 def page_text(html: str, limit: int = MAX_PAGE_CHARS) -> str:
-    tree = HTMLParser(html)
+    tree = html_dom.Html(html)
     tree.strip_tags(["script", "style", "noscript", "svg", "template"])
     body = tree.body or tree.root
     text = body.text(separator=" ", strip=True) if body else ""
@@ -541,13 +540,13 @@ def page_text(html: str, limit: int = MAX_PAGE_CHARS) -> str:
 
 
 def page_title(html: str) -> str:
-    node = HTMLParser(html).css_first("title")
+    node = html_dom.Html(html).css_first("title")
     return node.text(strip=True)[:300] if node else ""
 
 
 def portrait_url(html: str, base_url: str) -> str | None:
     """The one image on a page most likely to be a photo of its subject."""
-    tree = HTMLParser(html)
+    tree = html_dom.Html(html)
     meta = tree.css_first('meta[property="og:image"]') or tree.css_first('meta[name="og:image"]')
     if meta and meta.attributes.get("content"):
         return _absolutise(meta.attributes["content"], base_url)

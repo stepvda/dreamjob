@@ -46,11 +46,7 @@ from dreamjob.adapters.base import (
 )
 from dreamjob.adapters.query_errors import UnusableQuery
 from dreamjob.egress.client import EgressClient, RobotsDisallowed
-
-try:  # pragma: no cover - the fallback keeps unit tests importable everywhere
-    from selectolax.parser import HTMLParser
-except ImportError:  # pragma: no cover
-    HTMLParser = None  # type: ignore[assignment]
+from dreamjob.pipeline import html_dom
 
 log = logging.getLogger(__name__)
 
@@ -362,13 +358,13 @@ _CHROME_TAGS = ("nav", "header", "footer", "aside")
 
 
 def extract_text(html: str, *, drop_chrome: bool = True) -> str:
-    """Readable text of a page, with navigation chrome removed (selectolax)."""
+    """Readable text of a page, with navigation chrome removed (lxml)."""
     if not html:
         return ""
-    if HTMLParser is None:  # pragma: no cover - selectolax is a hard dependency
+    if not html_dom.LXML_AVAILABLE:  # pragma: no cover - lxml is a declared dependency
         text = re.sub(r"<[^>]+>", " ", html)
         return _tidy(text)
-    tree = HTMLParser(html)
+    tree = html_dom.Html(html)
     for tag in _STRIP_TAGS:
         for node in tree.css(tag):
             node.decompose()
@@ -392,10 +388,10 @@ def _tidy(text: str) -> str:
 
 
 def page_title(html: str) -> str:
-    if HTMLParser is None or not html:  # pragma: no cover
+    if not html_dom.LXML_AVAILABLE or not html:  # pragma: no cover
         match = re.search(r"<title[^>]*>(.*?)</title>", html or "", re.IGNORECASE | re.DOTALL)
         return _tidy(match.group(1)) if match else ""
-    node = HTMLParser(html).css_first("title")
+    node = html_dom.Html(html).css_first("title")
     return _tidy(node.text()) if node is not None else ""
 
 
@@ -404,13 +400,13 @@ def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
     if not html:
         return []
     out: dict[str, str] = {}
-    if HTMLParser is None:  # pragma: no cover
+    if not html_dom.LXML_AVAILABLE:  # pragma: no cover
         for match in re.finditer(r'href=["\']([^"\']+)["\']', html):
             url = normalise_url(match.group(1), base_url)
             if url:
                 out.setdefault(url, "")
         return list(out.items())
-    for node in HTMLParser(html).css("a"):
+    for node in html_dom.Html(html).css("a"):
         href = (node.attributes or {}).get("href")
         url = normalise_url(href or "", base_url)
         if not url:
@@ -423,10 +419,10 @@ def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
 
 def discover_feed_links(html: str, base_url: str) -> list[str]:
     """``<link rel="alternate">`` RSS/Atom feeds declared by the page."""
-    if HTMLParser is None or not html:  # pragma: no cover
+    if not html_dom.LXML_AVAILABLE or not html:  # pragma: no cover
         return []
     feeds: list[str] = []
-    for node in HTMLParser(html).css("link"):
+    for node in html_dom.Html(html).css("link"):
         attrs = node.attributes or {}
         rel = (attrs.get("rel") or "").lower()
         mime = (attrs.get("type") or "").lower()
@@ -441,9 +437,9 @@ def discover_feed_links(html: str, base_url: str) -> list[str]:
 
 
 def meta_description(html: str) -> str:
-    if HTMLParser is None or not html:  # pragma: no cover
+    if not html_dom.LXML_AVAILABLE or not html:  # pragma: no cover
         return ""
-    tree = HTMLParser(html)
+    tree = html_dom.Html(html)
     for selector in ('meta[name="description"]', 'meta[property="og:description"]'):
         node = tree.css_first(selector)
         if node is not None:
@@ -692,12 +688,12 @@ _ORG_TYPES = {
 
 def organisation_jsonld(html: str) -> list[dict]:
     """schema.org ``Organization`` blocks embedded in the page."""
-    if HTMLParser is None or not html:  # pragma: no cover
+    if not html_dom.LXML_AVAILABLE or not html:  # pragma: no cover
         return []
     import json  # noqa: PLC0415 - only needed on pages that carry JSON-LD
 
     found: list[dict] = []
-    for node in HTMLParser(html).css('script[type="application/ld+json"]'):
+    for node in html_dom.Html(html).css('script[type="application/ld+json"]'):
         raw = node.text() or ""
         if not raw.strip():
             continue
