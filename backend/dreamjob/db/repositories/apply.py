@@ -526,6 +526,7 @@ def all_companies_for_contact(
     *,
     job_seeker_id: str | None = None,
     include_covered: bool = False,
+    ignore_backoff: bool = False,
     order: str = "vacancies",
 ) -> list[dict[str, Any]]:
     """Every company with no usable contact, for the ``scope='all'`` sweep (FR-301).
@@ -551,6 +552,15 @@ def all_companies_for_contact(
     already have somebody to write to and ignores the freshness backoff, so a
     caller can explicitly re-check them.  ``limit`` is therefore the only
     ceiling besides ``max_companies`` in the caller.
+
+    ``ignore_backoff=True`` decouples the no-contact filter from the freshness
+    window: companies that still have no usable contact are returned even when
+    their verdict was written inside :data:`ALL_COMPANIES_FRESHNESS_DAYS`, while
+    companies that already have somebody to write to stay excluded.  That is
+    the pool a caller wants when every remaining company was attempted today
+    and the backoff alone is what makes ``scope='all'`` return nothing; the
+    covered-companies rule and the freshness rule are otherwise inseparable
+    because ``include_covered`` turns both off at once.
 
     The row shape and the usable-contact predicate are deliberately identical to
     :func:`companies_needing_contact`, so the ladder receives the same company
@@ -585,13 +595,16 @@ def all_companies_for_contact(
     # ``include_covered`` is the refresh: companies with a contact come back and
     # the freshness backoff is off, because the caller is asking for a re-walk.
     # Without it, a company whose verdict is younger than the window is not a
-    # company this sweep has anything new to say about.
+    # company this sweep has anything new to say about - unless the caller asked
+    # for ``ignore_backoff``, which re-opens exactly that window while keeping
+    # the no-contact filter.
     covered = ""
     freshness = ""
     if not include_covered:
         covered = " AND co.id NOT IN (SELECT company_id FROM covered)"
-        freshness = " AND (r.company_id IS NULL OR r.resolved_at < ?)"
-        params.append(_stale_before(ALL_COMPANIES_FRESHNESS_DAYS))
+        if not ignore_backoff:
+            freshness = " AND (r.company_id IS NULL OR r.resolved_at < ?)"
+            params.append(_stale_before(ALL_COMPANIES_FRESHNESS_DAYS))
 
     sql = f"""
         {covered_cte}

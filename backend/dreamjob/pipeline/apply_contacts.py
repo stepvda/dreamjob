@@ -1139,6 +1139,10 @@ class ApplyContactsReport:
     #: ``shortlist`` counts vacancies; ``all`` counts companies.  Recorded so a
     #: checkpoint decoded long after the run says which target it was given.
     scope: str = "shortlist"
+    #: Whether this pass ignored :data:`apply.ALL_COMPANIES_FRESHNESS_DAYS`.
+    #: Recorded for the same reason ``scope`` is: a report read long after the
+    #: run must say which pool the sweep was given, not just what it found.
+    retry_recent: bool = False
     already_covered: int = 0
     shortfall: int = 0
     companies_visited: int = 0
@@ -1181,6 +1185,7 @@ class ApplyContactsReport:
             "job_seeker_id": self.job_seeker_id,
             "requested": self.requested,
             "scope": self.scope,
+            "retry_recent": self.retry_recent,
             "already_covered": self.already_covered,
             "shortfall": self.shortfall,
             "companies_visited": self.companies_visited,
@@ -1277,6 +1282,7 @@ async def ensure_apply_contacts(
     allow_generic: bool = True,
     backup: bool = False,
     refresh: bool = False,
+    retry_recent: bool = False,
     order: str = "vacancies",
     skip_company_ids: Collection[str] | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
@@ -1300,6 +1306,10 @@ async def ensure_apply_contacts(
     next, so a repeated sweep spends its budget on new companies instead of
     re-walking the ones it just walked.  ``refresh`` ignores that backoff and
     includes companies that already have a contact, so they are re-checked;
+    ``retry_recent`` ignores the backoff *without* including covered companies,
+    which is the pool a caller wants when every company still lacking a contact
+    was attempted within the window - the backoff then hides the whole pool,
+    but a refresh would also spend the pass on companies that need nothing.
     ``max_companies`` caps the work list either way.
 
     ``order`` is ``vacancies`` by default because ``limit`` is: a target
@@ -1344,6 +1354,7 @@ async def ensure_apply_contacts(
         job_seeker_id=job_seeker_id,
         requested=limit,
         scope=scope,
+        retry_recent=retry_recent,
         already_covered=int(covered_now["with_contact"]),
     )
 
@@ -1357,6 +1368,7 @@ async def ensure_apply_contacts(
             ceiling + len(skip),
             job_seeker_id=job_seeker_id,
             include_covered=refresh,
+            ignore_backoff=retry_recent,
             order=order,
         )
         if skip:

@@ -558,6 +558,17 @@ async def _phase_contacts() -> dict[str, Any]:
     discovery walks companies that have nobody at all, which is how the
     companies the discover phase adds get contacts too.  Alternating is why
     the cycle does both instead of one starving the other.
+
+    The discovery ticks alternate once more, on ``retry_recent``.  A normal
+    discovery tick respects the seven-day freshness backoff
+    (:data:`apply.ALL_COMPANIES_FRESHNESS_DAYS`), which is what keeps a sweep
+    from re-walking the companies the previous one just judged; but on a corpus
+    where every company still lacking a contact was attempted inside the
+    window, that backoff selects nothing at all and the phase makes no
+    progress.  Every second discovery tick therefore sets ``retry_recent=True``
+    - re-walking the recent no-contact verdicts while still excluding covered
+    companies - so the loop works through that pool without hammering it on
+    every cycle.
     """
     running = _contact_job_running()
     if running:
@@ -567,6 +578,7 @@ async def _phase_contacts() -> dict[str, Any]:
         tick = int(_setting(SETTING_CONTACTS_TICK, 0) or 0)
     except (TypeError, ValueError):
         tick = 0
+    retry_recent = False
     if tick % 2 == 0:
         kind = contact_email_backfill.BACKFILL_JOB_KIND
         options = {
@@ -582,6 +594,8 @@ async def _phase_contacts() -> dict[str, Any]:
         estimated = max(60, min(CONTACT_LIMIT, 1000) * 2)
     else:
         kind = apply_contacts.DISCOVERY_JOB_KIND
+        # Discovery runs on odd ticks; among those, every second one retries.
+        retry_recent = (tick // 2) % 2 == 1
         options = {
             "limit": CONTACT_LIMIT,
             "scope": "all",
@@ -591,6 +605,7 @@ async def _phase_contacts() -> dict[str, Any]:
             "derive_domains": True,
             "allow_generic": True,
             "refresh": False,
+            "retry_recent": retry_recent,
             "order": "vacancies",
             "backup_methods": True,
         }
@@ -599,7 +614,13 @@ async def _phase_contacts() -> dict[str, Any]:
 
     job_id = await _launch_job(kind, options, estimated_seconds=estimated)
     _store(SETTING_CONTACTS_TICK, tick + 1)
-    return {"mode": mode, "job_kind": kind, "job_id": job_id, "limit": CONTACT_LIMIT}
+    return {
+        "mode": mode,
+        "job_kind": kind,
+        "job_id": job_id,
+        "limit": CONTACT_LIMIT,
+        "retry_recent": retry_recent,
+    }
 
 
 # ---------------------------------------------------------------------------

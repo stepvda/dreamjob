@@ -5,9 +5,12 @@ Runs entirely against a temporary SQLite file; no network and no LLM calls.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import secrets
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -365,6 +368,53 @@ def test_dashboard_of_another_seeker_is_not_reachable(client: TestClient) -> Non
     assert other.json()["is_admin"] is False
     assert client.get(f"/api/admin/campaigns/{ids['campaign_id']}/dashboard").status_code == 404
     assert client.get("/api/admin/overview").status_code == 403
+
+
+def test_continuous_run_schedules_the_phase_and_returns_immediately(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manual tick must not hold the HTTP request for the phase (FR-161).
+
+    Live, ``POST /api/admin/continuous/run`` awaited a contacts phase and
+    blocked the request for 323,881 ms, which the browser read as a timeout.
+    The route now schedules the phase on the server loop and returns 202; the
+    outcome lands in ``continuous.last_report``, which the admin tab polls.
+    """
+    _register(client)
+    from dreamjob.pipeline import continuous
+
+    started = threading.Event()
+    release = threading.Event()
+
+    async def _slow_phase(*, force: bool = False, phase: str | None = None) -> dict:
+        started.set()
+        deadline = time.monotonic() + 3.0
+        while not release.is_set() and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        return {"phase": phase or "score"}
+
+    monkeypatch.setattr(continuous, "run_phase", _slow_phase)
+
+    began = time.monotonic()
+    response = client.post("/api/admin/continuous/run", json={"phase": "score"})
+    elapsed = time.monotonic() - began
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["scheduled"] is True
+    assert body["phase"] == "score"
+    assert body["at"]
+    assert elapsed < 1.5, "the request waited for the phase instead of scheduling it"
+    assert started.wait(timeout=5), "the phase was never scheduled"
+    assert not release.is_set(), "the response returned only after the phase finished"
+
+    trail = client.get(
+        "/api/admin/audit", params={"action": "admin.continuous_run"}
+    ).json()
+    assert any(e["action"] == "admin.continuous_run" for e in trail)
+
+    release.set()
+    time.sleep(0.2)  # let the background task finish before the app shuts down
 
 
 def test_prohibited_source_needs_acknowledgement_before_it_can_be_enabled(

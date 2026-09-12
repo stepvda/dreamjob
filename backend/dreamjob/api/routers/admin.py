@@ -18,6 +18,7 @@ Four surfaces:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -446,11 +447,26 @@ def set_continuous(
     return state
 
 
-@router.post("/continuous/run")
+#: Strong references to the "run now" phases still in flight.  ``create_task``
+#: alone does not keep a task alive and a phase can take minutes, so the set is
+#: what stops the interpreter from collecting a running tick; the done callback
+#: drops it again.
+_BACKGROUND_RUNS: set[asyncio.Task] = set()
+
+
+@router.post("/continuous/run", status_code=status.HTTP_202_ACCEPTED)
 async def run_continuous_phase(
     payload: ContinuousRunIn | None = None, admin: CurrentSeeker = Depends(current_admin)
 ) -> dict:
-    """Run one phase now and return its report (administrator's manual tick)."""
+    """Schedule one phase now and return immediately (administrator's manual tick).
+
+    The phase itself can take minutes - a contacts pass crawls sites and an
+    enrich phase drives the model - and awaiting it here blocked the HTTP
+    request for 323,881 ms on the live installation, which the browser read as
+    a timeout.  The phase therefore runs in the background on the server loop;
+    its outcome lands in ``continuous.last_report`` and the admin tab, which
+    already polls ``GET /api/admin/continuous``, shows it when it finishes.
+    """
     from dreamjob.pipeline import continuous  # noqa: PLC0415
 
     body = payload or ContinuousRunIn()
@@ -459,19 +475,19 @@ async def run_continuous_phase(
             status.HTTP_400_BAD_REQUEST,
             f"phase must be one of {', '.join(continuous.PHASES)}",
         )
-    report = await continuous.run_phase(force=body.force, phase=body.phase)
+    phase = body.phase or continuous._current_phase()
+    at = utcnow()
+    task = asyncio.create_task(continuous.run_phase(force=body.force, phase=body.phase))
+    _BACKGROUND_RUNS.add(task)
+    task.add_done_callback(_BACKGROUND_RUNS.discard)
     record_audit(
         "admin.continuous_run",
         "app_setting",
         None,
         seeker_id=admin.id,
-        detail={
-            "phase": body.phase,
-            "force": body.force,
-            "outcome": report.get("phase") or report.get("skipped") or report.get("deferred"),
-        },
+        detail={"phase": body.phase, "force": body.force, "outcome": "scheduled"},
     )
-    return report
+    return {"scheduled": True, "phase": phase, "at": at}
 
 
 # ---------------------------------------------------------------------------

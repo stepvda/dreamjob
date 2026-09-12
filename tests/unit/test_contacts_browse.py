@@ -875,6 +875,133 @@ def test_scope_all_visits_every_company_without_early_stop(
     assert set(seen) == {ids["company_id"], ids["empty_company_id"]}
 
 
+def test_all_companies_for_contact_ignore_backoff_retries_the_recent_no_contact_pool() -> None:
+    """``ignore_backoff`` re-opens the freshness window, not the covered set.
+
+    The live corpus had 1,989 companies with no usable contact and every one of
+    them was resolved inside the seven-day window, so the default sweep
+    selected nothing at all.  The narrow control is what lets a caller re-walk
+    exactly that pool while still leaving the companies that already have
+    somebody to write to alone.
+    """
+    ids = _seed()
+    apply_repo.record_resolution(
+        ids["company_id"],
+        {"status": "unreachable", "reason": "no address survived FR-304"},
+    )
+    assert ids["company_id"] not in {
+        row["company_id"] for row in apply_repo.all_companies_for_contact(50)
+    }
+
+    retried = {
+        row["company_id"]: row
+        for row in apply_repo.all_companies_for_contact(50, ignore_backoff=True)
+    }
+    assert ids["company_id"] in retried
+    assert retried[ids["company_id"]]["resolution_status"] == "unreachable"
+
+    # A usable contact still keeps a company out, backoff or no backoff.
+    _add_contact(
+        ids["empty_company_id"], "hr@no-vacancy.example",
+        method=patterns.METHOD_WEBSITE, validation="valid",
+    )
+    after = {
+        row["company_id"]
+        for row in apply_repo.all_companies_for_contact(50, ignore_backoff=True)
+    }
+    assert ids["company_id"] in after
+    assert ids["empty_company_id"] not in after
+
+    # ``include_covered`` remains the only way back to a covered company.
+    refreshed = {
+        row["company_id"]
+        for row in apply_repo.all_companies_for_contact(50, include_covered=True)
+    }
+    assert ids["empty_company_id"] in refreshed
+
+
+def test_retry_recent_widens_the_all_scope_without_including_covered_companies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pipeline seam: ``retry_recent`` reaches the selector and the report."""
+    ids = _seed()
+    apply_repo.record_resolution(
+        ids["company_id"],
+        {"status": "unreachable", "reason": "no address survived FR-304"},
+    )
+    seen: list[str] = []
+
+    async def _fake_resolve(company: dict, **kwargs: object) -> apply_pipeline.CompanyOutcome:
+        seen.append(company["company_id"])
+        return apply_pipeline.CompanyOutcome(
+            company_id=company["company_id"],
+            company_name=company["company_name"],
+            vacancy_count=int(company.get("vacancy_count") or 0),
+            status="unreachable",
+            reason="still nothing",
+        )
+
+    monkeypatch.setattr(apply_pipeline, "resolve_company", _fake_resolve)
+    calls: list[dict] = []
+    real = apply_repo.all_companies_for_contact
+
+    def _recording(*args: object, **kwargs: object) -> list[dict]:
+        calls.append(dict(kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(apply_pipeline.repo, "all_companies_for_contact", _recording)
+
+    normal = asyncio.run(
+        apply_pipeline.ensure_apply_contacts(
+            ids["seeker_id"], limit=50, scope="all", crawl_site=False, derive_domains=False
+        )
+    )
+    assert calls[-1]["ignore_backoff"] is False
+    assert ids["company_id"] not in seen
+    assert ids["empty_company_id"] in seen
+    assert normal.retry_recent is False
+    assert normal.as_dict()["retry_recent"] is False
+
+    seen.clear()
+    retried = asyncio.run(
+        apply_pipeline.ensure_apply_contacts(
+            ids["seeker_id"], limit=50, scope="all", retry_recent=True,
+            crawl_site=False, derive_domains=False,
+        )
+    )
+    assert calls[-1]["ignore_backoff"] is True
+    assert ids["company_id"] in seen
+    assert retried.retry_recent is True
+    assert retried.as_dict()["retry_recent"] is True
+
+
+def test_contacts_missing_email_requires_a_company() -> None:
+    """A company-less row is not backfill work: the pass resolves via a domain.
+
+    The live corpus held 145 such rows; every run selected them only to report
+    ``skipped_no_company``, which is noise in the report and a pointless read.
+    """
+    ids = _seed()
+    orphan = insert_row(
+        "contact",
+        {"company_id": None, "full_name": "Orphan", "source": "test", "collected_at": utcnow()},
+    )
+    empty = insert_row(
+        "contact",
+        {
+            "company_id": ids["company_id"],
+            "full_name": "No Address",
+            "source": "test",
+            "collected_at": utcnow(),
+        },
+    )
+
+    rows = repo.contacts_missing_email(50)
+    assert [row["id"] for row in rows] == [empty]
+    assert repo.contacts_missing_email_count() == 1
+    assert orphan not in {row["id"] for row in rows}
+
+
 # ---------------------------------------------------------------------------
 # FR-303/FR-304: the materialised coverage figures match a brute-force scan
 # ---------------------------------------------------------------------------

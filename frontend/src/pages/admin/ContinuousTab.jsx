@@ -206,6 +206,7 @@ export default function ContinuousTab() {
   const [actionError, setActionError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [report, setReport] = useState(null)
+  const [scheduled, setScheduled] = useState(null)
   const [phase, setPhase] = useState('')
   const [draftInterval, setDraftInterval] = useState('')
   const [syncedFrom, setSyncedFrom] = useState(null)
@@ -309,6 +310,7 @@ export default function ContinuousTab() {
     setBusy(true)
     setActionError(null)
     setReport(null)
+    setScheduled(null)
     // Deliberately not `mutating`: a phase can take minutes and the poll
     // should keep the counters moving while it does. Only the PUT races the
     // status endpoint, so only the PUT pauses the poll.
@@ -316,7 +318,12 @@ export default function ContinuousTab() {
       const body = { force: true }
       if (phase) body.phase = phase
       const result = await api.post('/admin/continuous/run', body)
-      if (alive.current) setReport(result)
+      if (alive.current) {
+        // The API schedules the phase and answers 202 immediately; the outcome
+        // lands in the polled status. (Older builds returned the report.)
+        if (result?.scheduled) setScheduled(result)
+        else setReport(result)
+      }
     } catch (err) {
       if (alive.current) setActionError(err)
     } finally {
@@ -535,6 +542,13 @@ export default function ContinuousTab() {
           It uses the shared job pool: a heavy collection or contacts job defers it rather than
           letting two runs compete.
         </p>
+
+        {scheduled && (
+          <p className="small" style={{ marginBottom: 0 }}>
+            {(PHASE_LABELS[scheduled.phase] || scheduled.phase || 'The phase')} started in the
+            background — watch the phase, last report and totals above update as it runs.
+          </p>
+        )}
 
         {report && (
           <div className="cont-run-result">

@@ -99,13 +99,18 @@ class DiscoverAllRequest(BaseModel):
     ``scope``; it is most useful with ``all``, where the pool is the whole
     company table.
 
-    ``refresh`` is the only control over the ``all`` scope's freshness backoff:
+    ``refresh`` is the main control over the ``all`` scope's freshness backoff:
     a company whose last verdict is younger than
     :data:`~dreamjob.db.repositories.apply.ALL_COMPANIES_FRESHNESS_DAYS` is
     normally skipped, and ``refresh=true`` re-walks it anyway (and includes
     companies that already have a contact).  In the ``shortlist`` scope it
     keeps its original meaning - re-check a company whose verdict is older than
     :data:`~dreamjob.pipeline.apply_contacts.RESOLUTION_MAX_AGE_DAYS`.
+
+    ``retry_recent`` is the narrower control for the same window: it re-walks
+    companies whose verdict is recent but which still have no usable contact,
+    and keeps excluding companies that already have somebody to write to.  It
+    is the pool the continuous cycle alternates into its discovery ticks.
     """
 
     limit: int = Field(default=500, ge=1, le=5000)
@@ -117,6 +122,7 @@ class DiscoverAllRequest(BaseModel):
     derive_domains: bool = True
     allow_generic: bool = True
     refresh: bool = False
+    retry_recent: bool = False
     order: str = Field(default="vacancies", pattern="^(vacancies|recency)$")
     backup_methods: bool = False
 

@@ -1385,6 +1385,30 @@ def test_the_discovery_worker_resumes_from_the_visited_checkpoint(
     assert ctx.progress_calls[-1] == (1, 1)
 
 
+def test_the_discovery_worker_keeps_retry_recent_from_the_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed sweep keeps the option the request stored (NFR-401)."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    captured: dict[str, Any] = {}
+    real = pipeline.ensure_apply_contacts
+
+    async def _capture(job_seeker_id: str, limit: int = 500, **kwargs: Any):
+        captured.update(kwargs)
+        return await real(job_seeker_id, limit, **kwargs)
+
+    monkeypatch.setattr(pipeline, "ensure_apply_contacts", _capture)
+    checkpoint = _worker_checkpoint()
+    checkpoint["options"]["scope"] = "all"
+    checkpoint["options"]["retry_recent"] = True
+
+    _run_discovery_worker(_WorkerCtx(seed, checkpoint))
+
+    assert captured["scope"] == "all"
+    assert captured["retry_recent"] is True
+
+
 def test_the_worker_progress_counts_from_the_visited_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

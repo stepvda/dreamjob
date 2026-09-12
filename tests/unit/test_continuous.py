@@ -484,6 +484,45 @@ def test_contacts_phase_starts_bounded_backfill_then_discovery(
     assert options["allow_smtp"] is False
 
 
+def test_contacts_phase_alternates_the_retry_recent_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every second discovery tick ignores the freshness backoff.
+
+    The live loop reported ``requested: 0`` because all 1,989 no-contact
+    companies had been attempted inside the seven-day window, so a
+    backoff-respecting discovery selected nothing.  Alternating retries keeps
+    that pool moving without re-walking it on every cycle.
+    """
+    async def fake_start(job_id, worker=None):
+        return None
+
+    monkeypatch.setattr(runner, "start", fake_start)
+
+    reports = [
+        asyncio.run(continuous.run_phase(force=True, phase="contacts"))
+        for _ in range(4)
+    ]
+
+    assert [report["mode"] for report in reports] == [
+        "backfill", "discovery", "backfill", "discovery"
+    ]
+    assert [report["retry_recent"] for report in reports] == [False, False, False, True]
+
+    discovery_options = []
+    for report in reports:
+        row = query_one("SELECT checkpoint FROM job_run WHERE id = ?", (report["job_id"],))
+        options = (from_json(row["checkpoint"], {}) or {}).get("options") or {}
+        if report["mode"] == "discovery":
+            discovery_options.append(options)
+    assert [options["retry_recent"] for options in discovery_options] == [False, True]
+    for options in discovery_options:
+        assert options["scope"] == "all"
+        assert options["limit"] == continuous.CONTACT_LIMIT
+        assert options["backup_methods"] is True
+        assert options["crawl_site"] is True
+
+
 def test_contacts_phase_gives_way_to_a_running_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

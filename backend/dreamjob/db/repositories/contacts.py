@@ -298,8 +298,19 @@ _MISSING_EMAIL_ORDERS: dict[str, str] = {
 def _missing_email_clauses(
     *, job_seeker_id: str | None, company_id: str | None
 ) -> tuple[list[str], list[Any]]:
-    """The WHERE clause every missing-e-mail query shares (FR-344, NFR-303)."""
-    clauses = ["(c.email IS NULL OR c.email = '')", "c.objected = 0"]
+    """The WHERE clause every missing-e-mail query shares (FR-344, NFR-303).
+
+    A row with no company is not selectable: the pass resolves the e-mail
+    through the company's domain and convention, so a company-less row has
+    nothing to work from.  The live corpus held 145 such rows and every run
+    selected them only to report them as impossible; the predicate belongs in
+    the work list, not in the pass' skip counter.
+    """
+    clauses = [
+        "(c.email IS NULL OR c.email = '')",
+        "c.objected = 0",
+        "c.company_id IS NOT NULL AND c.company_id != ''",
+    ]
     params: list[Any] = []
     if company_id:
         clauses.append("c.company_id = ?")

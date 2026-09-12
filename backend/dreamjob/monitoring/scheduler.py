@@ -372,10 +372,11 @@ async def _run_continuous() -> dict[str, Any]:
 
     The cycle's own interval is configurable by an administrator, so this task
     ticks every five minutes and the engine decides whether a phase is due.
-    The flag is read first (one small setting), then the phase runs; a phase
-    defers itself while a collection or contacts-discovery job owns the
-    registries, the egress and the single writer (FR-185, NFR-102), and a
-    deferred phase is not stamped, so the next tick tries again.
+    The flag is read first (one small setting), then the phase runs; each
+    phase defers only on the jobs it would stack on - a running collection
+    defers ``discover`` but no longer ``contacts``, ``enrich`` or ``score``
+    (FR-185, NFR-102) - and a deferred phase is not stamped, so the next tick
+    tries again.
     """
     from dreamjob.pipeline import continuous  # noqa: PLC0415 - avoids an import cycle
 
