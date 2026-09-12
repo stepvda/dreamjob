@@ -4,7 +4,9 @@
  *
  * They exist so background collection is visible while the user works
  * somewhere else: the numbers are polled from `/api/overview/counters` and
- * grow as the corpus does. Nothing is rendered before the first successful
+ * grow as the corpus does. They are shown exactly (thousands separators, no
+ * rounding) so a single new record is visible, and polled fresh so the
+ * increase appears promptly. Nothing is rendered before the first successful
  * load, and nothing after a 401 - a signed-out or unloaded header must not
  * show zeros it cannot vouch for (FR-361, NFR-502).
  */
@@ -16,7 +18,9 @@ import { api } from '../api/client'
 import Icon from './Icon'
 import { usePolling } from './ui'
 
-const POLL_MS = 15000
+/** Short enough that a new record shows up while the user watches; the
+ *  endpoint's own statement is ~1 ms, so `fresh=1` is cheap. */
+const POLL_MS = 10000
 
 /** The three chips, each with the wording that defines its number. */
 const CHIPS = [
@@ -43,28 +47,12 @@ const CHIPS = [
   },
 ]
 
-/**
- * 1234 -> "1.2k", 57345 -> "57.3k", 1200000 -> "1.2M". One decimal at most so
- * the chip stays narrow; the exact number lives in the tooltip. The 999950
- * threshold keeps 999,999 from rounding up to "1000k" instead of "1M".
- */
-export function formatCompact(value) {
-  const n = Number(value)
-  if (!Number.isFinite(n)) return '–'
-  const abs = Math.abs(n)
-  const scaled = (x) => {
-    const rounded = Math.round(x * 10) / 10
-    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
-  }
-  if (abs < 1000) return String(Math.round(n))
-  if (abs < 999950) return `${scaled(n / 1000)}k`
-  return `${scaled(n / 1e6)}M`
-}
-
+/** Exact, e.g. 1234 -> "1,234", 57345 -> "57,345". No k/M rounding: the
+ *  point of the counters is to watch individual records land. */
 const EXACT = new Intl.NumberFormat('en-GB')
 
 export default function TopbarCounters() {
-  const { data, error } = usePolling(() => api.get('/overview/counters'), POLL_MS)
+  const { data, error } = usePolling(() => api.get('/overview/counters?fresh=1'), POLL_MS)
 
   // Signed out, or still loading the first payload: stay out of the header.
   if (error?.status === 401 || !data) return null
@@ -81,7 +69,9 @@ export default function TopbarCounters() {
           >
             <Icon name={chip.icon} />
             <span className="topbar-counter-label">{chip.label}</span>
-            <span className="topbar-counter-value">{formatCompact(data[chip.key])}</span>
+            <span className="topbar-counter-value">
+              {EXACT.format(data[chip.key] ?? 0)}
+            </span>
           </Link>
         </Fragment>
       ))}
