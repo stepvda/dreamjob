@@ -129,6 +129,10 @@ class AutopilotOptions:
     require_dream_job: bool = False
     #: Cap on collection pages across all sources (FR-186).
     max_pages: int | None = None
+    #: Cap on the pages one source may contribute (FR-186).
+    max_pages_per_source: int | None = None
+    #: Wall-clock budget for the collection the run starts (NFR-103).
+    max_duration_seconds: int | None = None
     #: Cap on the companies the campaign plans against (FR-186).
     max_companies: int | None = None
     #: Campaign name; a sensible one is derived when omitted.
@@ -148,6 +152,20 @@ class AutopilotOptions:
         return asdict(self)
 
 
+def _coerce_options(raw: AutopilotOptions | dict | None) -> AutopilotOptions:
+    """Normalise the two shapes ``start`` accepts.
+
+    The start screen already builds an :class:`AutopilotOptions`; the
+    continuous engine passes a small dict of caps so the call site reads as
+    the one line of configuration it is.  Unknown keys are dropped, the same
+    rule :meth:`AutopilotOptions.from_checkpoint` applies.
+    """
+    if isinstance(raw, dict):
+        allowed = set(AutopilotOptions.__annotations__)
+        return AutopilotOptions(**{k: v for k, v in raw.items() if k in allowed})
+    return raw or AutopilotOptions()
+
+
 # ---------------------------------------------------------------------------
 # Starting a run
 # ---------------------------------------------------------------------------
@@ -156,15 +174,17 @@ class AutopilotOptions:
 async def start(
     job_seeker_id: str,
     *,
-    options: AutopilotOptions | None = None,
+    options: AutopilotOptions | dict | None = None,
     campaign_id: str | None = None,
 ) -> str:
     """Create and start an autopilot job.  Returns the ``job_run`` id.
 
     The caller is responsible for having checked consent; :func:`preflight`
-    does that and returns the same refusal the start screen shows.
+    does that and returns the same refusal the start screen shows.  ``options``
+    accepts a plain dict as well as an :class:`AutopilotOptions`; unknown keys
+    are dropped, exactly as :meth:`AutopilotOptions.from_checkpoint` does.
     """
-    options = options or AutopilotOptions()
+    options = _coerce_options(options)
     checkpoint = {"options": options.to_dict()}
     if campaign_id:
         checkpoint["campaign_id"] = campaign_id
@@ -504,6 +524,10 @@ def _create_campaign(
         caps["max_companies"] = int(options.max_companies)
     if options.max_pages:
         caps["max_pages"] = int(options.max_pages)
+    if options.max_pages_per_source is not None:
+        caps["max_pages_per_source"] = int(options.max_pages_per_source)
+    if options.max_duration_seconds is not None:
+        caps["max_duration_seconds"] = int(options.max_duration_seconds)
     values: dict[str, Any] = {
         "name": name,
         "directive_set_id": checkpoint["directive_set_id"],

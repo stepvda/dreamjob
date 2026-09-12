@@ -1,26 +1,28 @@
 """The endless background data-collection cycle (FR-161..166, FR-185, FR-281, FR-301..303).
 
 What these tests pin down is the *state machine*: the switch persists, the
-interval gates a tick, a heavy job defers one, the four phases rotate, and a
-phase that fails is recorded without stopping the loop.  Each phase's own entry
-point is replaced with a recorder, so the tests assert the call, the campaign
-and the bounded limits - never the network or the model.
+interval gates a tick, each phase is gated only by the jobs it would stack on
+(so a running collection no longer starves ``score``, ``contacts`` or
+``enrich``), the four phases rotate, a deferred phase records why and is not
+stamped, and a phase that fails is recorded without stopping the loop.  Each
+phase's own entry point is replaced with a recorder, so the tests assert the
+call, the campaign and the bounded limits - never the network or the model.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-
-from dreamjob.db.connection import from_json, insert_row, query_one, utcnow
+from dreamjob.db.connection import execute, from_json, insert_row, query_one, utcnow
 from dreamjob.db.repositories import admin as admin_repo
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import seekers as seeker_repo
-from dreamjob.jobs.runner import runner
-from dreamjob.pipeline import continuous
+from dreamjob.jobs.runner import QUEUED_ERROR_MARKER, runner
+from dreamjob.pipeline import autopilot, continuous
 
 
 @pytest.fixture(autouse=True)
@@ -36,9 +38,37 @@ def _clean_state() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_heavy_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unit tests decide about the heavy-job guard; the DB may hold anything."""
-    monkeypatch.setattr(continuous, "_heavy_job_running", lambda: None)
+def _no_guarded_jobs() -> None:
+    """Guards read the shared scratch database: no test inherits another's jobs.
+
+    Without this, a job row a previous module left ``running`` or ``pending``
+    would silently defer the phase under test.
+    """
+    kinds = tuple({k for ks in continuous.PHASE_JOB_KINDS.values() for k in ks})
+    marks = ", ".join("?" for _ in kinds)
+
+    def clear() -> None:
+        execute(f"DELETE FROM job_run WHERE kind IN ({marks})", kinds)
+
+    clear()
+    yield
+    clear()
+
+
+@pytest.fixture()
+def running_job() -> Callable[[str, str], str]:
+    """Insert a job row in a guardable state and return its kind-checked id.
+
+    A ``pending`` row carries the runner's queued marker, which is what the
+    gate reads: a bare pending row is an orphan, not work in flight.
+    """
+    def add(kind: str, status: str = "running") -> str:
+        row: dict = {"kind": kind, "status": status, "created_at": utcnow()}
+        if status == "pending":
+            row["last_error"] = QUEUED_ERROR_MARKER
+        return insert_row("job_run", row)
+
+    return add
 
 
 @pytest.fixture()
@@ -96,7 +126,15 @@ def test_toggle_persists_and_status_reflects_it() -> None:
     assert stored["enabled"] is True
     assert stored["interval_seconds"] == 600
     assert stored["phase"] == "discover"
-    for key in ("seeker_cursor", "last_tick", "next_due", "last_report", "scheduler", "counts"):
+    for key in (
+        "seeker_cursor",
+        "last_tick",
+        "next_due",
+        "last_report",
+        "last_attempt",
+        "scheduler",
+        "counts",
+    ):
         assert key in stored
 
     state = continuous.set_enabled(False)
@@ -139,6 +177,7 @@ def test_interval_gating_and_force(phases: list[str]) -> None:
     admin_repo.set_setting(continuous.SETTING_LAST_PHASE_AT, utcnow())
 
     assert asyncio.run(continuous.run_phase()) == {"skipped": "not due"}
+    assert continuous.get_state()["last_attempt"]["reason"] == "not due"
     assert phases == []
 
     old = (datetime.now(UTC) - timedelta(seconds=7200)).isoformat(timespec="seconds")
@@ -152,19 +191,94 @@ def test_interval_gating_and_force(phases: list[str]) -> None:
     assert phases == ["discover", "contacts"]
 
 
-def test_a_heavy_job_defers_the_phase_even_when_forced(
-    monkeypatch: pytest.MonkeyPatch, phases: list[str]
+@pytest.mark.parametrize("status", ["running", "pending"])
+def test_an_autopilot_defers_discover_even_when_forced(
+    status: str, running_job: Callable[[str, str], str], phases: list[str]
+) -> None:
+    """The phase that would start the same chain gives way to it."""
+    continuous.set_enabled(True)
+    running_job("autopilot", status)
+
+    report = asyncio.run(continuous.run_phase(force=True, phase="discover"))
+
+    assert report == {"deferred": "autopilot job running", "blocked_by": "autopilot"}
+    assert phases == []
+    state = continuous.get_state()
+    assert state["last_phase_at"] is None, "a deferred phase must not be stamped as run"
+    assert state["last_attempt"]["phase"] == "discover"
+    assert state["last_attempt"]["reason"] == "autopilot job running"
+
+
+def test_an_orphan_pending_job_does_not_freeze_the_loop(phases: list[str]) -> None:
+    """A bare pending row is a crash's leftover, not a job holding resources."""
+    continuous.set_enabled(True)
+    insert_row("job_run", {"kind": "autopilot", "status": "pending", "created_at": utcnow()})
+
+    report = asyncio.run(continuous.run_phase(force=True, phase="discover"))
+
+    assert report["phase"] == "discover"
+    assert phases == ["discover"]
+
+
+@pytest.mark.parametrize("kind", ["company_enrichment", "financial"])
+def test_an_enrichment_job_defers_only_enrich(
+    kind: str, running_job: Callable[[str, str], str], phases: list[str]
 ) -> None:
     continuous.set_enabled(True)
-    monkeypatch.setattr(continuous, "_heavy_job_running", lambda: "collection")
+    running_job(kind)
 
-    assert asyncio.run(continuous.run_phase(force=True)) == {
-        "deferred": "heavy job running"
-    }
-    assert phases == []
-    assert continuous.get_state()["last_phase_at"] is None, (
-        "a deferred phase must not be stamped as run"
-    )
+    for phase in ("discover", "contacts", "score"):
+        assert asyncio.run(continuous.run_phase(force=True, phase=phase))["phase"] == phase
+    deferred = asyncio.run(continuous.run_phase(force=True, phase="enrich"))
+
+    assert deferred == {"deferred": f"{kind} job running", "blocked_by": kind}
+    assert phases == ["discover", "contacts", "score"]
+
+
+@pytest.mark.parametrize("phase", ["discover", "contacts", "enrich", "score"])
+def test_a_running_collection_does_not_block_the_other_phases(
+    phase: str, running_job: Callable[[str, str], str], phases: list[str]
+) -> None:
+    """A running collection owns its own resources; every phase may run beside it.
+
+    ``discover`` is included on purpose: its own autopilot chain is gated, but
+    an unrelated manual collection must not starve the loop - the continuous
+    run is bounded to a few dozen pages, so it can share the pool.
+    """
+    continuous.set_enabled(True)
+    running_job("collection")
+
+    report = asyncio.run(continuous.run_phase(force=True, phase=phase))
+
+    assert report["phase"] == phase
+    assert "deferred" not in report
+    assert phases == [phase]
+
+
+def test_a_deferral_is_an_attempt_not_a_run(phases: list[str]) -> None:
+    """The admin reads ``last_attempt`` to see why an idle cycle is idle."""
+    continuous.set_enabled(True)
+    insert_row("job_run", {"kind": "autopilot", "status": "running", "created_at": utcnow()})
+
+    report = asyncio.run(continuous.run_phase(force=True))
+    assert report["deferred"] == "autopilot job running"
+
+    state = continuous.get_state()
+    assert state["last_attempt"]["reason"] == "autopilot job running"
+    assert state["last_phase_at"] is None
+    assert state["last_report"] is None
+
+
+def test_a_real_phase_stamps_the_run_and_the_report(phases: list[str]) -> None:
+    continuous.set_enabled(True)
+
+    report = asyncio.run(continuous.run_phase(force=True, phase="score"))
+
+    state = continuous.get_state()
+    assert state["last_phase_at"] == report["at"]
+    assert state["last_report"]["phase"] == "score"
+    assert state["last_report"]["score_count"] == 1, "the report keeps the phase counters"
+    assert state["next_due"] is not None
 
 
 def test_a_failing_phase_is_recorded_and_the_cycle_continues(
@@ -208,7 +322,7 @@ def test_discover_starts_autopilot_on_the_continuous_campaign(
     started: dict = {}
 
     async def fake_start(seeker_id, *, options=None, campaign_id=None):
-        started.update(seeker_id=seeker_id, campaign_id=campaign_id)
+        started.update(seeker_id=seeker_id, campaign_id=campaign_id, options=options)
         return "autopilot-job"
 
     monkeypatch.setattr(continuous.autopilot, "start", fake_start)
@@ -227,6 +341,55 @@ def test_discover_starts_autopilot_on_the_continuous_campaign(
         admin_repo.get_setting(f"{continuous.SETTING_CAMPAIGN_PREFIX}{ready_seeker}")
         == report["campaign_id"]
     )
+
+
+def test_discover_bounds_the_run_and_the_campaign(
+    monkeypatch: pytest.MonkeyPatch, ready_seeker: str
+) -> None:
+    """A phase must finish in minutes, not hours (FR-186, NFR-102)."""
+    started: dict = {}
+
+    async def fake_start(seeker_id, *, options=None, campaign_id=None):
+        started.update(options=options, campaign_id=campaign_id)
+        return "autopilot-job"
+
+    monkeypatch.setattr(continuous.autopilot, "start", fake_start)
+    monkeypatch.setattr(continuous, "_seeker_pool", lambda: [ready_seeker])
+
+    asyncio.run(continuous.run_phase(force=True, phase="discover"))
+
+    assert started["options"] == {
+        "max_pages": 60,
+        "max_pages_per_source": 5,
+        "max_companies": 10,
+        "max_duration_seconds": 15 * 60,
+        "company_limit": continuous.CONTINUOUS_COMPANY_LIMIT,
+    }
+    caps = campaign_repo.get_campaign_any(started["campaign_id"])["caps"]
+    assert caps["max_pages"] == 60, "the plan and collection read the campaign's caps"
+    assert caps["max_companies"] == 10
+    assert caps["max_duration_seconds"] == 15 * 60
+
+
+def test_autopilot_start_accepts_the_bounded_option_dict(
+    monkeypatch: pytest.MonkeyPatch, ready_seeker: str
+) -> None:
+    """The phase passes a dict; autopilot normalises and persists it."""
+    async def fake_start(job_id, worker=None):
+        return None
+
+    monkeypatch.setattr(runner, "start", fake_start)
+
+    job_id = asyncio.run(
+        autopilot.start(ready_seeker, options=continuous._discover_options())
+    )
+
+    row = query_one("SELECT checkpoint FROM job_run WHERE id = ?", (job_id,))
+    options = (from_json(row["checkpoint"], {}) or {})["options"]
+    assert options["max_pages"] == 60
+    assert options["max_pages_per_source"] == 5
+    assert options["max_duration_seconds"] == 15 * 60
+    assert options["company_limit"] == continuous.CONTINUOUS_COMPANY_LIMIT
 
 
 def test_a_seeker_without_a_profile_is_skipped_with_a_reason(

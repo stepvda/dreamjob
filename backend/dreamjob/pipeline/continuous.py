@@ -28,11 +28,17 @@ stopped, and the admin screen reads the same rows the engine writes.
 
 Two properties make it safe to run inside the API process:
 
-*It gives way.*  A phase does not start while a collection or contacts
-discovery job owns the registries, egress and single writer
-(:func:`_heavy_job_running`); it defers and the next tick tries again.  The
-scheduler task that calls it ticks every five minutes, and the engine itself
-enforces the configured interval, so a short tick never runs a phase early.
+*It gives way - per phase.*  A phase is gated only by the jobs it would stack
+on (:data:`PHASE_JOB_KINDS`): ``discover`` waits for its own autopilot chain
+(not for an unrelated manual collection - its own caps are small enough to run
+alongside one), ``contacts`` for a contact backfill or discovery, ``enrich``
+for company enrichment or financial analysis.  ``score`` is deterministic,
+cheap and never gated, so ranking keeps advancing while a collection runs.  A
+deferral is recorded in ``continuous.last_attempt`` with its reason and the
+next tick tries again; only a phase that actually runs stamps
+``last_phase_at``.  The scheduler task that calls it ticks every five minutes,
+and the engine itself enforces the configured interval, so a short tick never
+runs a phase early.
 
 *It never raises out of a tick.*  A phase that fails is recorded in
 ``last_report`` with its error and the cycle advances to the next phase, so one
@@ -80,6 +86,8 @@ SETTING_CURSOR = "continuous.seeker_cursor"
 SETTING_LAST_TICK = "continuous.last_tick"
 SETTING_LAST_PHASE_AT = "continuous.last_phase_at"
 SETTING_LAST_REPORT = "continuous.last_report"
+#: The last time a phase was due but did not run, and why.
+SETTING_LAST_ATTEMPT = "continuous.last_attempt"
 SETTING_CAMPAIGN_PREFIX = "continuous.campaign."
 #: Alternates the contacts phase between backfill and discovery.
 SETTING_CONTACTS_TICK = "continuous.contacts_tick"
@@ -90,6 +98,31 @@ CONTACT_LIMIT = 300
 ENRICH_LIMIT = 10
 #: The contacts job kinds the phase will not stack (FR-185, NFR-102).
 CONTACT_JOB_KINDS = ("contact_email_backfill", "contacts_discovery")
+
+#: The job kinds each phase must not stack on top of.  ``score`` is absent on
+#: purpose: it is deterministic and fast and must run even while a collection
+#: does (FR-281, NFR-102).
+PHASE_JOB_KINDS: dict[str, tuple[str, ...]] = {
+    # Only the loop's own chain: a bounded continuous discover may run beside
+    # a long manual collection, but two continuous discover runs must not stack.
+    "discover": ("autopilot",),
+    "contacts": CONTACT_JOB_KINDS,
+    "enrich": ("company_enrichment", "financial"),
+}
+
+#: The campaign caps a continuous *discover* phase drives its autopilot with
+#: (FR-186).  Autopilot's own defaults are sized for one supervised run a
+#: person is waiting on; the cycle runs unattended forever, so one phase must
+#: finish in minutes rather than hours or it starves every later phase - and
+#: every other job - behind its own collection (NFR-102).
+CONTINUOUS_DISCOVER_CAPS: dict[str, int] = {
+    "max_pages": 60,
+    "max_pages_per_source": 5,
+    "max_companies": 10,
+    "max_duration_seconds": 15 * 60,
+}
+#: Company profiles and financials one continuous autopilot run builds.
+CONTINUOUS_COMPANY_LIMIT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +205,7 @@ def get_state() -> dict[str, Any]:
         "last_phase_at": last_phase_at,
         "next_due": _next_due(last_phase_at, interval),
         "last_report": _setting(SETTING_LAST_REPORT),
+        "last_attempt": _setting(SETTING_LAST_ATTEMPT),
         "scheduler": _scheduler_state(),
         "counts": _counts(),
     }
@@ -238,23 +272,46 @@ def _heavy_job_running() -> str | None:
     """The kind of a running collection/discovery job, if there is one.
 
     The scheduler owns the definition (which kinds are heavy and why); this
-    wrapper exists so the engine, the tests and the scheduler answer the same
-    question with the same code.
+    wrapper exists so the admin counters and the scheduler answer the same
+    question with the same code.  The tick itself does not use it: each phase
+    has its own guard (:func:`_phase_job_running`).
     """
     from dreamjob.monitoring import scheduler as scheduler_mod  # noqa: PLC0415 - import cycle
 
     return scheduler_mod._heavy_job_running()
 
 
-def _contact_job_running() -> str | None:
-    """A backfill or discovery job that is running or genuinely queued."""
-    marks = ", ".join("?" for _ in CONTACT_JOB_KINDS)
+def _phase_job_running(phase: str) -> str | None:
+    """The kind of a job this phase must not stack on, if there is one.
+
+    One cheap query, and the only gate the tick applies: the kinds a phase
+    conflicts with are one table (:data:`PHASE_JOB_KINDS`), so a running
+    ``autopilot`` defers ``discover`` - which would start another chain of
+    the same kind - but never ``contacts``, ``enrich`` or ``score``, which
+    work on different resources.  ``score`` has no guard at all.
+
+    A ``pending`` row counts only when the runner actually queued it (the
+    marker ``runner.start`` writes): a bare pending row is an orphan left by a
+    crash between create and start - the live database holds one from days ago
+    - and blocking on it would freeze the loop for ever.
+    :func:`_contact_job_running` has always drawn the line here; this is the
+    same line, for every phase.
+    """
+    kinds = PHASE_JOB_KINDS.get(phase) or ()
+    if not kinds:
+        return None
+    marks = ", ".join("?" for _ in kinds)
     row = query_one(
         f"SELECT kind FROM job_run WHERE kind IN ({marks}) AND "
         "(status = 'running' OR (status = 'pending' AND last_error = ?)) LIMIT 1",
-        (*CONTACT_JOB_KINDS, QUEUED_ERROR_MARKER),
+        (*kinds, QUEUED_ERROR_MARKER),
     )
     return str(row["kind"]) if row else None
+
+
+def _contact_job_running() -> str | None:
+    """A backfill or discovery job that is running or genuinely queued."""
+    return _phase_job_running("contacts")
 
 
 def _autopilot_running(seeker_id: str) -> bool:
@@ -271,6 +328,18 @@ def _autopilot_running(seeker_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _record_attempt(phase: str, reason: str) -> dict[str, Any]:
+    """Remember the last time a phase did not run, and why.
+
+    Written without touching ``last_phase_at``: a deferred phase has not run,
+    and the admin screen reads this to explain an idle cycle instead of
+    showing no movement at all.
+    """
+    attempt = {"at": utcnow(), "phase": phase, "reason": reason}
+    _store(SETTING_LAST_ATTEMPT, attempt)
+    return attempt
+
+
 async def run_phase(*, force: bool = False, phase: str | None = None) -> dict[str, Any]:
     """Run one phase of the cycle and advance the round-robin.
 
@@ -282,7 +351,9 @@ async def run_phase(*, force: bool = False, phase: str | None = None) -> dict[st
     Returns a compact report suitable for ``scheduler.last_run``:
     ``{"phase", "at", ...counters}`` on a run, and one of the early exits
     ``{"enabled": False}``, ``{"skipped": "not due"}`` or
-    ``{"deferred": "heavy job running"}`` when nothing ran.
+    ``{"deferred": "<kind> job running", "blocked_by": "<kind>"}`` when
+    nothing ran.  Every early exit but the switch is also written to
+    ``continuous.last_attempt``.
     """
     if phase is not None and phase not in PHASES:
         raise ValueError(f"Unknown phase {phase!r}; expected one of {PHASES}")
@@ -292,11 +363,13 @@ async def run_phase(*, force: bool = False, phase: str | None = None) -> dict[st
         if not enabled() and not force:
             return {"enabled": False}
         if not force and not _due(_setting(SETTING_LAST_PHASE_AT), _interval()):
+            _record_attempt(current, "not due")
             return {"skipped": "not due"}
-        busy = _heavy_job_running()
+        busy = _phase_job_running(current)
         if busy:
+            _record_attempt(current, f"{busy} job running")
             log.info("Continuous collection deferred: a %s job is running", busy)
-            return {"deferred": "heavy job running"}
+            return {"deferred": f"{busy} job running", "blocked_by": busy}
 
         try:
             report = await _run_phase(current)
@@ -377,8 +450,41 @@ def _stored_campaign(seeker_id: str | None) -> str | None:
     return stored
 
 
+def _discover_options() -> dict[str, Any]:
+    """The real ``AutopilotOptions`` keys one continuous discover phase passes.
+
+    Autopilot's defaults are sized for a supervised run; a phase runs forever
+    and unattended, so it is bounded to minutes (FR-186).
+    """
+    return {
+        "max_pages": CONTINUOUS_DISCOVER_CAPS["max_pages"],
+        "max_pages_per_source": CONTINUOUS_DISCOVER_CAPS["max_pages_per_source"],
+        "max_companies": CONTINUOUS_DISCOVER_CAPS["max_companies"],
+        "max_duration_seconds": CONTINUOUS_DISCOVER_CAPS["max_duration_seconds"],
+        "company_limit": CONTINUOUS_COMPANY_LIMIT,
+    }
+
+
+def _bound_discover_campaign(campaign_id: str) -> None:
+    """Keep the engine's own campaign inside the continuous budget (FR-186).
+
+    Autopilot is handed an existing campaign here, so its own campaign-creation
+    stage - where the option caps are applied - never runs.  Writing the caps
+    onto the campaign is what actually bounds the plan and the collection this
+    phase starts; the campaign is the cycle's reserved-name row, so the engine
+    owns its caps.  Only an actual change is written.
+    """
+    campaign = campaign_repo.get_campaign_any(campaign_id)
+    if campaign is None:
+        return
+    stored = campaign.get("caps") if isinstance(campaign.get("caps"), dict) else {}
+    caps = {**stored, **CONTINUOUS_DISCOVER_CAPS}
+    if caps != stored:
+        campaign_repo.update_campaign(campaign_id, {"caps": caps})
+
+
 async def _phase_discover() -> dict[str, Any]:
-    """Start the next ready seeker's autopilot run (at most one per phase)."""
+    """Start the next ready seeker's bounded autopilot run (at most one per phase)."""
     pool = _seeker_pool()
     if not pool:
         return {"skipped": "no seekers"}
@@ -404,7 +510,10 @@ async def _phase_discover() -> dict[str, Any]:
         if not campaign_id:
             skipped.append({"seeker_id": candidate, "reasons": ["no_campaign"]})
             continue
-        job_id = await autopilot.start(candidate, campaign_id=campaign_id)
+        _bound_discover_campaign(campaign_id)
+        job_id = await autopilot.start(
+            candidate, campaign_id=campaign_id, options=_discover_options()
+        )
         _store(SETTING_CURSOR, candidate)
         return {
             "seeker_id": candidate,
