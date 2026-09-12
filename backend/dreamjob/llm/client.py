@@ -29,6 +29,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -694,6 +695,13 @@ class LLMClient:
         Measured on ``profile.composite``: 23,999 of a 24,000-token budget
         spent, the JSON ending at ``"text": "Cares``.  Naming the budget is
         what turns that into a one-line fix instead of an investigation.
+
+        A first answer that is cut off gets one more, smaller ask before the
+        failure is reported: the model is shown its own previous answer inside
+        an untrusted block and asked to return the JSON only.  Only when that
+        second answer is unusable too does the caller see the truncation
+        error, which is what routes the task to the fallback model - or, for
+        the composite, to the structural assembly.
         """
         if schema_hint:
             system = f"{system}\n\nRespond with JSON only, matching this shape:\n{schema_hint}"
@@ -701,10 +709,32 @@ class LLMClient:
         result = self.complete(task, system, user, **kw)
         try:
             return parse_json(result.text, task=task)
-        except LLMError:
-            if not result.usage.truncated:
+        except LLMError as first_error:
+            truncated = isinstance(first_error, TruncatedResponse) or result.usage.truncated
+            if not truncated:
+                # No repair is attempted for an answer that finished cleanly,
+                # so this is the final failure and the snippet can be logged.
+                log.warning(
+                    "Could not parse JSON for task %s; answer begins: %s",
+                    task,
+                    _redact_snippet(result.text),
+                )
                 raise
+            log.info(
+                "JSON for task %s was cut off; asking once more for the JSON only", task
+            )
+            try:
+                repaired = self._complete_json_repair(task, system, user, kw=kw, answer=result.text)
+                return parse_json(repaired.text, task=task)
+            except (LLMError, BudgetExhausted) as repair_error:
+                log.info("JSON repair ask for task %s failed: %s", task, repair_error)
             budget = kw.get("max_tokens", DEFAULT_MAX_TOKENS)
+            log.warning(
+                "Could not repair JSON for task %s within %s tokens; answer begins: %s",
+                task,
+                budget,
+                _redact_snippet(result.text),
+            )
             raise TruncatedResponse(
                 f"{result.model} was cut off at its {budget}-token budget for task "
                 f"{task!r} and returned incomplete JSON ({result.usage.output_tokens} "
@@ -712,6 +742,21 @@ class LLMClient:
                 f"reasoning, {len(result.text)} characters of answer). Raise "
                 "max_tokens, or use the chat model for this task."
             ) from None
+
+    def _complete_json_repair(
+        self, task: str, system: str, user: str, *, kw: dict[str, Any], answer: str
+    ) -> LLMResult:
+        """One smaller ask: the same task, but return only the JSON (NFR-205).
+
+        The previous answer rides along as an untrusted block, so the repair
+        prompt is never a place for model output to become instructions.
+        """
+        repair_kw = dict(kw)
+        if answer:
+            untrusted = dict(repair_kw.get("untrusted") or {})
+            untrusted["previous_answer"] = answer[:8000]
+            repair_kw["untrusted"] = untrusted
+        return self.complete(task, system + "\n\n" + REPAIR_INSTRUCTION, user, **repair_kw)
 
     # -- audit (FR-364) -----------------------------------------------------
     def _log_call(
@@ -748,67 +793,308 @@ class LLMClient:
             log.exception("Failed to record llm_call for task %s", task)
 
 
+#: Extra system instruction for the one repair ask in ``complete_json``.
+REPAIR_INSTRUCTION = (
+    "Your previous answer to this task was not usable as JSON. Answer the same task "
+    "again. Return ONLY one JSON value - no markdown fences, no text before or after "
+    "it, no // or # comments, no trailing commas, and no raw line breaks inside a "
+    "string. Do not restate these instructions."
+)
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
+#: Curly quotes a model may use where JSON syntax wants a straight quote.
+_DOUBLE_QUOTES = frozenset('"\u201c\u201d\u201e\u201f')
+_SINGLE_QUOTES = frozenset("'\u2018\u2019\u201a\u201b")
 
-def parse_json(text: str, task: str = "") -> Any:
-    """Best-effort JSON extraction from a model response (NFR-205 output validation)."""
-    text = (text or "").strip()
-    if not text:
-        raise LLMError(f"Empty LLM response for task {task!r}")
-    for candidate in (text, *(m.group(1).strip() for m in _FENCE_RE.finditer(text))):
+_UNPARSED = object()
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_PHONE_RE = re.compile(r"\+?\d(?:[\s().-]?\d){6,}")
+_URL_CREDENTIALS_RE = re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@", re.IGNORECASE)
+
+
+def _redact_snippet(text: str, limit: int = 200) -> str:
+    """A short diagnostic that carries no obvious personal data.
+
+    Failure logs are read by administrators, not by the job seeker, but a model
+    answer can quote anything the profile contained, so the snippet is flattened
+    and emails, URL credentials and phone-shaped runs are masked before it is
+    written anywhere.
+    """
+    snippet = " ".join((text or "").split())
+    snippet = _EMAIL_RE.sub("[email]", snippet)
+    snippet = _URL_CREDENTIALS_RE.sub(r"\1[credentials]@", snippet)
+    snippet = _PHONE_RE.sub("[number]", snippet)
+    return snippet[:limit] + ("\u2026" if len(snippet) > limit else "")
+
+
+def _string_ends(char: str, style: str, opener_curly: bool) -> bool:
+    """Does ``char`` close a string opened with ``style``/``opener_curly``?"""
+    if style == "double":
+        return char in _DOUBLE_QUOTES and (opener_curly or char == '"')
+    return char in _SINGLE_QUOTES and (opener_curly or char == "'")
+
+
+def normalise_quotes(text: str) -> str:
+    """Rewrite curly quotes used as JSON delimiters into straight ones.
+
+    Quotes *inside* a string are left alone: a straight-quoted value may hold a
+    typographic quotation ("l'équipe", \u201cCares\u201d) and mangling it would corrupt
+    the very content the task asked for.
+    """
+    out: list[str] = []
+    in_string = False
+    opener_curly = False
+    style = ""
+    escaped = False
+    for char in text:
+        if not in_string:
+            if char in _DOUBLE_QUOTES:
+                out.append('"')
+                in_string, style, opener_curly = True, "double", char != '"'
+            elif char in _SINGLE_QUOTES:
+                out.append("'")
+                in_string, style, opener_curly = True, "single", char != "'"
+            else:
+                out.append(char)
+            continue
+        if escaped:
+            out.append(char)
+            escaped = False
+        elif char == "\\":
+            out.append(char)
+            escaped = True
+        elif _string_ends(char, style, opener_curly):
+            out.append('"' if style == "double" else "'")
+            in_string = False
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def strip_json_comments(text: str) -> str:
+    """Remove ``//``, ``#`` and ``/* */`` comments that sit outside strings."""
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    in_string = False
+    opener_curly = False
+    style = ""
+    escaped = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif _string_ends(char, style, opener_curly):
+                in_string = False
+            index += 1
+            continue
+        if char in _DOUBLE_QUOTES:
+            out.append(char)
+            in_string, style, opener_curly = True, "double", char != '"'
+            index += 1
+            continue
+        if char in _SINGLE_QUOTES:
+            out.append(char)
+            in_string, style, opener_curly = True, "single", char != "'"
+            index += 1
+            continue
+        if char == "/" and index + 1 < length and text[index + 1] in "/*":
+            if text[index + 1] == "/":
+                newline = text.find("\n", index + 2)
+                if newline < 0:
+                    break
+                out.append("\n")
+                index = newline + 1
+            else:
+                close = text.find("*/", index + 2)
+                if close < 0:
+                    break
+                out.append("\n")
+                index = close + 2
+            continue
+        if char == "#":
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            out.append("\n")
+            index = newline + 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def escape_control_chars(text: str) -> str:
+    """Escape raw newlines, tabs and other control characters inside strings."""
+    out: list[str] = []
+    in_string = False
+    opener_curly = False
+    style = ""
+    escaped = False
+    for char in text:
+        if not in_string:
+            if char in _DOUBLE_QUOTES:
+                out.append(char)
+                in_string, style, opener_curly = True, "double", char != '"'
+            elif char in _SINGLE_QUOTES:
+                out.append(char)
+                in_string, style, opener_curly = True, "single", char != "'"
+            else:
+                out.append(char)
+            continue
+        if escaped:
+            out.append(char)
+            escaped = False
+        elif char == "\\":
+            out.append(char)
+            escaped = True
+        elif _string_ends(char, style, opener_curly):
+            out.append(char)
+            in_string = False
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        elif ord(char) < 0x20:
+            out.append(f"\\u{ord(char):04x}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _strip_trailing_commas_once(text: str) -> str:
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    in_string = False
+    opener_curly = False
+    style = ""
+    escaped = False
+    while index < length:
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif _string_ends(char, style, opener_curly):
+                in_string = False
+            index += 1
+            continue
+        if char in _DOUBLE_QUOTES:
+            out.append(char)
+            in_string, style, opener_curly = True, "double", char != '"'
+            index += 1
+            continue
+        if char in _SINGLE_QUOTES:
+            out.append(char)
+            in_string, style, opener_curly = True, "single", char != "'"
+            index += 1
+            continue
+        if char == ",":
+            look = index + 1
+            while look < length and text[look] in " \t\r\n":
+                look += 1
+            if look < length and text[look] in "}]":
+                index += 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def strip_trailing_commas(text: str) -> str:
+    """Drop commas directly before a closing brace or bracket."""
+    while True:
+        stripped = _strip_trailing_commas_once(text)
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def single_to_double_quotes(text: str) -> str | None:
+    """Convert single-quoted JSON strings to double-quoted ones, when unambiguous.
+
+    Returns ``None`` when the quotes do not pair up (an unescaped apostrophe in
+    ``'O'Brien'`` makes the conversion a guess, and a guess is not a repair).
+    """
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char != "'":
+            out.append(char)
+            index += 1
+            continue
+        content: list[str] = []
+        cursor = index + 1
+        closed = False
+        while cursor < length:
+            inner = text[cursor]
+            if inner == "\\" and cursor + 1 < length:
+                nxt = text[cursor + 1]
+                if nxt == "'":
+                    content.append("'")
+                elif nxt in '"\\/bfnrtu':
+                    content.append(inner + nxt)
+                else:
+                    content.append("\\\\" + nxt)
+                cursor += 2
+                continue
+            if inner == "'":
+                closed = True
+                cursor += 1
+                break
+            content.append('\\"' if inner == '"' else inner)
+            cursor += 1
+        if not closed:
+            return None
+        out.append('"' + "".join(content) + '"')
+        index = cursor
+    return "".join(out)
+
+
+def repair_json(text: str) -> str:
+    """Best-effort textual repair of a model's JSON.
+
+    Every repair is textual only; the result is accepted solely if
+    ``json.loads`` then succeeds, so a repair can never make an invalid answer
+    look valid, and the caller's schema validation is unchanged.
+    """
+    repaired = normalise_quotes(text)
+    repaired = strip_json_comments(repaired)
+    repaired = escape_control_chars(repaired)
+    repaired = strip_trailing_commas(repaired)
+    converted = single_to_double_quotes(repaired)
+    return converted if converted is not None else repaired
+
+
+def _loads_lenient(candidate: str) -> Any:
+    """``json.loads`` with the repair pipeline; returns ``_UNPARSED`` on failure."""
+    attempts = [candidate, repair_json(candidate)]
+    for attempt in attempts:
         try:
-            return json.loads(candidate)
+            return json.loads(attempt)
         except ValueError:
             continue
-    # Last resort: the outermost {...} or [...] span.
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start, end = text.find(opener), text.rfind(closer)
-        if 0 <= start < end:
-            try:
-                return json.loads(text[start : end + 1])
-            except ValueError:
-                continue
-    # The response was cut off mid-JSON.  A truncated answer is not an empty
-    # one, but it must be *reported* as truncated: returning the salvaged
-    # entries silently made ``documents/_llm.complete_json``'s fallback dead
-    # code, so a task the reasoning model abandoned mid-object was applied as
-    # if it had finished.  The partial entries ride along on the exception for
-    # a caller that wants them.
-    salvaged = salvage_truncated_json(text)
-    if salvaged is not None:
-        log.warning(
-            "Truncated JSON answer for task %s; retrying on the fallback model",
-            task or "?",
-        )
-        error = TruncatedResponse(
-            f"The model stopped mid-JSON for task {task!r}; the answer was incomplete"
-        )
-        error.partial = salvaged  # type: ignore[attr-defined]
-        raise error
-    raise LLMError(f"Could not parse JSON from LLM response for task {task!r}: {text[:300]}")
+    return _UNPARSED
 
 
-def salvage_truncated_json(text: str) -> Any | None:
-    """Recover the complete entries of a JSON object the model did not finish.
-
-    Walks the text tracking string state and nesting depth, and cuts back to the
-    last top-level separator that leaves the document closeable.  Only complete
-    key/value pairs survive, so a half-written value is never guessed at - the
-    point is to keep the fields that arrived, not to invent the ones that did
-    not.
-    """
-    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
-    if not starts:
-        return None
-    start = min(starts)
-    opener = text[start]
-    closer = "}" if opener == "{" else "]"
-
+def _balanced_end(text: str, start: int) -> int | None:
+    """Index of the character closing the value opened at ``start``, if any."""
     depth = 0
     in_string = False
     escaped = False
-    last_safe = -1
     for index in range(start, len(text)):
         char = text[index]
         if in_string:
@@ -825,17 +1111,160 @@ def salvage_truncated_json(text: str) -> Any | None:
             depth += 1
         elif char in "}]":
             depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start : index + 1])
-                except ValueError:
-                    return None
-        elif char == "," and depth == 1:
-            last_safe = index
+            if depth <= 0:
+                return index if depth == 0 else None
+    return None
 
-    if last_safe > start:
-        try:
-            return json.loads(text[start:last_safe] + closer)
-        except ValueError:
-            return None
+
+def _balanced_spans(text: str) -> Iterator[str]:
+    """Balanced ``{...}`` / ``[...]`` values in ``text``, in document order.
+
+    Scanning stops at an opener that never closes: everything after it is the
+    incomplete tail of one truncated document, and a balanced object *inside*
+    that tail is a fragment, not a valid answer.  Returning it would turn a
+    cut-off array into its first element as if the model had finished.
+    """
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        end = _balanced_end(text, index)
+        if end is None:
+            return
+        yield text[index : end + 1]
+
+
+def _candidate_documents(text: str) -> Iterator[str]:
+    """Candidate JSON documents in the answer, most trustworthy first."""
+    sources = [text]
+    commentless = strip_json_comments(text)
+    if commentless != text:
+        sources.append(commentless)
+    seen: set[str] = set()
+    for source in sources:
+        candidates = [source, *(m.group(1).strip() for m in _FENCE_RE.finditer(source))]
+        candidates.extend(_balanced_spans(source))
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                yield candidate
+
+
+def parse_json(text: str, task: str = "") -> Any:
+    """Best-effort JSON extraction from a model response (NFR-205 output validation).
+
+    Accepts a bare value, a fenced block, or the first balanced ``{...}`` /
+    ``[...]`` value inside prose, and applies the repairs in :func:`repair_json`
+    to any of them.  An answer that cannot be parsed raises ``LLMError`` with a
+    redacted snippet; an answer that stopped mid-JSON raises
+    ``TruncatedResponse`` with the complete part on ``partial``, so callers can
+    tell a cut-off answer from a badly behaved one.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise LLMError(f"Empty LLM response for task {task!r}")
+    for candidate in _candidate_documents(text):
+        value = _loads_lenient(candidate)
+        if value is not _UNPARSED:
+            return value
+    # The response was cut off mid-JSON.  A truncated answer is not an empty
+    # one, but it must be *reported* as truncated: returning the salvaged
+    # entries silently made ``documents/_llm.complete_json``'s fallback dead
+    # code, so a task the reasoning model abandoned mid-object was applied as
+    # if it had finished.  The partial entries ride along on the exception for
+    # a caller that wants them.
+    salvaged = salvage_truncated_json(text)
+    if salvaged is not None:
+        log.warning(
+            "Truncated JSON answer for task %s; recovering the complete part and "
+            "retrying on the fallback model",
+            task or "?",
+        )
+        error = TruncatedResponse(
+            f"The model stopped mid-JSON for task {task!r}; the answer was incomplete"
+        )
+        error.partial = salvaged  # type: ignore[attr-defined]
+        raise error
+    snippet = _redact_snippet(text)
+    # DEBUG here, not WARNING: ``complete_json`` may still repair the answer,
+    # and it logs the snippet itself when the repair does not happen or fails.
+    log.debug("Could not parse JSON from LLM response for task %s: %s", task or "?", snippet)
+    raise LLMError(f"Could not parse JSON from LLM response for task {task!r}: {snippet}")
+
+
+def salvage_truncated_json(text: str) -> Any | None:
+    """Recover what is complete in a JSON document the model did not finish.
+
+    Walks the text tracking string state and the stack of open brackets, and
+    keeps only the parts that need no guessing: a balanced document is returned
+    as-is, otherwise the text is cut back to the last separator that leaves a
+    closeable value and the remaining brackets are closed.  A half-written
+    value - an open string, a value expected after ``:`` or ``,`` - is never
+    invented, so a truncated answer loses only its incomplete tail.
+
+    Every opener is tried in turn, because a prose brace before the document
+    ("the result {as of today}: [1, 2") is not the answer; only the first start
+    position that yields a complete value is used.
+    """
+    for start, char in enumerate(text):
+        if char in "{[":
+            value = _salvage_from(text, start)
+            if value is not None:
+                return value
+    return None
+
+
+def _salvage_from(text: str, start: int) -> Any | None:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    complete_end: int | None = None
+    last_comma: int | None = None
+    last_comma_stack: list[str] = []
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]":
+            if not stack:
+                break
+            stack.pop()
+            if not stack:
+                complete_end = index
+                break
+        elif char == ",":
+            last_comma = index
+            last_comma_stack = list(stack)
+
+    if complete_end is not None:
+        value = _loads_lenient(text[start : complete_end + 1])
+        return None if value is _UNPARSED else value
+
+    # The answer may have stopped just after a complete value; close what is
+    # open only when the tail cannot be a partial token (a trailing ``:``, ``,``
+    # or opener means a value was still expected, and an open string may be cut
+    # mid-word).
+    if not in_string and stack:
+        tail = text[start:].rstrip()
+        if tail and tail[-1] not in "{[,:":
+            value = _loads_lenient(tail + "".join(reversed(stack)))
+            if value is not _UNPARSED:
+                return value
+
+    if last_comma is not None and last_comma > start:
+        value = _loads_lenient(
+            text[start:last_comma] + "".join(reversed(last_comma_stack))
+        )
+        if value is not _UNPARSED:
+            return value
     return None

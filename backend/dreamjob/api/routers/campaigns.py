@@ -20,6 +20,7 @@ from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as repo
 from dreamjob.pipeline import collection, knowledge_base, planning
+from dreamjob.pipeline.declines import NoUsableSources
 
 router = APIRouter()
 
@@ -255,6 +256,18 @@ def generate_plan(
         )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except NoUsableSources as exc:
+        # FR-182/FR-186: zero runnable sources is a blocker with named causes,
+        # not an empty plan.  The detail is the same machine-readable list the
+        # campaign audit carries.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "reason": "no_usable_sources",
+                "message": str(exc),
+                "blockers": exc.blockers,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 
@@ -625,6 +638,15 @@ async def launch_campaign(
     _campaign_or_404(campaign_id, seeker.id)
     try:
         job_id = await collection.launch(campaign_id, seeker.id)
+    except NoUsableSources as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "reason": "no_usable_sources",
+                "message": str(exc),
+                "blockers": exc.blockers,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except LookupError as exc:

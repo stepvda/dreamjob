@@ -19,8 +19,11 @@ digest reads six of these tables in a single pass.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
+from dreamjob.config import get_settings
 from dreamjob.db.connection import (
     from_json,
     insert_row,
@@ -176,21 +179,27 @@ def create_card(job_seeker_id: str, values: dict) -> str:
         "stage_changed_at": now,
         **values,
     }
-    return insert_row("pipeline_card", payload)
+    card_id = insert_row("pipeline_card", payload)
+    invalidate_active_seeker_cache()
+    return card_id
 
 
 def update_card(card_id: str, values: dict) -> None:
     if not values:
         return
     update_row("pipeline_card", card_id, {**values, "updated_at": utcnow()})
+    invalidate_active_seeker_cache()
 
 
 def delete_card(card_id: str, job_seeker_id: str) -> int:
     with write_tx() as conn:
-        return conn.execute(
+        deleted = conn.execute(
             "DELETE FROM pipeline_card WHERE id = ? AND job_seeker_id = ?",
             (card_id, job_seeker_id),
         ).rowcount
+    if deleted:
+        invalidate_active_seeker_cache()
+    return deleted
 
 
 def stage_counts(job_seeker_id: str) -> dict[str, int]:
@@ -732,32 +741,36 @@ def upsert_watch(job_seeker_id: str, company_id: str, values: dict) -> tuple[str
     )
     if existing:
         update_row("watchlist_entry", existing["id"], values)
+        invalidate_active_seeker_cache()
         return str(existing["id"]), False
-    return (
-        insert_row(
-            "watchlist_entry",
-            {
-                "job_seeker_id": job_seeker_id,
-                "company_id": company_id,
-                "active": 1,
-                "created_at": utcnow(),
-                **values,
-            },
-        ),
-        True,
+    entry_id = insert_row(
+        "watchlist_entry",
+        {
+            "job_seeker_id": job_seeker_id,
+            "company_id": company_id,
+            "active": 1,
+            "created_at": utcnow(),
+            **values,
+        },
     )
+    invalidate_active_seeker_cache()
+    return entry_id, True
 
 
 def update_watch(entry_id: str, values: dict) -> None:
     update_row("watchlist_entry", entry_id, values)
+    invalidate_active_seeker_cache()
 
 
 def delete_watch(entry_id: str, job_seeker_id: str) -> int:
     with write_tx() as conn:
-        return conn.execute(
+        deleted = conn.execute(
             "DELETE FROM watchlist_entry WHERE id = ? AND job_seeker_id = ?",
             (entry_id, job_seeker_id),
         ).rowcount
+    if deleted:
+        invalidate_active_seeker_cache()
+    return deleted
 
 
 def watches_due(now: str, *, job_seeker_id: str | None = None, limit: int = 200) -> list[dict]:
@@ -943,12 +956,60 @@ def list_digests(job_seeker_id: str, limit: int = 20) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+#: How long a :func:`active_seeker_ids` answer is trusted.  The scheduler tick
+#: is 60 s, so this is effectively "for the tick", while a manual run that
+#: lands just after a tick still reuses that tick's answer.  A write to
+#: campaign/watchlist/card/opportunity clears the cache immediately; a write
+#: from another process cannot (no cross-process signal), which is what this
+#: TTL bounds.
+ACTIVE_SEEKER_CACHE_TTL_SECONDS = 60.0
+
+#: ``(database, since-date) -> (monotonic seconds, ids)``.  The lock guards
+#: the dict only; the query itself runs outside it so a slow first call never
+#: serialises readers.
+_active_seeker_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+_active_seeker_cache_lock = threading.Lock()
+
+
+def invalidate_active_seeker_cache() -> None:
+    """Drop every memoised :func:`active_seeker_ids` answer.
+
+    Called after writes to the four tables the query reads - campaigns,
+    watchlist entries, pipeline cards and opportunities - and by tests.
+    Clearing is deliberately the safe direction: a needless clear costs one
+    query, a missed clear serves a stale one for up to the TTL.
+    """
+    with _active_seeker_cache_lock:
+        _active_seeker_cache.clear()
+
+
 def active_seeker_ids(since: str) -> list[str]:
     """Seekers with a live campaign, a watch or a live card (FR-403).
 
     "Active" has to mean something, or the weekly digest becomes a weekly
     e-mail to everyone who ever registered.
+
+    The four-way UNION behind this reads ``campaign``, ``watchlist_entry``,
+    ``pipeline_card`` and ``opportunity``; on the development database it was
+    measured at up to 23.8 s and 735k steps per call, and both the follow-up
+    sweep and the digest ask it on every tick.  The answer is memoised for
+    :data:`ACTIVE_SEEKER_CACHE_TTL_SECONDS`, and every write to one of those
+    tables clears the memo (see :func:`invalidate_active_seeker_cache`).
+
+    The cache key includes only the *date* of ``since``, not the second it was
+    computed from: the callers build ``since`` as "now minus N days" on every
+    call, so keying on the full timestamp would miss on every tick and save
+    nothing.  Serving an answer computed at most a minute ago is the accepted
+    staleness - the window is 28 days for the digest and 90 for follow-ups, so
+    a callback that crosses the boundary within that minute is immaterial.
     """
+    db = str(get_settings().abs_db_path)
+    key = (db, since[:10])
+    now = time.monotonic()
+    with _active_seeker_cache_lock:
+        cached = _active_seeker_cache.get(key)
+        if cached is not None and now - cached[0] < ACTIVE_SEEKER_CACHE_TTL_SECONDS:
+            return list(cached[1])
     rows = query_all(
         """
         SELECT DISTINCT job_seeker_id FROM (
@@ -961,7 +1022,10 @@ def active_seeker_ids(since: str) -> list[str]:
         """,
         (since, since),
     )
-    return [r["job_seeker_id"] for r in rows if r["job_seeker_id"]]
+    ids = tuple(r["job_seeker_id"] for r in rows if r["job_seeker_id"])
+    with _active_seeker_cache_lock:
+        _active_seeker_cache[key] = (time.monotonic(), ids)
+    return list(ids)
 
 
 def new_opportunities(job_seeker_id: str, since: str, limit: int = 25) -> list[dict]:

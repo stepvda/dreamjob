@@ -30,8 +30,10 @@ from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker
 from dreamjob.config import get_settings
 from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import admin as repo
+from dreamjob.db.repositories import declines as decline_repo
 from dreamjob.db.repositories import seekers as seeker_repo
 from dreamjob.llm.client import invalidate_admin_config
+from dreamjob.pipeline import declines
 from dreamjob.security import auth_service as auth
 from dreamjob.security.audit import log_metric, record_audit
 
@@ -118,6 +120,16 @@ class SourceConfigIn(BaseModel):
     max_pages: int | None = Field(None, ge=1)
     max_records: int | None = Field(None, ge=1)
     max_seconds: int | None = Field(None, ge=1)
+
+
+class DeclineEnableIn(BaseModel):
+    """FR-363 / IR-101: re-enable a declined source, explicitly."""
+
+    note: str | None = Field(None, max_length=500)
+    #: A terms decline may only be cleared by acknowledging the terms.  The
+    #: flag exists so the acknowledgement is an act the caller states, not one
+    #: the endpoint infers from a button's colour.
+    acknowledge_terms: bool = False
 
 
 class AcknowledgeIn(BaseModel):
@@ -641,6 +653,99 @@ def revoke_acknowledgement(
         "admin.source_acknowledgement_revoked", "source_catalogue", adapter_key, seeker_id=admin.id
     )
     return _source_view(repo.get_source(adapter_key) or {})
+
+
+# ---------------------------------------------------------------------------
+# Declined sources (FR-182, IR-101)
+# ---------------------------------------------------------------------------
+#
+# A source that was refused across requests or across campaigns is declined
+# automatically and left out of every plan until an administrator re-enables
+# it.  It used to be rediscovered by every run: the same five sources were
+# selected, refused, counted as errors and selected again.  These routes are
+# the list and the single explicit act that clears a decline.
+
+#: Decline reasons an administrator has to acknowledge explicitly (IR-101).
+_TERMS_DECLINE_REASONS = declines.IR101_REASONS
+
+
+def _decline_view(row: dict, source: dict | None) -> dict:
+    requires_ack = bool((source or {}).get("requires_ack")) or (
+        (source or {}).get("tos_status") == "prohibited"
+    )
+    return {
+        **row,
+        "display_name": (source or {}).get("display_name") or row.get("adapter_key"),
+        "source_type": (source or {}).get("source_type"),
+        "tos_status": (source or {}).get("tos_status"),
+        "enabled": (source or {}).get("enabled"),
+        # The catalogue's own IR-101 stamp, named apart from the decline row's
+        # ``acknowledged_at`` (which is when the decline itself was cleared).
+        "source_acknowledged_at": (source or {}).get("acknowledged_at"),
+        "active": bool(row.get("declined_at")) and not row.get("acknowledged_at"),
+        "reason_label": declines.reason_label(row.get("reason")),
+        # IR-101: clearing a terms decline is an acknowledgement, and the
+        # screen has to ask for it rather than relabel a button.
+        "requires_acknowledgement": bool(row.get("reason")) and (
+            row["reason"] in _TERMS_DECLINE_REASONS or requires_ack
+        ),
+    }
+
+
+@router.get("/source-declines")
+def list_source_declines(
+    include_cleared: bool = Query(False, description="Also list declines an administrator cleared"),
+    admin: CurrentSeeker = Depends(current_admin),
+) -> list[dict]:
+    """The sources this installation has declined, and why (FR-182, IR-101)."""
+    sources = {row["adapter_key"]: row for row in repo.list_sources()}
+    return [
+        _decline_view(row, sources.get(row["adapter_key"]))
+        for row in decline_repo.list_declines(active_only=not include_cleared)
+    ]
+
+
+@router.post("/source-declines/{adapter_key}/enable")
+def enable_declined_source(
+    adapter_key: str,
+    payload: DeclineEnableIn,
+    admin: CurrentSeeker = Depends(current_admin),
+) -> dict:
+    """Re-enable one declined source, with an audit event (FR-363, IR-101).
+
+    A terms decline requires ``acknowledge_terms``: the administrator states
+    that they accept the terms, and the catalogue row is stamped accordingly.
+    Clearing any other decline is the same explicit act - asking again is what
+    the decline exists to stop, so a person has to decide to ask again.
+    """
+    row = decline_repo.get_decline(adapter_key)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no decline recorded for this source")
+    source = repo.get_source(adapter_key)
+    needs_terms = (row.get("reason") in _TERMS_DECLINE_REASONS) or bool(
+        (source or {}).get("requires_ack")
+    ) or ((source or {}).get("tos_status") == "prohibited")
+    if needs_terms and not payload.acknowledge_terms:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{adapter_key} is declined for terms reasons; pass acknowledge_terms=true to "
+            "state that you accept them and re-enable the source (IR-101)",
+        )
+
+    cleared = declines.clear(adapter_key, actor=admin.email or admin.id, note=payload.note)
+    if source is not None:
+        values: dict[str, Any] = {"enabled": 1}
+        if needs_terms:
+            values["acknowledged_at"] = utcnow()
+        repo.update_source(adapter_key, values)
+        record_audit(
+            "admin.source_re_enabled",
+            "source_catalogue",
+            adapter_key,
+            seeker_id=admin.id,
+            detail={"decline_reason": row.get("reason"), "note": payload.note},
+        )
+    return _decline_view(cleared or row, repo.get_source(adapter_key))
 
 
 # ---------------------------------------------------------------------------

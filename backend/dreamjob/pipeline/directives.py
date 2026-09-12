@@ -1146,6 +1146,66 @@ def _role_tokens(text: str) -> set[str]:
     return {w for w in _ROLE_WORD_RE.findall(text.lower()) if w not in _ROLE_STOPWORDS}
 
 
+#: Level and scope qualifiers.  A vacancy title ("Software Architect") that
+#: leaves them out still describes the same role as a fuller target title
+#: ("Hands-on Software Architect / Lead Engineer"), so they are ignored when
+#: the two are compared word for word.
+_SCOPE_LEVEL_WORDS = frozenset(
+    {
+        "intern", "junior", "jr", "medior", "mid", "senior", "sr", "experienced",
+        "lead", "principal", "staff", "head", "chief", "hands", "hand", "graduate",
+        "entry", "starter", "trainee",
+    }
+)
+
+#: Role nouns that name no function by themselves: an "Engineer" or a
+#: "Manager" could be anything.  They never count as a target keyword, though
+#: they still count inside a full target title.
+_TITLE_GENERIC_WORDS = frozenset(
+    {
+        "engineer", "engineering", "developer", "development", "architect",
+        "manager", "management", "director", "officer", "specialist", "analyst",
+        "consultant", "coordinator", "assistant", "advisor",
+    }
+)
+
+#: Two-letter terms that a title really can be reduced to.
+_SHORT_DOMAIN_WORDS = frozenset({"ai", "ml", "bi", "ux", "qa"})
+_KEYWORD_WORD_RE = re.compile(r"[a-z0-9+#.]{2,}")
+
+
+def _scope_tokens(text: str) -> set[str]:
+    """The words that identify the role, with its level qualifiers removed."""
+    return _role_tokens(text) - _SCOPE_LEVEL_WORDS
+
+
+def _keyword_tokens(text: str) -> set[str]:
+    """Words a title keyword may be matched on, short domain terms included."""
+    return {
+        word
+        for word in _KEYWORD_WORD_RE.findall(text.lower())
+        if word not in _ROLE_STOPWORDS
+        and (len(word) >= 3 or word in _SHORT_DOMAIN_WORDS)
+    }
+
+
+def _target_keywords(titles: Sequence[str]) -> list[str]:
+    """Distinctive words of the target titles, for a degraded directive set.
+
+    When no function family and no must-have subject give the gate something to
+    match, the target titles still do - provided the words that name a function
+    are kept and the ones that name only a rank ("lead", "senior") or a generic
+    role noun ("engineer", "manager") are dropped, so "Software Architect" is
+    kept by "software" while "Logistiek Medewerker" stays out.
+    """
+    keywords: list[str] = []
+    for title in titles:
+        for token in sorted(_keyword_tokens(title) - _SCOPE_LEVEL_WORDS - _TITLE_GENERIC_WORDS):
+            if token not in keywords:
+                keywords.append(token)
+    return keywords
+
+
 def role_relevance(
     directive_set: DirectiveSetLike,
     title: str | None,
@@ -1163,28 +1223,44 @@ def role_relevance(
     role, so a difference in seniority or wording never hides a real match.
     Anything not clearly in scope is left to the directive-fit sub-score
     (FR-281), which ranks a soft mismatch low rather than hiding it (NFR-305).
-    Returns ``None`` when the directives name no titles and no function
-    families, because then there is nothing to judge by.
+    Returns ``None`` when the directives name no titles, no function families
+    and no must-have skills, because then there is nothing to judge by.
+
+    A *degraded* set - one that names targets but no function families or
+    subjects, as a structural composite can produce - still asked for the work
+    its titles describe.  The titles' own distinctive words are therefore used
+    as a last signal instead of rejecting on the absence of one that was never
+    given; an earlier version rejected an entire corpus this way, because a
+    compound target like "Hands-on Software Architect / Lead Engineer" only
+    scored "Software Architect" 2/5 on the word overlap.
     """
     content = coerce_directive_set(directive_set).job_content
     titles = [t.strip() for t in content.all_titles() if t.strip()]
     families = [f.strip() for f in content.function_families if f.strip()]
-    if not titles and not families:
+    skills = [s.strip() for s in content.must_have_skills if s.strip()]
+    if not titles and not families and not skills:
         return None
 
     title_l = (title or "").lower()
     family_l = (function_family or "").lower()
-    title_tokens = _role_tokens(title_l)
+    title_tokens = _scope_tokens(title_l)
     body = f"{title_l} {(description or '')[:400].lower()}"
 
-    # A target title appears verbatim.
+    # A target title (or an accepted synonym) appears verbatim.
     for wanted in titles:
         if wanted.lower() in title_l:
             return None
-    # ...or enough of its words appear in the title.
+    # ...or enough of its words appear in the title...
     for wanted in titles:
-        wanted_tokens = _role_tokens(wanted)
-        if wanted_tokens and len(wanted_tokens & title_tokens) / len(wanted_tokens) >= 0.5:
+        wanted_tokens = _scope_tokens(wanted)
+        if not wanted_tokens:
+            continue
+        if len(wanted_tokens & title_tokens) / len(wanted_tokens) >= 0.5:
+            return None
+        # ...or every word the vacancy's own title says is one the target
+        # names, which is how the short form of a descriptive target keeps
+        # matching instead of being scored below the threshold.
+        if title_tokens and title_tokens <= wanted_tokens:
             return None
     # ...or the function family matches.
     for family in families:
@@ -1193,10 +1269,21 @@ def role_relevance(
             return None
     # ...or the posting names a must-have subject, which is how an oddly titled
     # role ("Founding Engineer", "Member of Technical Staff") is still caught.
-    for skill in content.must_have_skills:
-        needle = skill.strip().lower()
+    for skill in skills:
+        needle = skill.lower()
         if needle and needle in body:
             return None
+    # ...or - when the set carries no families or no subjects to match on - the
+    # vacancy carries the target titles' own distinctive words.  Deliberately
+    # conservative: one word in the title is enough, but an incidental mention
+    # in the body needs two, so "Parcels are sorted" is still out.
+    if not families or not skills:
+        keywords = _target_keywords(titles)
+        if keywords:
+            if any(keyword in _keyword_tokens(title_l) for keyword in keywords):
+                return None
+            if len([keyword for keyword in keywords if keyword in body]) >= 2:
+                return None
 
     return "role_out_of_scope"
 
@@ -1556,6 +1643,146 @@ def _shift(level: Seniority, delta: int) -> Seniority:
     return order[max(0, min(len(order) - 1, index + delta))]
 
 
+#: Words that identify a function family, in the canonical vocabulary the
+#: vacancy normaliser stores (:mod:`dreamjob.pipeline.taxonomy`).  Only used
+#: when the title catalogue cannot resolve a target phrase; the first match per
+#: text wins, in this order, so "AI & Data Engineer" is read as data before
+#: engineering, exactly as the corpus's own inference does.
+_FUNCTION_FAMILY_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("data & analytics", re.compile(
+        r"\b(data|analytics|machine learning|ml|ai|artificial intelligence|"
+        r"business intelligence|bi)\b", re.I)),
+    ("software engineering", re.compile(
+        r"\b(software|developer|development|programmer|backend|frontend|"
+        r"full[- ]?stack|web|devops|sre|architect|engineer(ing)?)\b", re.I)),
+    ("information security", re.compile(r"\b(security|cyber|infosec|privacy)\b", re.I)),
+    ("it operations", re.compile(
+        r"\b(infrastructure|system administrator|network|helpdesk|it support)\b", re.I)),
+    ("product", re.compile(r"\b(product (owner|manager|lead)|product management)\b", re.I)),
+    ("design", re.compile(r"\b(designer|ux|user experience)\b", re.I)),
+    ("sales & business development", re.compile(r"\b(sales|business development)\b", re.I)),
+    ("marketing & communications", re.compile(r"\b(marketing|communications|brand)\b", re.I)),
+    ("human resources", re.compile(r"\b(hr|human resources|talent|recruit)\b", re.I)),
+    ("operations & supply chain", re.compile(
+        r"\b(operations|supply chain|logistics|procurement)\b", re.I)),
+    ("engineering & manufacturing", re.compile(
+        r"\b(manufacturing|production|mechanical|electrical|process engineer)\b", re.I)),
+    ("consulting & advisory", re.compile(r"\b(consultant|consulting|advisory|advisor)\b", re.I)),
+    ("legal & compliance", re.compile(r"\b(legal|counsel|compliance|regulatory)\b", re.I)),
+    ("customer success & support", re.compile(
+        r"\b(customer (success|support|service))\b", re.I)),
+    ("general management", re.compile(r"\b(general manager|managing director)\b", re.I)),
+)
+
+#: Requirement words that name a subject a vacancy can be matched on.  A term
+#: is proposed only where the dream job itself states it, so the fallback adds
+#: nothing the statement does not say (CR-405).  Deliberately longer than two
+#: characters: the gate matches subjects as plain substrings.
+_DREAM_SKILL_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("python", re.compile(r"\bpython\b", re.I)),
+    ("sql", re.compile(r"\bsql\b", re.I)),
+    ("object-oriented", re.compile(r"\bobject[- ]oriented\b", re.I)),
+    ("architecture", re.compile(r"\barchitecture\b", re.I)),
+    ("web application", re.compile(r"\bweb[- ]?applications?\b", re.I)),
+    ("security", re.compile(r"\bsecurity\b", re.I)),
+    ("privacy", re.compile(r"\bprivacy\b", re.I)),
+    ("machine learning", re.compile(r"\bmachine learning\b", re.I)),
+    ("data engineering", re.compile(r"\bdata engineer(ing)?\b", re.I)),
+    ("data analytics", re.compile(r"\bdata analy(tics|sis)\b", re.I)),
+    ("full-stack", re.compile(r"\bfull[- ]?stack\b", re.I)),
+)
+
+
+def _role_family_names(dream_job_model: Mapping[str, Any] | None) -> list[str]:
+    """The families the dream-job model itself names (``role_families[*].family``)."""
+    node = _block(dream_job_model, "role_families")
+    if node is None:
+        return []
+    names = _labelled_strings(node, ("family",))
+    return [name for name in dict.fromkeys(n.strip() for n in names) if 2 < len(name) <= 60]
+
+
+def _infer_families(*texts: str | None) -> list[str]:
+    """Canonical families the words of ``texts`` identify, most specific first."""
+    families: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        for family, pattern in _FUNCTION_FAMILY_HINTS:
+            if pattern.search(text):
+                if family not in families:
+                    families.append(family)
+                break
+    return families
+
+
+def _profile_sections(profile_version: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    sections = _block(profile_version, "sections")
+    return sections if isinstance(sections, Mapping) else {}
+
+
+def _profile_role_texts(profile_version: Mapping[str, Any] | None) -> list[str]:
+    """Recorded role titles and stated skills, for a composite that says little."""
+    sections = _profile_sections(profile_version)
+    texts: list[str] = []
+    for entry in sections.get("experience") or []:
+        if isinstance(entry, Mapping):
+            for key in ("title", "position"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value.strip())
+    texts.extend(_texts(sections.get("top_skills")))
+    return texts
+
+
+def _profile_skill_texts(profile_version: Mapping[str, Any] | None) -> list[str]:
+    """Stated skill labels in the profile sections, short ones only."""
+    sections = _profile_sections(profile_version)
+    labels: list[str] = []
+    for key in ("top_skills", "skills"):
+        block = sections.get(key)
+        if isinstance(block, Mapping):
+            labels.extend(_labelled_strings(block, ("name", "label", "skill", "text")))
+        elif isinstance(block, Sequence) and not isinstance(block, (str, bytes)):
+            for item in block:
+                if isinstance(item, str):
+                    labels.append(item)
+                elif isinstance(item, Mapping):
+                    labels.extend(_labelled_strings(item, ("name", "label", "skill", "text")))
+    return [label.strip() for label in labels if 2 < len(label.strip()) < 60][:8]
+
+
+def _dream_skill_hints(dream_job_model: Mapping[str, Any] | None) -> list[str]:
+    """Short subjects the dream job states, for a composite with no skills.
+
+    A structural composite (no LLM) carries no competencies at all, so before
+    this the proposed directive set arrived with ``must_have_skills: []`` and
+    the relevance gate had no subject to match against any posting.
+    """
+    if not dream_job_model:
+        return []
+    texts: list[str] = []
+    for column in (
+        "statement",
+        "target_roles",
+        "role_families",
+        "responsibilities",
+        "company_characteristics",
+        "culture_values",
+        "deal_breakers",
+        "implicit_preferences",
+    ):
+        texts.extend(_texts(_block(dream_job_model, column)))
+    joined = " \n ".join(texts)
+    if not joined:
+        return []
+    found: list[str] = []
+    for label, pattern in _DREAM_SKILL_HINTS:
+        if pattern.search(joined) and label not in found:
+            found.append(label)
+    return found[:8]
+
+
 class DirectiveProposal(BaseModel):
     """A pre-filled directive set with its provenance (FR-147)."""
 
@@ -1612,12 +1839,37 @@ def propose_directives(
             if entry:
                 synonyms.extend(s for s in entry["synonyms"] if s not in synonyms)
         payload.job_content.title_synonyms = synonyms[:12]
-        families = [e["family"] for e in (lookup_title(t) for t in titles) if e]
-        payload.job_content.function_families = list(dict.fromkeys(families))[:3]
-        if families:
-            provenance["job_content.function_families"] = "title catalogue lookup"
     else:
         unresolved.append("job_content.target_titles")
+
+    # The title catalogue resolves only phrases it knows.  A structural
+    # composite names its targets in prose ("Hands-on Software Architect /
+    # Lead Engineer"), so the catalogue yields nothing and the family list came
+    # out empty - which left the relevance gate (FR-142) with no scope signal
+    # beyond an exact title and rejected the corpus.  The dream-job model's own
+    # role families are authoritative and keep their own words ("software
+    # engineering & architecture" contains the corpus's "software engineering");
+    # only when even they say nothing is the function read off the target
+    # titles and the recorded experience.
+    catalogue = [e["family"] for e in (lookup_title(t) for t in titles) if e]
+    stated = _role_family_names(dream_job_model)
+    families = list(dict.fromkeys([*catalogue, *stated]))
+    family_sources: list[str] = []
+    if catalogue:
+        family_sources.append("title catalogue lookup")
+    if stated:
+        family_sources.append("dream_job_model.role_families")
+    if not families and titles:
+        families = _infer_families(*titles)
+        if families:
+            family_sources.append("target titles")
+    if not families:
+        families = _infer_families(*_profile_role_texts(profile_version))
+        if families:
+            family_sources.append("profile experience")
+    if families:
+        payload.job_content.function_families = families[:6]
+        provenance["job_content.function_families"] = " + ".join(family_sources)
 
     # --- seniority range (FR-142) ------------------------------------------
     # The dream-job model is the statement of intent; the composite profile
@@ -1668,14 +1920,29 @@ def propose_directives(
     # "expert" as must-have skills - noise that the relevance gate and the
     # title score both then matched against real postings.
     core = [t for t in _content_texts(_block(composite_profile, "core_competencies")) if len(t) < 60]
+    skill_source: str | None = None
+    if core:
+        skill_source = "composite_profile.core_competencies"
+    else:
+        # A structural composite carries no competencies at all.  Fall back to
+        # the subjects the dream job itself states, then to the skills the
+        # profile lists, so a proposed set is never empty where it matters:
+        # an empty must-have list is a signal the relevance gate cannot use.
+        core = _dream_skill_hints(dream_job_model)
+        if core:
+            skill_source = "dream_job_model.statement/responsibilities"
+        else:
+            core = _profile_skill_texts(profile_version)
+            if core:
+                skill_source = "profile_version.sections.skills"
     adjacent_block = _block(composite_profile, "adjacent_competencies")
     adjacent = [t for t in _content_texts(adjacent_block) if len(t) < 60]
     domains = [t for t in _content_texts(_block(composite_profile, "domains")) if len(t) < 60]
     payload.job_content.must_have_skills = list(dict.fromkeys(core))[:8]
     payload.job_content.nice_to_have_skills = list(dict.fromkeys(adjacent))[:8]
     payload.job_content.industries_include = list(dict.fromkeys(domains))[:6]
-    if core:
-        provenance["job_content.must_have_skills"] = "composite_profile.core_competencies"
+    if skill_source:
+        provenance["job_content.must_have_skills"] = skill_source
     if adjacent:
         provenance["job_content.nice_to_have_skills"] = "composite_profile.adjacent_competencies"
     if domains:

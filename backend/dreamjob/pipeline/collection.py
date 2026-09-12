@@ -108,8 +108,9 @@ from dreamjob.db.repositories import knowledge as kb_repo
 from dreamjob.egress import client as egress_client
 from dreamjob.egress.client import EgressClient, FetchResult, RobotsDisallowed
 from dreamjob.jobs.runner import JobCancelled, JobContext, runner
-from dreamjob.pipeline import board_registry, knowledge_base, planning
+from dreamjob.pipeline import board_registry, declines, knowledge_base, planning
 from dreamjob.pipeline import outcomes as outcome_rules
+from dreamjob.pipeline.declines import NoUsableSources
 
 
 def _is_ats(adapter: Any) -> bool:
@@ -705,6 +706,12 @@ class ItemOutcome:
     #: without issuing one (a crash).  This is ``failed_count`` in the plan row
     #: - the same events as ``errors``, counted per request instead of per page.
     failed: int = 0
+    #: 401s.  Deliberately *inside* ``failed``: a credential this installation
+    #: was supposed to hold and does not is our own defect and stays loud.  The
+    #: separate count is what lets the decline policy tell a source refused
+    #: everywhere (401 on every request, arguably unusable) from a source that
+    #: broke halfway (500 mixed in), without reclassifying either.
+    unauthorized: int = 0
     #: Answers in which the source itself stated it holds nothing for this query.
     stated_empty: int = 0
     robots_blocked: int = 0      # ... of ``blocked``, refused by robots.txt (FR-182)
@@ -712,10 +719,15 @@ class ItemOutcome:
     #: ``gone`` verdict has to be able to show (NFR-402).
     block_reason: str | None = None
     gone_reason: str | None = None
-    #: The statuses the gone and failed verdicts rest on, which is what the
-    #: board registry is told: 404/410 retires a board, a 5xx never can.
+    #: The statuses the gone, blocked and failed verdicts rest on, which is what
+    #: the board registry and the durable-decline policy are told: 404/410
+    #: retires a board, a 403/451 is a decision, a 5xx never can be either.
     gone_status: int | None = None
+    blocked_status: int | None = None
     failed_status: int | None = None
+    #: The first refused URL this item saw, kept as the citation a durable
+    #: decline has to carry (NFR-402).
+    evidence_url: str | None = None
     last_error: str | None = None
 
     @property
@@ -817,6 +829,7 @@ class ItemOutcome:
             "blocked": self.blocked,
             "gone": self.gone,
             "failed": self.failed,
+            "unauthorized": self.unauthorized,
             "blocked_by_robots": bool(self.robots_blocked),
             "block_reason": self.block_reason,
             "gone_reason": self.gone_reason,
@@ -1215,17 +1228,23 @@ def _classify_refusals(step: ItemOutcome, refusals: list[Any], *, board: bool) -
     for refusal in refusals:
         if not isinstance(refusal, Refusal):  # pragma: no cover - defensive
             continue
+        step.evidence_url = step.evidence_url or refusal.url
         kind = refusal.kind(board=board)
         if kind == "blocked":
             step.blocked += 1
             step.robots_blocked += 1 if refusal.robots else 0
             step.block_reason = step.block_reason or refusal.detail
+            if not refusal.robots:
+                step.blocked_status = step.blocked_status or refusal.status
         elif kind == "gone":
             step.gone += 1
             step.gone_reason = step.gone_reason or refusal.detail
             step.gone_status = step.gone_status or refusal.status
         else:
             step.failed_status = step.failed_status or refusal.status
+            # Counted as a failure *and* recorded separately (see the field).
+            if refusal.status == 401:
+                step.unauthorized += 1
 
 
 def _last_detail(refusals: list[Any]) -> str:
@@ -1372,13 +1391,16 @@ def _absorb(unit: _Unit, step: ItemOutcome) -> None:
     total.stated_empty += step.stated_empty
     total.blocked += step.blocked
     total.gone += step.gone
+    total.unauthorized += step.unauthorized
     total.robots_blocked += step.robots_blocked
     # Per request, and never twice for one page: see ``page_failures``.
     total.failed += step.page_failures
     total.block_reason = total.block_reason or step.block_reason
     total.gone_reason = total.gone_reason or step.gone_reason
     total.gone_status = total.gone_status or step.gone_status
+    total.blocked_status = total.blocked_status or step.blocked_status
     total.failed_status = total.failed_status or step.failed_status
+    total.evidence_url = total.evidence_url or step.evidence_url
     if step.last_error:
         total.last_error = step.last_error
 
@@ -1600,11 +1622,28 @@ async def collection_worker(ctx: JobContext) -> None:
 
     try:
         async with EgressClient() as egress:
+            # FR-182 / IR-101: the declined sources are read once per run and
+            # handed to every unit builder, so a declined item is skipped
+            # before its adapter is even constructed.
+            declined_now = declines.active_map()
+            declined_seen: set[str] = set()
             units.extend(
                 await _build_units(
-                    items, catalogue, egress, campaign_id, caps, completed, admin_caps, books
+                    items, catalogue, egress, campaign_id, caps, completed, admin_caps, books,
+                    declined=declined_now, declined_seen=declined_seen,
                 )
             )
+            if not units and declined_seen:
+                # No runnable source is a blocker, not an empty run.  A campaign
+                # that launches only to re-issue requests it has already been
+                # refused spends its budget on refusals and reports nothing to
+                # act on; saying which sources are declined and why is the
+                # actionable answer (FR-186).
+                blocked = [declined_now[key] for key in sorted(declined_seen) if key in declined_now]
+                raise NoUsableSources(
+                    declines.no_sources_message(blocked, what="collect"),
+                    blockers=declines.blockers(blocked),
+                )
             # FR-186: the denominator is settled once, after the sources with no
             # work have been taken out, so the bar cannot end at "1 of 8" on a
             # run in which seven of the eight sources were never runnable.
@@ -1630,7 +1669,8 @@ async def collection_worker(ctx: JobContext) -> None:
                 units.extend(
                     await _expand_harvest_stage(campaign_id, catalogue, egress, items, units,
                                                 caps, admin_caps, books,
-                                                budget=max(0, caps.max_pages - stats.pages))
+                                                budget=max(0, caps.max_pages - stats.pages),
+                                                declined=declined_now)
                 )
                 return stats.pages_done + sum(u.remaining for u in units)
 
@@ -2059,6 +2099,8 @@ async def _build_units(
     admin_caps: dict[str, dict],
     books: _Bookkeeping,
     skip_logged: set[str] | None = None,
+    declined: dict[str, dict] | None = None,
+    declined_seen: set[str] | None = None,
 ) -> list[_Unit]:
     """Turn the plan into runnable work, settling what cannot run (IR-101).
 
@@ -2078,7 +2120,8 @@ async def _build_units(
             await books.barrier()
         try:
             unit = _build_unit(
-                item, catalogue, egress, campaign_id, caps, completed, admin_caps, logged
+                item, catalogue, egress, campaign_id, caps, completed, admin_caps, logged,
+                declined=declined, declined_seen=declined_seen,
             )
         except Exception as exc:  # noqa: BLE001 - the item fails, the campaign does not
             # Every decision about one plan item belongs to that plan item.  The
@@ -2128,11 +2171,36 @@ def _build_unit(
     completed: dict[str, int],
     admin_caps: dict[str, dict],
     skip_logged: set[str] | None = None,
+    declined: dict[str, dict] | None = None,
+    declined_seen: set[str] | None = None,
 ) -> _Unit | None:
     """Prepare one plan item, or settle it and return ``None``."""
     entry = catalogue.get(item["adapter_key"], {})
     key = item["adapter_key"]
     logged = skip_logged if skip_logged is not None else set()
+    declined = declined or {}
+    decline = declined.get(key)
+    if decline is not None:
+        # FR-182 / IR-101: the adapter is declined, so this item is not work.
+        # It is skipped *without* charging a page or an error - the whole point
+        # of the memory is that the refusals were charged once, in the run that
+        # established them, and never again.  Left runnable, because an
+        # administrator re-enabling the source should let the next launch
+        # collect it rather than leave a terminal 'skipped' behind.
+        reason = declines.rejection_reason(decline)
+        repo.update_plan_item(
+            item["id"],
+            {
+                "status": "planned",
+                "last_error": reason,
+                "outcome_state": "skipped",
+                "outcome_reason": reason,
+            },
+        )
+        _log_skip_once(logged, key, reason)
+        if declined_seen is not None:
+            declined_seen.add(key)
+        return None
     if key in repo.BROWSER_STRATEGY_KEYS:
         # FR-165: the network crawl is a browser strategy, not an adapter, and
         # its plan item is the browser run's target allowlist (FR-205).
@@ -2261,6 +2329,7 @@ async def _expand_harvest_stage(
     admin_caps: dict[str, dict],
     books: _Bookkeeping,
     budget: int,
+    declined: dict[str, dict] | None = None,
 ) -> list[_Unit]:
     """Plan the ATS boards the discovery stages just found (FR-162, FR-181).
 
@@ -2282,8 +2351,13 @@ async def _expand_harvest_stage(
     considered = 0
     if budget <= 0:
         return added
+    declined = declined or {}
     for key, entry in sorted(catalogue.items()):
         if entry.get("source_type") != "ats" or not entry.get("enabled", 1):
+            continue
+        if key in declined:
+            # The vendor is declined, so a board discovered during the run is
+            # no more readable than the ones already planned (FR-182, IR-101).
             continue
         if len(added) >= budget:
             break
@@ -2661,6 +2735,19 @@ def _settle(unit: _Unit, stats: CollectionStats, campaign_id: str) -> None:
     outcome = unit.outcome
     _record_extraction(unit, campaign_id)
     _record_ledger(unit)
+    # FR-182 / IR-101: a settled item whose every request was refused is
+    # evidence about the *adapter*, not only about this campaign.  Recording it
+    # durably is what stops the next plan selecting the same five sources to be
+    # refused again (see ``pipeline/declines``).  It never touches this run's
+    # counters: a blocked item is still a blocked item.  A source that wrote a
+    # record anywhere in this run is serving, so its refused targets are
+    # target-specific and not evidence against the adapter.
+    declines.observe(
+        unit.adapter_key,
+        outcome,
+        campaign_id,
+        had_success=bool(stats.adapter(unit.adapter_key)["records"]),
+    )
     if not unit.started:
         if unit.remaining <= 0:
             # Every page of this item was already fetched by the run this one
@@ -2768,6 +2855,23 @@ async def launch(campaign_id: str, job_seeker_id: str) -> str:
     ]
     if not items:
         raise ValueError("Nothing to collect: generate a plan first, or all sources are excluded")
+
+    # FR-182 / FR-186: launching is where an all-declined plan has to stop.
+    # The worker would skip every item and the job would settle 'done' having
+    # charged nothing, which reads as "nothing to collect" instead of "every
+    # source this plan could use is declined, and here is why".  A browser
+    # strategy item is not collection work, so it does not count as runnable.
+    active = declines.active_map()
+    collection_items = [
+        i for i in items if i["adapter_key"] not in repo.BROWSER_STRATEGY_KEYS
+    ]
+    runnable_items = [i for i in collection_items if i["adapter_key"] not in active]
+    if collection_items and not runnable_items:
+        blocked = [active[key] for key in sorted({i["adapter_key"] for i in collection_items})]
+        raise NoUsableSources(
+            declines.no_sources_message(blocked, what="collect"),
+            blockers=declines.blockers(blocked),
+        )
 
     caps = Caps.from_campaign(campaign)
     # A first estimate for the progress bar; the worker settles the real
@@ -3132,6 +3236,10 @@ def status(
         "status": campaign.get("status"),
         "stage": campaign.get("stage"),
         "caps": Caps.from_campaign(campaign).to_dict(),
+        # FR-186: the run report carries the same scale-down notice the plan
+        # screen shows, so a run that fetched 150 of an asked-for 1,505 pages
+        # says so where the results are read.
+        "plan_notice": campaign.get("plan_notice"),
         "started_at": campaign.get("started_at"),
         "finished_at": campaign.get("finished_at"),
         # The collection job's progress and the raw query/rationale it carries

@@ -156,6 +156,108 @@ def test_no_titles_and_no_families_means_no_gate():
     assert role_relevance(d, "Anything At All", "Whatever") is None
 
 
+def test_a_compound_directive_target_title_still_matches_its_short_form():
+    """Regression: the live autopilot set named its targets as prose.
+
+    "Software Architect" is only 2 of the 5 words of "Hands-on Software
+    Architect / Lead Engineer", so the 50% rule scored it out and - with
+    function_families and must_have_skills both empty - the directive gate
+    rejected the whole corpus, relevant titles included.
+    """
+    d = _directives(titles=["Hands-on Software Architect / Lead Engineer"], families=[], must=[])
+    assert role_relevance(d, "Software Architect", None) is None
+    assert role_relevance(d, "Software Engineer", None) is None
+    assert role_relevance(d, "Senior Software Architect", "Software Engineering") is None
+
+
+def test_a_declared_directive_synonym_matches_even_with_empty_families_and_skills():
+    d = _directives(titles=["Hands-on Software Architect / Lead Engineer"], families=[], must=[])
+    d.job_content.title_synonyms = ["Solution Architect"]
+    assert role_relevance(d, "Solution Architect", None) is None
+
+
+def test_a_degraded_directive_set_falls_back_to_target_title_keywords():
+    d = _directives(titles=["Software Security Architect"], families=[], must=[])
+    # One distinctive word of a target title in the vacancy title is enough...
+    assert role_relevance(d, "Software Associate", None) is None
+    # ...and two of them in the body are, where one mention could be noise.
+    assert (
+        role_relevance(d, "Founding Member", None, "Security is taken seriously in our software.")
+        is None
+    )
+
+
+def test_a_degraded_directive_set_still_rejects_a_genuinely_unrelated_role():
+    d = _directives(titles=["Software Security Architect"], families=[], must=[])
+    assert (
+        role_relevance(d, "Logistiek Medewerker", None, "Parcels are sorted and loaded.")
+        == "role_out_of_scope"
+    )
+    assert role_relevance(d, "Kinesitherapeut(e)", "Healthcare") == "role_out_of_scope"
+    # A single incidental mention in the body is not a scope signal.
+    assert (
+        role_relevance(d, "Office Manager", None, "Some security training is provided.")
+        == "role_out_of_scope"
+    )
+
+
+def test_the_directive_proposal_fills_families_and_skills_from_a_structural_composite():
+    """Regression: a structural composite carries no competencies, and the
+    catalogue cannot resolve its prose target titles, so the proposed set
+    arrived with ``function_families: []`` and ``must_have_skills: []``.  The
+    dream job still states both, and they are proposed from there (FR-147)."""
+    composite = {
+        "career_trajectory": [
+            {"id": "career_trajectory:1", "text": "Independent Software Designer & Developer"}
+        ],
+        "core_competencies": [],
+    }
+    dream = {
+        "statement": (
+            "Back to designing and building software: object-oriented design, "
+            "well-structured web applications, and the AI and data side. "
+            "Security and privacy taken seriously."
+        ),
+        "target_roles": [{"title": "Hands-on Software Architect / Lead Engineer"}],
+        "role_families": [
+            {"family": "software engineering & architecture", "example_titles": ["Software Architect"]},
+            {"family": "application security & privacy engineering", "example_titles": []},
+        ],
+        "responsibilities": [
+            {"activity": "Shape and own the system architecture", "importance": "must"},
+        ],
+    }
+
+    proposal = propose_directives(composite, dream, None)
+    content = proposal.directives.job_content
+
+    assert "software engineering & architecture" in content.function_families
+    assert "application security & privacy engineering" in content.function_families
+    assert {"object-oriented", "web application", "security", "privacy"} <= set(
+        content.must_have_skills
+    )
+    assert (
+        proposal.provenance["job_content.function_families"]
+        == "dream_job_model.role_families"
+    )
+    assert proposal.provenance["job_content.must_have_skills"].startswith("dream_job_model")
+    # ...and the gate now keeps the role the empty set had rejected.
+    assert role_relevance(proposal.directives, "Software Architect", None) is None
+
+
+def test_the_directive_proposal_infers_families_from_prose_target_titles():
+    dream = {"target_roles": [{"title": "Hands-on Software Architect"}]}
+    content = propose_directives(None, dream, None).directives.job_content
+    assert "software engineering" in content.function_families
+
+
+def test_the_directive_proposal_falls_back_to_profile_skills_when_silent():
+    composite = {"core_competencies": []}
+    profile = {"sections": {"top_skills": ["Python", "SQL"]}}
+    content = propose_directives(composite, None, profile).directives.job_content
+    assert content.must_have_skills == ["Python", "SQL"]
+
+
 # ---------------------------------------------------------------------------
 # The gate is actually applied when a vacancy becomes an opportunity
 # ---------------------------------------------------------------------------

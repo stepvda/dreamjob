@@ -57,7 +57,8 @@ from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, utcnow
 from dreamjob.db.repositories import campaigns as repo
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError, redact
-from dreamjob.pipeline import discovery, knowledge_base, top_employers
+from dreamjob.pipeline import declines, discovery, knowledge_base, top_employers
+from dreamjob.pipeline.declines import NoUsableSources
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +86,30 @@ DEFAULT_CAPS: dict[str, int] = {
     # the cap in the schema makes it visible and adjustable rather than implicit
     # in whatever the sources returned.
     "max_opportunities": 25_000,
+}
+
+#: The bounds an *unattended* run puts on the campaign it creates (FR-186).
+#:
+#: These are deliberately tighter than :data:`DEFAULT_CAPS`.  Those are sized
+#: for an operator's supervised data-gathering run; autopilot is the opposite -
+#: a job seeker pressed one button and is waiting for a shortlist.  They live
+#: here, next to the defaults they tighten, so the autopilot page cap and the
+#: campaign defaults are one decision in one place: ``autopilot`` imports this
+#: mapping and no longer keeps a second copy that can drift.
+#:
+#: ``max_pages`` is 400: 150 scaled a real plan down from 1,505 pages and left
+#: most of the plan unfetched, while 10,000 is a supervised sweep's budget.  400
+#: costs roughly 25 minutes of API reads at the catalogue's rates and keeps the
+#: plan's cost estimate on the start screen, which is what "visible" means
+#: (FR-163, FR-186).
+DEFAULT_AUTOPILOT_CAPS: dict[str, int] = {
+    "max_companies": 40,
+    "max_pages": 400,
+    "max_pages_per_source": 8,
+    "max_duration_seconds": 45 * 60,
+    # An unattended run ranks what one press of a button asked for; a corpus of
+    # tens of thousands is neither reviewable nor the point of a shortlist.
+    "max_opportunities": 5_000,
 }
 
 # FR-165: the network crawl is slow and intrusive, so it is capped hard.
@@ -187,15 +212,18 @@ class SourceSelection:
     selected: list[dict] = field(default_factory=list)
     rejected: list[dict] = field(default_factory=list)
 
-    def reject(self, entry: dict, reason: str) -> None:
-        self.rejected.append(
-            {
-                "adapter_key": entry.get("adapter_key"),
-                "display_name": entry.get("display_name"),
-                "source_type": entry.get("source_type"),
-                "reason": reason,
-            }
-        )
+    def reject(self, entry: dict, reason: str, *, decline: dict | None = None) -> None:
+        row = {
+            "adapter_key": entry.get("adapter_key"),
+            "display_name": entry.get("display_name"),
+            "source_type": entry.get("source_type"),
+            "reason": reason,
+        }
+        if decline is not None:
+            # The machine-readable half of the reason: which source, declined
+            # by whom, since when (FR-182, IR-101).
+            row["declined"] = declines.blockers([decline])[0]
+        self.rejected.append(row)
 
 
 # ---------------------------------------------------------------------------
@@ -437,13 +465,28 @@ def select_sources(
     spontaneous_only: bool = False,
     linkedin_allowed: bool = True,
     industries: list[str] | None = None,
+    declined: dict[str, dict] | None = None,
 ) -> SourceSelection:
-    """Keep only the sources whose catalogue metadata fits this search (FR-164)."""
+    """Keep only the sources whose catalogue metadata fits this search (FR-164).
+
+    ``declined`` is the active decline map (FR-182, IR-101).  A declined
+    adapter is rejected here, before it can be translated, charged a page or
+    retried: the refusals that declined it are facts that do not change by
+    asking again, and every campaign that ignored them re-issued the same
+    refused requests.
+    """
     selection = SourceSelection()
     wanted = {c.upper() for c in countries}
     industries = [i.lower() for i in (industries or [])]
+    declined = declined or {}
 
     for entry in catalogue:
+        decline = declined.get(str(entry.get("adapter_key") or ""))
+        if decline is not None:
+            selection.reject(
+                entry, declines.rejection_reason(decline), decline=decline
+            )
+            continue
         if not entry.get("enabled", 1):
             selection.reject(entry, "disabled in the source catalogue")
             continue
@@ -1329,13 +1372,51 @@ def generate_plan(
     caps = resolve_caps(campaign, directives)
     linkedin_allowed = repo.has_consent(job_seeker_id, "linkedin_automation")
 
-    catalogue = repo.list_catalogue(enabled_only=True)
+    # The full catalogue is read once, because IR-101 needs the rows the
+    # enabled view hides: a source whose terms prohibit access, or that waits
+    # for an acknowledgement, is disabled *and* requires_ack, so it is exactly
+    # the row a plan must be able to decline and list for the administrator.
+    catalogue_all = repo.list_catalogue(enabled_only=False)
+    # FR-182 / IR-101: a source refused across requests or across campaigns is
+    # declined, and declared so before selection rather than rediscovered by
+    # every run.  Terms are declined here, before a request is ever charged.
+    for entry in catalogue_all:
+        if entry.get("acknowledged_at"):
+            continue
+        if entry.get("tos_status") == "prohibited":
+            declines.record_terms_decline(
+                entry["adapter_key"],
+                reason=declines.REASON_TERMS,
+                detail=(
+                    f"{entry.get('display_name') or entry['adapter_key']}: "
+                    "terms of service prohibit automated access (IR-101)"
+                ),
+            )
+        elif entry.get("requires_ack"):
+            declines.record_terms_decline(
+                entry["adapter_key"],
+                reason=declines.REASON_UNACKNOWLEDGED,
+                detail=(
+                    f"{entry.get('display_name') or entry['adapter_key']}: "
+                    "the terms await an administrator's acknowledgement (IR-101)"
+                ),
+            )
+    # Read once per plan: the map cannot change under a plan already being
+    # written, and selection, the blocker check and the summary all read it.
+    active_declines = declines.active_map()
+    catalogue = [
+        entry
+        for entry in catalogue_all
+        if entry.get("enabled", 1)
+        and (not entry.get("requires_ack") or entry.get("acknowledged_at"))
+    ]
     selection = select_sources(
         catalogue,
         countries=countries,
         spontaneous_only=bool(directives.get("spontaneous_only")),
         linkedin_allowed=linkedin_allowed,
         industries=industries,
+        declined=active_declines,
     )
 
     per_source_pages = int(caps.get("max_pages_per_source", 20))
@@ -1560,6 +1641,43 @@ def generate_plan(
         network.caps.setdefault("stage", repo.STAGE_DEEPEN)
         planned.append(network)
 
+    # FR-182 / FR-186: a plan with no runnable source is a blocker, not a
+    # campaign.  A real run planned its vacancy sources, met 403 on every one
+    # of them at collection time, and spent its whole page budget on refusals
+    # nobody could act on; the user got an empty shortlist and no statement of
+    # why.  When every in-scope source is declined, planning stops here with
+    # the names and reasons instead of letting a launch charge refusals again.
+    #
+    # Scope is read from the catalogue rather than from the selection, because
+    # the declined sources a plan must report include the ones IR-101 hides
+    # from selection altogether.
+    wanted = {c.upper() for c in countries}
+    catalogue_by_key = {entry["adapter_key"]: entry for entry in catalogue_all}
+    declined_in_scope: list[dict] = []
+    for key, row in active_declines.items():
+        entry = catalogue_by_key.get(key, {})
+        coverage = [c.upper() for c in (entry.get("coverage_countries") or [])]
+        if wanted and coverage and not (wanted & set(coverage)):
+            continue
+        if (entry.get("source_type") == "linkedin") and not linkedin_allowed:
+            continue
+        declined_in_scope.append(row)
+    collection_planned = [
+        source for source in planned if source.adapter_key not in repo.BROWSER_STRATEGY_KEYS
+    ]
+    if not collection_planned and declined_in_scope:
+        blocked = declines.blockers(declined_in_scope)
+        repo.record_audit(
+            "campaign.plan_blocked",
+            job_seeker_id=job_seeker_id,
+            entity_type="campaign",
+            entity_id=campaign_id,
+            detail={"reason": "no_usable_sources", "blockers": blocked},
+        )
+        raise NoUsableSources(
+            declines.no_sources_message(blocked, what="plan"), blockers=blocked
+        )
+
     budget = allocate_pages(planned, int(caps.get("max_pages") or 0))
     # A Campaign A plan holds thousands of items; scanning the catalogue for
     # each one is quadratic work on the review screen's critical path.
@@ -1569,6 +1687,27 @@ def generate_plan(
             by_key.get(source.adapter_key, {}), source.estimated_pages
         )
 
+    # FR-186: the scale-down is a fact about the plan, so it is stored with the
+    # campaign and read back by the plan screen and the run report - not only
+    # logged.  One campaign asked for 1,505 pages under a 150-page cap, was
+    # scaled to 150 with a log line, and showed the user a plan it would never
+    # fetch 90% of.
+    scaled_down = budget["requested"] > budget["granted"]
+    notice: dict[str, Any] = {
+        "page_budget": {**budget, "scaled_down": scaled_down},
+        "message": None,
+    }
+    if scaled_down:
+        notice["message"] = (
+            f"The plan asked for {budget['requested']:,} pages under a "
+            f"{budget['max_pages']:,}-page cap; {budget['granted']:,} were granted (FR-186). "
+            "Raise the campaign's max_pages to collect the rest."
+        )
+        log.info(
+            "Plan for %s asked for %s pages under a %s-page cap; scaled to %s (FR-186)",
+            campaign_id, budget["requested"], budget["max_pages"], budget["granted"],
+        )
+
     item_ids = persist_plan(campaign_id, planned)
     repo.update_campaign(
         campaign_id,
@@ -1576,6 +1715,7 @@ def generate_plan(
             "caps": caps,
             "status": "planned" if planned else campaign.get("status", "draft"),
             "stage": "planning",
+            "plan_notice": notice,
         },
     )
     repo.record_audit(
@@ -1588,27 +1728,25 @@ def generate_plan(
             "targets": found.target_count,
             "llm_used": llm_used,
             "degraded": degraded_reason,
+            "page_budget": notice["page_budget"],
         },
     )
 
     if assess_knowledge_base and planned:
         knowledge_base.assess_reuse(campaign_id, countries=countries)
 
-    if budget["requested"] > budget["granted"]:
-        log.info(
-            "Plan for %s asked for %s pages under a %s-page cap; scaled to %s (FR-186)",
-            campaign_id, budget["requested"], budget["max_pages"], budget["granted"],
-        )
     summary = plan_summary(campaign_id, job_seeker_id)
     summary.update(
         {
             "plan_item_ids": item_ids,
             "rejected_sources": selection.rejected,
+            "declined_sources": declines.blockers(declined_in_scope),
             "countries": countries,
             "keywords": keywords,
             "companies_in_scope": len(companies),
             "discovery": found.stats,
             "page_budget": budget,
+            "plan_notice": notice,
             "llm_used": llm_used,
             "degraded_reason": degraded_reason,
         }
@@ -2210,11 +2348,21 @@ def plan_summary(
         item["label"] = label
         item["label_detail"] = label_detail
         item["target_key"] = target_key(item["adapter_key"], item.get("native_query"))
+    notice = campaign.get("plan_notice") if isinstance(campaign.get("plan_notice"), dict) else {}
     return {
         "campaign_id": campaign_id,
         "status": campaign.get("status"),
         "stage": campaign.get("stage"),
         "caps": campaign.get("caps") or DEFAULT_CAPS,
+        # FR-186: the page budget the plan was measured against, and the
+        # notice when the cap forced it to be scaled down.  Both live on the
+        # campaign so the screen states them after the planning call returns.
+        "page_budget": notice.get("page_budget"),
+        "plan_notice": notice or None,
+        # FR-182/IR-101: which sources are declined right now, so a plan screen
+        # can say "these will not be planned until an administrator re-enables
+        # them" instead of silently omitting them.
+        "declined_sources": declines.blockers(declines.active_map()),
         "generated_at": utcnow(),
         "totals": {
             "sources": len(active),

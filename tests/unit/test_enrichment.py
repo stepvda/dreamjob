@@ -20,6 +20,7 @@ import pytest
 from dreamjob.config import get_settings
 from dreamjob.db.connection import insert_row, utcnow
 from dreamjob.db.repositories import enrichment as repo
+from dreamjob.llm.client import LLMError
 from dreamjob.pipeline import composite as composite_pipeline
 from dreamjob.pipeline import dreamjob_model as dream_pipeline
 from dreamjob.pipeline import enrichment as enrichment_pipeline
@@ -574,6 +575,80 @@ def test_composite_without_enrichment_ignores_findings() -> None:
     llm = StubLLM(COMPOSITE_PAYLOAD)
     composite_pipeline.build_composite(seeker, include_enrichment=False, llm=llm)
     assert set(llm.calls[0]["untrusted"]) == {"profile"}
+
+
+class _FailingLLM:
+    """A model whose JSON call fails with the given error."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def complete_json(self, task: str, *, system: str, user: str, **kw: object) -> object:
+        raise self.error
+
+
+def test_composite_synthesis_failure_records_the_degraded_reason() -> None:
+    """The structural fallback must not look like a normal synthesis.
+
+    The evidence in ``logs/app.log`` was a parse failure followed by a silent
+    structural assembly; the screens and the directive proposal have to be able
+    to tell that the function families and competencies they did not get were
+    lost to a failed synthesis, not absent from the profile.
+    """
+    seeker = _seeker()
+    _profile(seeker)
+    _consent(seeker, "llm_transfer")
+
+    llm = _FailingLLM(
+        LLMError("Could not parse JSON from LLM response for task 'profile.composite'")
+    )
+    stored = composite_pipeline.build_composite(seeker, llm=llm)
+
+    assert stored["_generation"]["mode"] == "structural"
+    assert "Could not parse JSON" in stored["_generation"]["reason"]
+    assert "structurally" in stored["synthesis_note"]
+    # The reason travels with the persisted row, not only with this response.
+    meta = stored["evidence_refs"]["_meta"]
+    assert meta["generation"] == stored["_generation"]
+    assert meta["synthesis_note"] == stored["synthesis_note"]
+    # The structural profile is still usable (CR-405).
+    assert stored["career_trajectory"]
+
+
+def test_composite_non_object_answer_degrades_with_a_reason() -> None:
+    """A JSON array is valid JSON and still not a composite."""
+    seeker = _seeker()
+    _profile(seeker)
+    _consent(seeker, "llm_transfer")
+
+    stored = composite_pipeline.build_composite(seeker, llm=StubLLM([{"text": "not an object"}]))
+
+    assert stored["_generation"]["mode"] == "structural"
+    assert "list" in stored["_generation"]["reason"]
+    assert stored["career_trajectory"]
+
+
+def test_composite_empty_answer_degrades_with_a_reason() -> None:
+    seeker = _seeker()
+    _profile(seeker)
+    _consent(seeker, "llm_transfer")
+
+    stored = composite_pipeline.build_composite(seeker, llm=StubLLM({}))
+
+    assert stored["_generation"]["mode"] == "structural"
+    assert "no usable statements" in stored["_generation"]["reason"]
+
+
+def test_a_usable_synthesis_carries_no_degraded_note() -> None:
+    seeker = _seeker()
+    _profile(seeker)
+    _consent(seeker, "llm_transfer")
+
+    stored = composite_pipeline.build_composite(seeker, llm=StubLLM(COMPOSITE_PAYLOAD))
+
+    assert stored["_generation"]["mode"] == "llm"
+    assert "synthesis_note" not in stored
+    assert "synthesis_note" not in stored["evidence_refs"]["_meta"]
 
 
 def test_structural_composite_when_no_llm_is_configured() -> None:

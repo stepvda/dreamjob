@@ -392,6 +392,39 @@ def structural_composite(version: dict, findings: list[dict]) -> dict[str, Any]:
     )
 
 
+def _has_synthesised_content(blocks: dict[str, Any]) -> bool:
+    """Did the model answer carry at least one statement (CR-405)?
+
+    A schema-valid but empty object parses like any other; without this check
+    it would be stored as a normal LLM run and leave every screen and
+    directive looking at a composite with nothing in it.
+    """
+    if str(blocks.get("narrative") or "").strip():
+        return True
+    if blocks.get("seniority"):
+        return True
+    return any(blocks.get(block) for block in LIST_BLOCKS)
+
+
+def _structural_fallback(version: dict, findings: list[dict], reason: str) -> dict[str, Any]:
+    """Structural composite, with the degraded path recorded on it (CR-405).
+
+    The mode and the reason travel with the row and with the returned blocks:
+    an assembly the synthesis never wrote otherwise looks like any other run,
+    and the screens and the directive proposal have no way to tell that the
+    function families and competencies they are reading are missing because the
+    model answer was unusable.  ``reason`` is bounded because it names a model
+    failure, not the profile.
+    """
+    blocks = structural_composite(version, findings)
+    blocks["_generation"] = {"mode": "structural", "reason": reason}
+    blocks["synthesis_note"] = (
+        "Synthesised profile unavailable; assembled structurally from the profile. "
+        f"Reason: {reason}"
+    )
+    return blocks
+
+
 # ---------------------------------------------------------------------------
 # Build and persist
 # ---------------------------------------------------------------------------
@@ -426,8 +459,7 @@ def build_composite(
         llm = default_llm(job_seeker_id, campaign_id)
 
     if llm is None:
-        blocks = structural_composite(version, findings)
-        blocks["_generation"] = {"mode": "structural", "reason": "no LLM configured"}
+        blocks = _structural_fallback(version, findings, "no LLM configured")
     else:
         # CR-410: consent is checked at the last moment before egress, not at
         # the start of the pipeline, so a consent withdrawn mid-run still bites.
@@ -447,6 +479,7 @@ def build_composite(
         )
 
     generation = blocks.get("_generation") or {"mode": "llm"}
+    synthesis_note = blocks.get("synthesis_note")
     if not persist:
         return blocks
 
@@ -457,7 +490,10 @@ def build_composite(
     # for.  ``evidence_refs._meta`` already round-trips as JSON, so this needs
     # no new column.
     refs = dict(blocks.get("evidence_refs") or {})
-    refs["_meta"] = {**(refs.get("_meta") or {}), "generation": generation}
+    meta = {**(refs.get("_meta") or {}), "generation": generation}
+    if synthesis_note:
+        meta["synthesis_note"] = synthesis_note
+    refs["_meta"] = meta
 
     composite_id = repo.insert_composite(
         job_seeker_id,
@@ -481,6 +517,8 @@ def build_composite(
     )
     stored = repo.get_composite(job_seeker_id, composite_id) or {}
     stored["_generation"] = generation
+    if synthesis_note:
+        stored["synthesis_note"] = synthesis_note
     return stored
 
 
@@ -532,14 +570,20 @@ def _synthesise(
             max_tokens=48_000,
         )
     except (LLMError, BudgetExhausted) as exc:
-        log.warning("Composite synthesis failed (%s); falling back to structural", exc)
-        blocks = structural_composite(version, findings)
-        blocks["_generation"] = {"mode": "structural", "reason": str(exc)[:300]}
-        return blocks
+        reason = str(exc)[:300]
+        log.warning("Composite synthesis failed (%s); falling back to structural", reason)
+        return _structural_fallback(version, findings, reason)
 
     if not isinstance(data, dict):
-        raise LLMError("composite synthesis did not return a JSON object")
+        reason = f"the model returned {type(data).__name__} for a JSON object"
+        log.warning("Composite synthesis unusable (%s); falling back to structural", reason)
+        return _structural_fallback(version, findings, reason)
+
     blocks = normalise_composite(data, allowed_urls)
+    if not _has_synthesised_content(blocks):
+        reason = "the model answer contained no usable statements"
+        log.warning("Composite synthesis unusable (%s); falling back to structural", reason)
+        return _structural_fallback(version, findings, reason)
     blocks["_generation"] = {
         "mode": "llm",
         "prompt": prompt.name,

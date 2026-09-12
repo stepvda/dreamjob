@@ -419,6 +419,103 @@ def test_prohibited_source_needs_acknowledgement_before_it_can_be_enabled(
     }
 
 
+def test_a_declined_source_is_listed_and_re_enabled_with_an_audit_row(
+    client: TestClient,
+) -> None:
+    """FR-182/FR-363: the decline list is the administrator's, and clearing is an act."""
+    from dreamjob.db.connection import upsert_row, utcnow
+    from dreamjob.db.repositories import declines as decline_repo
+
+    _register(client)
+    upsert_row(
+        "source_catalogue",
+        {
+            "adapter_key": "board.jobat",
+            "display_name": "Jobat",
+            "source_type": "job_board",
+            "access_method": "http",
+            "tos_status": "permitted",
+            "enabled": 1,
+            "requires_ack": 0,
+            "updated_at": utcnow(),
+        },
+        ["adapter_key"],
+    )
+    decline_repo.record_observation(
+        "board.jobat",
+        reason="http_403",
+        detail="https://www.jobat.be: HTTP 403",
+        evidence_url="https://www.jobat.be",
+        requests=10,
+        refusals=10,
+        campaign_id="c1",
+        declined=True,
+    )
+
+    listed = client.get("/api/admin/source-declines")
+    assert listed.status_code == 200
+    row = next(r for r in listed.json() if r["adapter_key"] == "board.jobat")
+    assert row["active"] is True and row["reason"] == "http_403"
+    assert row["refused_count"] == 10
+
+    enabled = client.post(
+        "/api/admin/source-declines/board.jobat/enable", json={"note": "bot wall lifted"}
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["active"] is False
+    assert decline_repo.get_active_decline("board.jobat") is None
+
+    trail = client.get("/api/admin/audit", params={"entity_id": "board.jobat"}).json()
+    assert "admin.source_decline_cleared" in {e["action"] for e in trail}
+
+
+def test_a_terms_decline_needs_the_acknowledgement_before_it_is_re_enabled(
+    client: TestClient,
+) -> None:
+    """IR-101: re-enabling a prohibited source is an acknowledgement, not a toggle."""
+    from dreamjob.db.connection import upsert_row, utcnow
+    from dreamjob.db.repositories import declines as decline_repo
+
+    _register(client)
+    upsert_row(
+        "source_catalogue",
+        {
+            "adapter_key": "board.stepstone",
+            "display_name": "StepStone",
+            "source_type": "job_board",
+            "access_method": "http",
+            "tos_status": "prohibited",
+            "enabled": 0,
+            "requires_ack": 1,
+            "updated_at": utcnow(),
+        },
+        ["adapter_key"],
+    )
+    decline_repo.record_observation(
+        "board.stepstone",
+        reason="terms",
+        detail="terms of service prohibit automated access (IR-101)",
+        evidence_url=None,
+        requests=0,
+        refusals=0,
+        campaign_id=None,
+        declined=True,
+    )
+
+    refused = client.post("/api/admin/source-declines/board.stepstone/enable", json={})
+    assert refused.status_code == 409
+    assert "acknowledge_terms" in refused.json()["detail"]
+
+    enabled = client.post(
+        "/api/admin/source-declines/board.stepstone/enable",
+        json={"acknowledge_terms": True, "note": "licence on file"},
+    )
+    assert enabled.status_code == 200
+    assert decline_repo.get_active_decline("board.stepstone") is None
+    source = client.get("/api/admin/sources/board.stepstone").json()
+    assert source["enabled"] == 1 and source["acknowledged_at"]
+
+
 def test_llm_config_override_and_log_redaction(client: TestClient) -> None:
     """FR-362 configuration persists; FR-364 retention nulls prompt and response."""
     from dreamjob.db.connection import query_one

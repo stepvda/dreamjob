@@ -67,6 +67,7 @@ from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import directives as directives_repo
 from dreamjob.db.repositories import pipeline_cards as notify_repo
 from dreamjob.jobs.runner import JobCancelled, JobContext, runner
+from dreamjob.pipeline.planning import DEFAULT_AUTOPILOT_CAPS
 
 log = logging.getLogger(__name__)
 
@@ -98,24 +99,15 @@ DEFAULT_COMPANY_LIMIT = 12
 
 #: The bounds autopilot puts on the campaign it creates (FR-186).
 #:
-#: These are deliberately far tighter than ``planning.DEFAULT_CAPS``. Those
-#: caps are sized for an operator's deliberate, supervised data-gathering run;
-#: an autopilot run is the opposite — a job seeker pressed one button and is
-#: waiting for a shortlist. At the planning defaults a single campaign planned
-#: 5,007 items ("one per company per vendor") and a 10,000-page budget, which
-#: is neither reviewable nor finishable, and it starved the sources that
-#: actually hold vacancies. Bounding the company inventory and the page budget
-#: keeps a run to minutes and spends its budget on vacancies rather than on a
-#: registry sweep of every company the knowledge base has ever seen.
-DEFAULT_CAPS_OVERRIDE: dict[str, int] = {
-    "max_companies": 40,
-    "max_pages": 150,
-    "max_pages_per_source": 8,
-    "max_duration_seconds": 45 * 60,
-    # An unattended run ranks what one press of a button asked for; a corpus of
-    # tens of thousands is neither reviewable nor the point of a shortlist.
-    "max_opportunities": 5_000,
-}
+#: The values themselves live in ``planning.DEFAULT_AUTOPILOT_CAPS``, next to
+#: the campaign defaults they tighten, so the two decisions are one decision
+#: and cannot drift.  An autopilot run is the opposite of a supervised sweep —
+#: a job seeker pressed one button and is waiting for a shortlist — so the
+#: company inventory and the page budget are bounded to keep the run to
+#: minutes; see the constant for the sizing.
+#:
+#: ``DEFAULT_CAPS_OVERRIDE`` is kept as the name the module has always exported.
+DEFAULT_CAPS_OVERRIDE: dict[str, int] = DEFAULT_AUTOPILOT_CAPS
 
 #: A collection run is expected to take minutes; the autopilot waits for it so
 #: company profiling can follow. The guard exists so a hung collection cannot

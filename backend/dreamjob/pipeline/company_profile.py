@@ -650,7 +650,14 @@ def _assemble(
 
     if values:
         values["refreshed_at"] = utcnow()
-        values["source"] = crawl.home_url
+        # FR-166: ``source`` is who produced the row (the adapter key, a seed, a
+        # suggestion); the crawl may only fill it when nothing has named the row
+        # yet.  A board's row named "par.tenant" must not become its home URL,
+        # or the provenance the catalogue counts and the profile view report is
+        # lost.  The crawled URL itself lives on ``domain`` (written above),
+        # ``careers_url`` and the page inventory, so it is not stored here.
+        if not (company.get("source") or "").strip():
+            values["source"] = crawl.home_url
         values["access_method"] = "http"
         values["confidence"] = round(
             sum(m["confidence"] for m in meta.values()) / max(1, len(meta)), 3

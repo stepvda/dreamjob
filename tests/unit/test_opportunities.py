@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from dreamjob.config import get_settings
-from dreamjob.db.connection import insert_row, query_one, update_row, utcnow
+from dreamjob.db.connection import insert_row, query_one, to_json, update_row, utcnow
 from dreamjob.db.migrator import migrate
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.pipeline import compensation as comp_mod
@@ -359,6 +359,52 @@ def test_synthesis_stops_at_the_campaign_opportunity_cap(db):
     assert report.dropped_over_cap == 2
     assert report.as_dict()["capped"] is True
     assert len(repo.list_opportunities(seeker_id, campaign_id=campaign["id"])) == 1
+
+
+def test_knowledge_base_synthesis_reuse_is_judged_by_the_same_permissive_gate(db):
+    """FR-342: a repeat campaign reuses the knowledge base instead of refetching.
+
+    Those rows go through the same FR-142 gate as collected ones, so a
+    directive set with no function families and no must-have skills must not
+    turn every reused vacancy into a ``role_out_of_scope`` rejection.  The
+    report still names the reason for the ones that genuinely do not fit.
+    """
+    seeker_id = _seeker()
+    campaign = _campaign(seeker_id)
+    directive_id = query_one(
+        "SELECT directive_set_id FROM campaign WHERE id = ?", (campaign["id"],)
+    )["directive_set_id"]
+    update_row(
+        "directive_set",
+        directive_id,
+        {
+            "job_content": to_json(
+                {"target_titles": ["Hands-on Software Architect / Lead Engineer"]}
+            )
+        },
+    )
+    campaign = query_one("SELECT * FROM campaign WHERE id = ?", (campaign["id"],))
+
+    company_id = _company("Portex NV")
+    _campaign_company(campaign["id"], company_id)
+    # Only in the knowledge base: no provenance ties them to this campaign.
+    kb_values = {
+        "company_id": company_id,
+        "description": "Design well-structured web applications.",
+        "location": "Ghent",
+        "country": "BE",
+        "posted_at": _iso(2),
+        "collected_at": _iso(1),
+    }
+    insert_row("vacancy", {**kb_values, "title": "Software Architect"})
+    insert_row("vacancy", {**kb_values, "title": "Kinesitherapeut(e)"})
+
+    report = synth.synthesise_campaign(campaign)
+    assert report.created == 1
+    assert report.rejections == {"role_out_of_scope": 1}
+    assert [r["title"] for r in repo.list_opportunities(seeker_id, campaign_id=campaign["id"])] == [
+        "Software Architect"
+    ]
 
 
 # ---------------------------------------------------------------------------

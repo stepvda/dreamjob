@@ -26,6 +26,7 @@ from dreamjob.db.connection import (
     update_row,
     utcnow,
 )
+from dreamjob.db.repositories.pipeline_cards import invalidate_active_seeker_cache
 
 GAP_JSON_COLUMNS = ("gaps",)
 STONE_JSON_COLUMNS = ("steps", "basis")
@@ -206,10 +207,13 @@ def set_opportunity_tags(opportunity_id: str, job_seeker_id: str, tags: list[str
     Filtered on ``job_seeker_id`` in the statement itself so a tag can never be
     written onto another seeker's row (FR-101, FR-344).
     """
-    return execute(
+    changed = execute(
         "UPDATE opportunity SET tags = ?, updated_at = ? WHERE id = ? AND job_seeker_id = ?",
         (to_json(tags), utcnow(), opportunity_id, job_seeker_id),
     )
+    if changed:
+        invalidate_active_seeker_cache()
+    return changed
 
 
 # ---------------------------------------------------------------------------

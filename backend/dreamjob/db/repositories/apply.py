@@ -40,6 +40,7 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+from dreamjob.db.repositories.pipeline_cards import invalidate_active_seeker_cache
 
 log = logging.getLogger(__name__)
 
@@ -295,6 +296,7 @@ def select_opportunity(
             "SELECT id FROM apply_selection WHERE job_seeker_id = ? AND opportunity_id = ?",
             (job_seeker_id, opportunity_id),
         ).fetchone()
+    invalidate_active_seeker_cache()
     return row["id"] if row else ""
 
 
@@ -333,6 +335,8 @@ def select_many(
                 (flag, now, opportunity_id, job_seeker_id),
             )
             selected += 1
+    if selected:
+        invalidate_active_seeker_cache()
     return selected
 
 
@@ -348,6 +352,7 @@ def deselect_opportunity(job_seeker_id: str, opportunity_id: str) -> int:
             "WHERE id = ? AND job_seeker_id = ?",
             (utcnow(), opportunity_id, job_seeker_id),
         )
+    invalidate_active_seeker_cache()
     return cur.rowcount
 
 

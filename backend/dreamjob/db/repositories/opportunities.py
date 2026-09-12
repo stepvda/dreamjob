@@ -34,6 +34,7 @@ from dreamjob.db.connection import (
     write_tx,
 )
 from dreamjob.db.repositories import employer_kind as _employer_kind
+from dreamjob.db.repositories.pipeline_cards import invalidate_active_seeker_cache
 
 #: Columns of ``opportunity`` that hold JSON and are decoded on the way out.
 JSON_COLUMNS = (
@@ -450,7 +451,9 @@ def create_opportunity(job_seeker_id: str, campaign_id: str, values: dict) -> st
         "updated_at": now,
         **values,
     }
-    return insert_row("opportunity", payload)
+    opportunity_id = insert_row("opportunity", payload)
+    invalidate_active_seeker_cache()
+    return opportunity_id
 
 
 def update_opportunity(
@@ -468,6 +471,7 @@ def update_opportunity(
     payload = {**values, "updated_at": utcnow()}
     if not job_seeker_id:
         update_row("opportunity", opportunity_id, payload)
+        invalidate_active_seeker_cache()
         return
     encoded = {k: (to_json(v) if isinstance(v, dict | list) else v) for k, v in payload.items()}
     assignments = ", ".join(f"{k}=:{k}" for k in encoded)
@@ -479,6 +483,7 @@ def update_opportunity(
             "WHERE id = :__id AND job_seeker_id = :__seeker",
             encoded,
         )
+    invalidate_active_seeker_cache()
 
 
 def upsert_synthesised(
@@ -513,7 +518,10 @@ def delete_campaign_opportunities(job_seeker_id: str, campaign_id: str) -> int:
             "DELETE FROM opportunity WHERE job_seeker_id = ? AND campaign_id = ?",
             (job_seeker_id, campaign_id),
         )
-        return cur.rowcount
+        deleted = cur.rowcount
+    if deleted:
+        invalidate_active_seeker_cache()
+    return deleted
 
 
 def delete_opportunities(job_seeker_id: str, opportunity_ids: list[str]) -> int:
@@ -535,6 +543,8 @@ def delete_opportunities(job_seeker_id: str, opportunity_ids: list[str]) -> int:
                 (job_seeker_id, *chunk),
             )
             deleted += cur.rowcount
+    if deleted:
+        invalidate_active_seeker_cache()
     return deleted
 
 
@@ -614,6 +624,8 @@ def set_manual_order(job_seeker_id: str, campaign_id: str, ordered_ids: list[str
                 (position, now, opportunity_id, job_seeker_id, campaign_id),
             )
             written += cur.rowcount
+        if written:
+            invalidate_active_seeker_cache()
         return written
 
 

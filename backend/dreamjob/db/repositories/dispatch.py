@@ -38,6 +38,7 @@ from dreamjob.db.connection import (
     utcnow,
     write_tx,
 )
+from dreamjob.db.repositories.pipeline_cards import invalidate_active_seeker_cache
 
 #: Columns a caller may set on a dispatch.  Anything else is dropped rather
 #: than silently written, so a stray key in a payload cannot rewrite the audit
@@ -612,11 +613,13 @@ def mark_package_sent(package_id: str, job_seeker_id: str) -> None:
 
 def mark_opportunity_applied(opportunity_id: str, job_seeker_id: str) -> None:
     """FR-326: dispatch is reflected in the opportunity status."""
-    execute(
+    changed = execute(
         "UPDATE opportunity SET user_status = 'applied', updated_at = ? "
         "WHERE id = ? AND job_seeker_id = ? AND user_status <> 'applied'",
         (utcnow(), opportunity_id, job_seeker_id),
     )
+    if changed:
+        invalidate_active_seeker_cache()
 
 
 def contact_email_state(email: str) -> dict | None:

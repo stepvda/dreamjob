@@ -19,8 +19,9 @@ from dreamjob.db.connection import (
     update_row,
     utcnow,
 )
+from dreamjob.db.repositories.pipeline_cards import invalidate_active_seeker_cache
 
-CAMPAIGN_JSON_COLUMNS = ("caps", "reuse_report")
+CAMPAIGN_JSON_COLUMNS = ("caps", "reuse_report", "plan_notice")
 PLAN_JSON_COLUMNS = ("native_query", "caps")
 
 
@@ -44,7 +45,9 @@ def create_campaign(job_seeker_id: str, values: dict) -> str:
     payload["job_seeker_id"] = job_seeker_id
     payload.setdefault("status", "draft")
     payload.setdefault("created_at", utcnow())
-    return insert_row("campaign", payload)
+    campaign_id = insert_row("campaign", payload)
+    invalidate_active_seeker_cache()
+    return campaign_id
 
 
 def get_campaign(campaign_id: str, job_seeker_id: str) -> dict | None:
@@ -70,6 +73,7 @@ def list_campaigns(job_seeker_id: str, limit: int = 100) -> list[dict]:
 
 def update_campaign(campaign_id: str, values: dict) -> None:
     update_row("campaign", campaign_id, values)
+    invalidate_active_seeker_cache()
 
 
 def set_stage(campaign_id: str, stage: str, status: str | None = None) -> None:
@@ -83,12 +87,16 @@ def set_stage(campaign_id: str, stage: str, status: str | None = None) -> None:
         if status in ("completed", "cancelled", "failed"):
             values["finished_at"] = utcnow()
     update_row("campaign", campaign_id, values)
+    invalidate_active_seeker_cache()
 
 
 def delete_campaign(campaign_id: str, job_seeker_id: str) -> int:
-    return execute(
+    deleted = execute(
         "DELETE FROM campaign WHERE id = ? AND job_seeker_id = ?", (campaign_id, job_seeker_id)
     )
+    if deleted:
+        invalidate_active_seeker_cache()
+    return deleted
 
 
 # ---------------------------------------------------------------------------
