@@ -1,6 +1,6 @@
-"""Journey state for the workflow map (supports NFR-502, FR-361).
+"""Journey state and topbar counters for the overview screen (FR-361, NFR-502).
 
-One call returns where the job seeker stands in the ten-stage pipeline of
+``/journey`` returns where the job seeker stands in the ten-stage pipeline of
 specification section 2.3, grouped into the five phases the interface shows:
 profile, plan, discover, apply, follow up.
 
@@ -15,18 +15,85 @@ Each stage reports one of:
 The point is that a stage is never just "not done": it says what would unblock
 it, because the commonest way to get lost in a ten-stage pipeline is not
 knowing what the next move is.
+
+``/counters`` returns the four numbers the topbar always shows.  Definitions:
+
+    companies      global knowledge base: every row of ``company`` (a
+                   ``suppressed`` column did not exist when this was written;
+                   if one arrives, suppressed rows are excluded).
+    jobs           advertised vacancies in the shared corpus:
+                   ``COUNT(*) FROM vacancy``.
+    contacts       contacts visible to the signed-in seeker, under the
+                   ``browse_contacts`` scope (``shareable = 1 OR
+                   owning_campaign_id IS NULL OR campaign belongs to the
+                   seeker``), usable addresses only.
+    opportunities  the seeker's own opportunities
+                   (``opportunities.count_opportunities``).
+
+Only the topbar reads this; the journey map's own ``counts`` keep their
+screen-local meanings.
 """
 
 from __future__ import annotations
 
+import threading
+import time
+
 from fastapi import APIRouter, Depends
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker
+from dreamjob.db.connection import utcnow
 from dreamjob.db.repositories import learning as repo
+from dreamjob.db.repositories import overview as counters_repo
 
 router = APIRouter()
 
 RUNNING_STATUSES = {"running", "planned"}
+
+#: How long a topbar answer is reused.  Every open tab would otherwise issue
+#: the counter query on every tick; the corpus grows over minutes, not
+#: milliseconds, so a few seconds of staleness is invisible and keeps shell
+#: polling off the database (NFR-502).
+COUNTERS_TTL_SECONDS = 8
+
+#: ``(job_seeker_id, bucket)`` -> the exact payload the last call returned.
+#: The payload is stored rather than the numbers so a cache hit answers with
+#: the same object - including the same ``at`` - instead of rebuilding one.
+_counters_cache: dict[tuple[str, int], dict] = {}
+_counters_lock = threading.Lock()
+
+
+def counters_for_seeker(seeker_id: str, *, fresh: bool = False) -> dict:
+    """The counter payload for one seeker, shared for ``COUNTERS_TTL_SECONDS``.
+
+    The cache key is ``(seeker_id, bucket)`` where the bucket is
+    ``time.monotonic() // COUNTERS_TTL_SECONDS``: two callers in the same window
+    get the same payload, and a seeker never sees another's numbers.  ``fresh``
+    (``?fresh=1``) skips the read and replaces the entry.  Writes drop every
+    entry from an earlier bucket, so a long-running process holds at most one
+    payload per observed seeker.
+    """
+    bucket = int(time.monotonic()) // COUNTERS_TTL_SECONDS
+    key = (seeker_id, bucket)
+    if not fresh:
+        hit = _counters_cache.get(key)
+        if hit is not None:
+            return hit
+    payload = {**counters_repo.counters(seeker_id), "at": utcnow()}
+    with _counters_lock:
+        for stale in [k for k in _counters_cache if k[1] != bucket]:
+            del _counters_cache[stale]
+        _counters_cache[key] = payload
+    return payload
+
+
+@router.get("/counters")
+def counters(
+    fresh: bool = False, seeker: CurrentSeeker = Depends(current_seeker)
+) -> dict:
+    """The four always-visible counters: see the module docstring for what each
+    one counts.  Cached for a few seconds; ``?fresh=1`` bypasses the cache."""
+    return counters_for_seeker(seeker.id, fresh=fresh)
 
 
 @router.get("/journey")

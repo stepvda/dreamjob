@@ -20,6 +20,7 @@ import {
 import { api, setUnauthorizedHandler } from './api/client'
 import { HelpButton, HelpPanel } from './components/Help'
 import Icon from './components/Icon'
+import TopbarCounters from './components/TopbarCounters'
 import { SessionContext } from './session'
 import SignIn from './pages/SignIn'
 
@@ -222,6 +223,7 @@ function Shell({ session, onSignOut }) {
             {title}
           </h2>
           <div className="spacer" />
+          <TopbarCounters />
           <span className="small muted">{session.email}</span>
           <HelpButton onOpen={() => setHelpOpen(true)} />
           <button className="btn btn-sm btn-ghost" onClick={onSignOut}>

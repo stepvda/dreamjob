@@ -42,6 +42,7 @@ from dreamjob.documents.package import (
     NotApprovable,
 )
 from dreamjob.jobs.runner import JobContext, runner
+from dreamjob.security.audit import record_audit
 
 router = APIRouter()
 
@@ -420,6 +421,46 @@ def discard_package(
     except GenerationError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     return {"package_id": package_id, "status": "discarded"}
+
+
+@router.delete("/{package_id}")
+def delete_package(
+    package_id: str, seeker: CurrentSeeker = Depends(current_seeker)
+) -> dict[str, Any]:
+    """Hard-delete a package that was never sent (FR-321, FR-331).
+
+    A sent package is part of the dispatch record and is kept; the existing
+    discard route is how it is retired.  A draft or discarded package is the
+    seeker's working material, so it and its generated files go together.
+    """
+    package = _owned(package_id, seeker.id)
+    if package["status"] == "sent":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "a sent package is kept as a dispatch record; discard it instead",
+        )
+    if not repo.delete_package(package_id, seeker.id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "a sent package is kept as a dispatch record; discard it instead",
+        )
+    # The row is gone first, so these paths can no longer be reached through
+    # the API; a file that cannot be unlinked is logged, not resurrected.
+    removed = package_module.remove_artifacts(
+        package.get(column) for column in package_module.ARTIFACT_PATH_COLUMNS
+    )
+    record_audit(
+        "application_package.deleted",
+        entity_type="application_package",
+        entity_id=package_id,
+        seeker_id=seeker.id,
+        detail={
+            "status": package.get("status"),
+            "opportunity_id": package.get("opportunity_id"),
+            "files_removed": removed,
+        },
+    )
+    return {"package_id": package_id, "deleted": True, "files_removed": removed}
 
 
 # ---------------------------------------------------------------------------

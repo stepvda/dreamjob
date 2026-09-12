@@ -46,6 +46,42 @@ def get_company(company_id: str) -> dict | None:
     return query_one("SELECT * FROM company WHERE id = ?", (company_id,))
 
 
+def is_suppressed(company_id: str) -> bool:
+    """Whether this shared company row is hidden from browse and counts."""
+    row = query_one("SELECT suppressed FROM company WHERE id = ?", (company_id,))
+    return bool(row and row["suppressed"])
+
+
+def suppress_company(company_id: str, reason: str) -> dict | None:
+    """Hide a shared company without deleting it (FR-341, NFR-302).
+
+    The row and everything it evidences stay; only its visibility changes.
+    Returns the updated row, or ``None`` when the company does not exist.
+    """
+    with write_tx() as conn:
+        cur = conn.execute(
+            "UPDATE company SET suppressed = 1, suppressed_at = ?, suppressed_reason = ? "
+            "WHERE id = ?",
+            (utcnow(), (reason or "").strip() or None, company_id),
+        )
+    if not cur.rowcount:
+        return None
+    return get_company(company_id)
+
+
+def unsuppress_company(company_id: str) -> dict | None:
+    """Restore a suppressed company to browse and counts."""
+    with write_tx() as conn:
+        cur = conn.execute(
+            "UPDATE company SET suppressed = 0, suppressed_at = NULL, suppressed_reason = NULL "
+            "WHERE id = ?",
+            (company_id,),
+        )
+    if not cur.rowcount:
+        return None
+    return get_company(company_id)
+
+
 def company_freshness(company_id: str) -> str | None:
     """The moment the profile last reflected the outside world (FR-226, FR-343)."""
     row = query_one(
@@ -59,7 +95,7 @@ def companies_in_country(
     country: str | None, exclude_id: str | None = None, limit: int = 400
 ) -> list[dict]:
     """Candidate peer set for the similarity passes (FR-224)."""
-    sql = "SELECT * FROM company WHERE 1 = 1"
+    sql = "SELECT * FROM company WHERE suppressed = 0"
     params: list[Any] = []
     if country:
         sql += " AND (country = ? OR country IS NULL)"
@@ -76,7 +112,7 @@ def companies_by_sector_fragment(
     fragment: str, exclude_id: str | None = None, country: str | None = None, limit: int = 100
 ) -> list[dict]:
     """Companies whose ``sector_codes`` JSON contains a code fragment (FR-224)."""
-    sql = "SELECT * FROM company WHERE sector_codes LIKE ?"
+    sql = "SELECT * FROM company WHERE suppressed = 0 AND sector_codes LIKE ?"
     params: list[Any] = [f"%{fragment}%"]
     if exclude_id:
         sql += " AND id <> ?"
@@ -95,8 +131,8 @@ def companies_mentioning(
     """Companies whose stored news or references mention a name (press co-mention)."""
     like = f"%{fragment}%"
     sql = (
-        "SELECT * FROM company WHERE (news LIKE ? OR reference_customers LIKE ? "
-        "OR business_summary LIKE ?)"
+        "SELECT * FROM company WHERE suppressed = 0 "
+        "AND (news LIKE ? OR reference_customers LIKE ? OR business_summary LIKE ?)"
     )
     params: list[Any] = [like, like, like]
     if exclude_id:
@@ -493,15 +529,16 @@ def enrichment_coverage(limit: int = 200) -> dict[str, Any]:
     aggregate = query_one(
         """
         SELECT
-            (SELECT COUNT(*) FROM company) AS companies,
-            (SELECT COUNT(*) FROM company WHERE business_summary IS NOT NULL
-                AND business_summary <> '') AS with_profile,
+            (SELECT COUNT(*) FROM company WHERE suppressed = 0) AS companies,
+            (SELECT COUNT(*) FROM company WHERE suppressed = 0
+                AND business_summary IS NOT NULL AND business_summary <> '') AS with_profile,
             (SELECT COUNT(*) FROM financial_analysis) AS with_financials,
             (SELECT COUNT(*) FROM financial_analysis WHERE is_estimated = 0) AS with_filed_financials,
             (SELECT COUNT(DISTINCT company_id) FROM hiring_signal) AS with_signals,
             (SELECT COUNT(DISTINCT company_id) FROM competitor_link) AS with_competitors,
             (SELECT COUNT(*) FROM company_employer_kind) AS with_employer_kind,
-            (SELECT COUNT(*) FROM company WHERE ats_slug IS NOT NULL) AS with_ats_board,
+            (SELECT COUNT(*) FROM company WHERE suppressed = 0 AND ats_slug IS NOT NULL)
+                AS with_ats_board,
             (SELECT COUNT(*) FROM raw_document) AS raw_documents
         """
     ) or {}
@@ -521,8 +558,9 @@ def enrichment_coverage(limit: int = 200) -> dict[str, Any]:
                    AS employer_kind,
                (SELECT COUNT(*) FROM opportunity o WHERE o.company_id = c.id) AS opportunities
         FROM company c
-        WHERE EXISTS (SELECT 1 FROM opportunity o WHERE o.company_id = c.id)
-           OR EXISTS (SELECT 1 FROM vacancy v WHERE v.company_id = c.id)
+        WHERE c.suppressed = 0
+          AND (EXISTS (SELECT 1 FROM opportunity o WHERE o.company_id = c.id)
+            OR EXISTS (SELECT 1 FROM vacancy v WHERE v.company_id = c.id))
         ORDER BY opportunities DESC, signals DESC
         LIMIT ?
         """,
@@ -561,9 +599,10 @@ def busiest_companies(limit: int = 25) -> list[str]:
     """
     rows = query_all(
         """
-        SELECT company_id AS id, COUNT(*) AS n FROM vacancy
-        WHERE company_id IS NOT NULL
-        GROUP BY company_id ORDER BY n DESC LIMIT ?
+        SELECT v.company_id AS id, COUNT(*) AS n FROM vacancy v
+        JOIN company c ON c.id = v.company_id
+        WHERE v.company_id IS NOT NULL AND c.suppressed = 0
+        GROUP BY v.company_id ORDER BY n DESC LIMIT ?
         """,
         (int(limit),),
     )

@@ -202,6 +202,58 @@ body {
 
 .topbar .spacer { flex: 1; }
 
+/* Shell counters (FR-361): Companies / Jobs / Contacts, grouped and sitting
+   immediately left of the username on every screen. Tabular figures and a fixed
+   value width keep the header still while the numbers grow; the group never
+   wraps or shrinks, and its labels drop before the numbers on narrow widths. */
+.topbar-counters {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 2px;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-sunk);
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: nowrap;
+}
+
+.topbar-counter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.topbar-counter .icon { font-size: 13px; color: var(--hue, var(--accent)); }
+
+.topbar-counter-label { color: inherit; opacity: 0.62; }
+
+.topbar-counter-value {
+  min-width: 6ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.topbar-counters-sep {
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: var(--line);
+}
+
+@media (max-width: 1200px) {
+  .topbar-counter-label { display: none; }
+}
+
 .content {
   flex: 1;
   overflow-y: auto;

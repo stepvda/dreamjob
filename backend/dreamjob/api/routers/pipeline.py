@@ -30,6 +30,7 @@ from dreamjob.llm.client import LLMClient
 from dreamjob.postapp import board as board_mod
 from dreamjob.postapp import calendar_sync, mock_interview, negotiation, outcomes
 from dreamjob.postapp import reply_classifier as replies_mod
+from dreamjob.security.audit import record_audit
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +198,24 @@ def update_card(card_id: str, payload: CardUpdateIn, seeker: Seeker) -> dict:
         return board_mod.update_card(seeker.id, card_id, **payload.model_dump(exclude_unset=True))
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+@router.delete("/cards/{card_id}")
+def delete_card(card_id: str, seeker: Seeker) -> dict:
+    """Remove a card from the board (FR-421).
+
+    The card is the seeker's own; its stage events cascade with it.  A card
+    that is not theirs is a 404, like every other read and write here.
+    """
+    if not repo.delete_card(card_id, seeker.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "pipeline card not found")
+    record_audit(
+        "pipeline_card.deleted",
+        entity_type="pipeline_card",
+        entity_id=card_id,
+        seeker_id=seeker.id,
+    )
+    return {"card_id": card_id, "deleted": True}
 
 
 @router.post("/cards/{card_id}/stage")

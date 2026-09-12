@@ -445,7 +445,8 @@ def stale_rows(entity_type: str, cutoff: str, limit: int = 200) -> list[dict]:
     """Rows whose freshness has fallen outside the staleness policy (FR-343)."""
     if entity_type == "company":
         return query_all(
-            "SELECT * FROM company WHERE COALESCE(refreshed_at, collected_at) < ? "
+            "SELECT * FROM company WHERE suppressed = 0 "
+            "AND COALESCE(refreshed_at, collected_at) < ? "
             "ORDER BY COALESCE(refreshed_at, collected_at) LIMIT ?",
             (cutoff, limit),
         )
@@ -483,6 +484,8 @@ def search_companies(
         params.append(match)
     else:
         sql = "SELECT c.* FROM company c WHERE 1 = 1"
+    # A suppressed company is hidden from every browse and count (FR-341).
+    where.append("c.suppressed = 0")
     if country:
         where.append("c.country = ?")
         params.append(country.upper())
@@ -529,6 +532,7 @@ def count_companies(
         params.append(match)
     else:
         sql = "SELECT COUNT(*) AS n FROM company c WHERE 1 = 1"
+    where.append("c.suppressed = 0")
     if country:
         where.append("c.country = ?")
         params.append(country.upper())
@@ -564,22 +568,26 @@ def company_facets() -> dict[str, Any]:
         return {str(r["k"] or "unknown"): int(r["n"]) for r in query_all(sql)}
 
     return {
-        "total": int((query_one("SELECT COUNT(*) AS n FROM company") or {"n": 0})["n"]),
+        "total": int(
+            (query_one("SELECT COUNT(*) AS n FROM company WHERE suppressed = 0") or {"n": 0})["n"]
+        ),
         "by_source": _counts(
-            "SELECT source AS k, COUNT(*) AS n FROM company GROUP BY source "
-            "ORDER BY n DESC LIMIT 25"
+            "SELECT source AS k, COUNT(*) AS n FROM company WHERE suppressed = 0 "
+            "GROUP BY source ORDER BY n DESC LIMIT 25"
         ),
         "by_country": _counts(
-            "SELECT country AS k, COUNT(*) AS n FROM company GROUP BY country "
-            "ORDER BY n DESC LIMIT 25"
+            "SELECT country AS k, COUNT(*) AS n FROM company WHERE suppressed = 0 "
+            "GROUP BY country ORDER BY n DESC LIMIT 25"
         ),
         "by_ats_vendor": _counts(
             "SELECT ats_vendor AS k, COUNT(*) AS n FROM company "
-            "WHERE ats_vendor IS NOT NULL GROUP BY ats_vendor ORDER BY n DESC"
+            "WHERE suppressed = 0 AND ats_vendor IS NOT NULL "
+            "GROUP BY ats_vendor ORDER BY n DESC"
         ),
         "with_ats_board": int(
-            (query_one("SELECT COUNT(*) AS n FROM company WHERE ats_slug IS NOT NULL")
-             or {"n": 0})["n"]
+            (query_one(
+                "SELECT COUNT(*) AS n FROM company WHERE suppressed = 0 AND ats_slug IS NOT NULL"
+             ) or {"n": 0})["n"]
         ),
     }
 

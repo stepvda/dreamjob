@@ -18,6 +18,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { Caution, HelpTip, ScreenIntro } from '../components/Help'
+import Icon from '../components/Icon'
 import {
   Badge,
   ErrorBox,
@@ -163,6 +164,9 @@ export default function OpportunityDetailPage() {
   const [reason, setReason] = useState('')
   const [actionError, setActionError] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
+  const [deleteForce, setDeleteForce] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
 
   const { data, error, loading, reload, setData } = useFetch(
     () => api.get(`/opportunities/${id}`),
@@ -257,6 +261,30 @@ export default function OpportunityDetailPage() {
       setActionError(e)
     } finally {
       setBusy(false)
+    }
+  }
+
+  /**
+   * FR-142 / NFR-305: the same confirm-then-force flow as the ranked list. A
+   * row with a user decision is refused once (409); only the retry carries
+   * force=true, and success leaves the detail view behind entirely.
+   */
+  async function remove(force = false) {
+    setDeleteBusy(true)
+    setActionError(null)
+    try {
+      await api.del(`/opportunities/${id}${force ? '?force=true' : ''}`)
+      navigate('/opportunities')
+    } catch (e) {
+      if (e.status === 409 && !force) {
+        setDeleteForce(true)
+      } else {
+        setActionError(e)
+        setDeleteConfirm(false)
+        setDeleteForce(false)
+      }
+    } finally {
+      setDeleteBusy(false)
     }
   }
 
@@ -369,6 +397,15 @@ export default function OpportunityDetailPage() {
           )}
           <button className="btn btn-sm" disabled={busy} onClick={rescore}>
             {busy ? <span className="spinner" /> : 'Rescore this one'}
+          </button>
+          <button
+            className="btn btn-sm btn-danger"
+            onClick={() => {
+              setDeleteForce(false)
+              setDeleteConfirm(true)
+            }}
+          >
+            <Icon name="trash" /> Delete
           </button>
           <div className="spacer" />
           {(o.links?.source_vacancy || o.source_url) && (
@@ -825,6 +862,58 @@ export default function OpportunityDetailPage() {
               placeholder="Too junior; the commute is impossible; I do not want agency work."
             />
           </Field>
+        </Modal>
+      )}
+
+      {deleteConfirm && (
+        <Modal
+          title={deleteForce ? 'Delete anyway?' : `Delete ${o.title}?`}
+          onClose={() => {
+            if (deleteBusy) return
+            setDeleteConfirm(false)
+            setDeleteForce(false)
+          }}
+          actions={
+            <>
+              <button
+                className="btn"
+                disabled={deleteBusy}
+                onClick={() => {
+                  setDeleteConfirm(false)
+                  setDeleteForce(false)
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={deleteBusy}
+                onClick={() => remove(deleteForce)}
+              >
+                {deleteBusy ? (
+                  <span className="spinner" />
+                ) : deleteForce ? (
+                  'Delete anyway'
+                ) : (
+                  'Delete'
+                )}
+              </button>
+            </>
+          }
+        >
+          {deleteForce ? (
+            <p className="section-intro">
+              This opportunity has decisions attached — a pin, a position, a rejection, an
+              application or a package. Deleting it removes those with it, and this cannot
+              be undone (NFR-305).
+            </p>
+          ) : (
+            <p className="section-intro">
+              Delete <strong>{o.title}</strong>
+              {o.company_name ? ` at ${o.company_name}` : ''}? It disappears from the ranked
+              list, and this cannot be undone.
+            </p>
+          )}
         </Modal>
       )}
     </div>

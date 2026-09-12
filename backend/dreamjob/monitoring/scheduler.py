@@ -367,6 +367,23 @@ async def _run_company_enrichment() -> dict[str, Any]:
     return await asyncio.to_thread(_company_enrichment_tick)
 
 
+async def _run_continuous() -> dict[str, Any]:
+    """Advance the endless data-collection cycle by one phase (FR-161..166).
+
+    The cycle's own interval is configurable by an administrator, so this task
+    ticks every five minutes and the engine decides whether a phase is due.
+    The flag is read first (one small setting), then the phase runs; a phase
+    defers itself while a collection or contacts-discovery job owns the
+    registries, the egress and the single writer (FR-185, NFR-102), and a
+    deferred phase is not stamped, so the next tick tries again.
+    """
+    from dreamjob.pipeline import continuous  # noqa: PLC0415 - avoids an import cycle
+
+    if not continuous.enabled():
+        return {"enabled": False}
+    return await continuous.run_phase()
+
+
 async def _run_learning() -> dict[str, Any]:
     """Tell a seeker when outcome learning has enough evidence to apply (FR-425).
 
@@ -423,6 +440,8 @@ DEFAULT_TASKS: list[Task] = [
          "Recheck watched companies that are due (FR-401, FR-402)"),
     Task("company_enrichment", 6 * HOUR, _run_company_enrichment,
          "Enrich the employers behind the opportunities (FR-221..246, FR-341)"),
+    Task("continuous_collection", 300, _run_continuous,
+         "Expand the shared data corpus while enabled"),
     Task("follow_ups", HOUR, _run_follow_ups,
          "Notify about follow-ups whose date has passed (FR-327)"),
     Task("learning", 24 * HOUR, _run_learning,

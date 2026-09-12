@@ -252,6 +252,12 @@ export default function ApplicationsPage() {
             await api.post(`/applications/${selected.id}/discard`, { reason })
             reload()
           }),
+        onDelete: () =>
+          run('delete', async () => {
+            await api.del(`/applications/${selected.id}`)
+            setSelectedId(null)
+            reload()
+          }),
         onApprove: () => setApproving([selected.id]),
         onSend: () => run('send', () => sendOne(false)),
         onDismissSend: () => {

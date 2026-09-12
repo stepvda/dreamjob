@@ -99,6 +99,119 @@ def delete_campaign(campaign_id: str, job_seeker_id: str) -> int:
     return deleted
 
 
+#: The reserved name of the campaign the continuous cycle owns (FR-161).  The
+#: cycle reuses one campaign per job seeker instead of creating one per tick:
+#: autopilot is resumable and keeps the ``campaign_id`` it is handed, so the
+#: plan, the provenance and the opportunities accumulate across phases.
+CONTINUOUS_CAMPAIGN_NAME = "Continuous data collection"
+
+
+def get_continuous_campaign(job_seeker_id: str) -> dict | None:
+    """The seeker's reserved-name campaign, if it exists."""
+    row = query_one(
+        "SELECT * FROM campaign WHERE job_seeker_id = ? AND name = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (job_seeker_id, CONTINUOUS_CAMPAIGN_NAME),
+    )
+    return _decode(row, CAMPAIGN_JSON_COLUMNS)
+
+
+def get_or_create_continuous_campaign(job_seeker_id: str) -> str | None:
+    """The reserved-name campaign for this seeker, created on first use.
+
+    Grounded on whatever the seeker already has: the latest profile version
+    (required - a campaign points at one), directive set, composite profile and
+    dream-job model.  A seeker who has a profile but no saved directives yet
+    gets the deterministic FR-147 proposal stored first, because
+    ``campaign.directive_set_id`` is not nullable and the autopilot chain that
+    would otherwise propose one is skipped once a campaign is supplied.
+
+    Returns ``None`` when there is nothing to base a campaign on, so the caller
+    records a reason rather than writing a dangling row.
+    """
+    existing = get_continuous_campaign(job_seeker_id)
+    if existing:
+        return str(existing["id"])
+
+    profile = query_one(
+        "SELECT * FROM profile_version WHERE job_seeker_id = ? "
+        "ORDER BY version DESC LIMIT 1",
+        (job_seeker_id,),
+    )
+    if profile is None:
+        return None
+    composite = query_one(
+        "SELECT * FROM composite_profile WHERE job_seeker_id = ? "
+        "ORDER BY version DESC LIMIT 1",
+        (job_seeker_id,),
+    )
+    dream = query_one(
+        "SELECT * FROM dream_job_model WHERE job_seeker_id = ? "
+        "ORDER BY version DESC LIMIT 1",
+        (job_seeker_id,),
+    )
+
+    directive = query_one(
+        "SELECT id FROM directive_set WHERE job_seeker_id = ? "
+        "ORDER BY created_at DESC, version DESC LIMIT 1",
+        (job_seeker_id,),
+    )
+    directive_id = str(directive["id"]) if directive else _proposed_directive_set(
+        job_seeker_id, composite, dream, profile
+    )
+    if not directive_id:
+        return None
+
+    campaign_id = create_campaign(
+        job_seeker_id,
+        {
+            "name": CONTINUOUS_CAMPAIGN_NAME,
+            "directive_set_id": directive_id,
+            "profile_version_id": profile["id"],
+            "persona_id": profile.get("persona_id"),
+            "composite_profile_id": (composite or {}).get("id"),
+            "dream_job_model_id": (dream or {}).get("id"),
+            "status": "draft",
+        },
+    )
+    record_audit(
+        "campaign.continuous_created",
+        job_seeker_id=job_seeker_id,
+        actor="system",
+        entity_type="campaign",
+        entity_id=campaign_id,
+        detail={"name": CONTINUOUS_CAMPAIGN_NAME},
+    )
+    return campaign_id
+
+
+def _proposed_directive_set(
+    job_seeker_id: str,
+    composite: dict | None,
+    dream: dict | None,
+    profile: dict,
+) -> str | None:
+    """Save the deterministic FR-147 proposal so a campaign can point at it.
+
+    The proposal is the same one autopilot's directives stage saves; it is
+    deterministic by design, so nothing is invented and no model is called
+    (CR-405).  Imported here rather than at module level because
+    ``pipeline.directives`` is a much heavier module than this repository.
+    """
+    try:
+        from dreamjob.db.repositories import directives as directives_repo  # noqa: PLC0415
+        from dreamjob.pipeline.directives import propose_directives  # noqa: PLC0415
+
+        proposal = propose_directives(
+            composite, dream, profile, name=CONTINUOUS_CAMPAIGN_NAME
+        )
+        payload = proposal.directives
+        payload.name = CONTINUOUS_CAMPAIGN_NAME
+        return directives_repo.create(job_seeker_id, payload)
+    except Exception:  # noqa: BLE001 - no directives means no campaign, reported by the caller
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Planning inputs (read-only views of other slices' private tables)
 # ---------------------------------------------------------------------------

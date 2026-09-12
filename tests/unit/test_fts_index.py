@@ -469,12 +469,18 @@ COLLECTED_AT = "2026-09-10T00:00:00+00:00"
 
 
 @pytest.fixture()
-def pre_133_db(tmp_path, monkeypatch) -> Iterator[None]:
-    """A database migrated to 132 and no further, with 133 still pending."""
+def pre_133_db(tmp_path, monkeypatch) -> Iterator[tuple[list[str], Callable]]:
+    """A database migrated to 132 and no further, with 133 still pending.
+
+    Yields the versions added after 133 and the real ``discover``, so a test
+    that goes on to call repository code written against the current schema can
+    let those migrations land once the 133 assertions are done.
+    """
     monkeypatch.setenv("DREAMJOB_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("DREAMJOB_DB_PATH", str(tmp_path / "data" / "test.db"))
     get_settings.cache_clear()
     get_settings().ensure_dirs()
+    real_discover = migrator.discover
     every = migrator.discover()
     earlier = [m for m in every if m[0] < FTS_MIGRATION]
     upto = [m for m in every if m[0] <= FTS_MIGRATION]
@@ -484,9 +490,11 @@ def pre_133_db(tmp_path, monkeypatch) -> Iterator[None]:
     # 133 is the only pending migration inside the test.  Anything added after
     # it is not what this fixture is about, and letting it run would turn every
     # future migration into a change to these assertions - which is exactly what
-    # the "133 is the last file" guard that used to sit here did.
+    # the "133 is the last file" guard that used to sit here did.  Those later
+    # versions are yielded instead, for the tail of a test that then reads
+    # through repository code expecting the schema as it stands today.
     monkeypatch.setattr(migrator, "discover", lambda: upto)
-    yield
+    yield [m[0] for m in every if m[0] > FTS_MIGRATION], real_discover
     get_settings.cache_clear()
 
 
@@ -532,7 +540,8 @@ def _drifted_entries() -> int:
         "WHERE f.rowid <> c.rowid")["n"]
 
 
-def test_the_migration_carries_an_already_indexed_database_across(pre_133_db: None) -> None:
+def test_the_migration_carries_an_already_indexed_database_across(
+        pre_133_db, monkeypatch) -> None:
     """133 against rows that are already there, which is the only run that counts.
 
     Two statements are on trial.  ``'rebuild'`` is the one that refills
@@ -562,6 +571,14 @@ def test_the_migration_carries_an_already_indexed_database_across(pre_133_db: No
     # Every company entry is back on its own rowid, exactly once.
     assert _drifted_entries() == 0
     assert query_one("SELECT COUNT(*) AS n FROM company_fts")["n"] == len(COMPANY_WORDS)
+
+    # The repository reads from here on assume the schema as it stands today, so
+    # let the migrations added after 133 land - after the migration under test
+    # has been checked on its own, and without unfreezing the fixture for it.
+    later, real_discover = pre_133_db
+    monkeypatch.setattr(migrator, "discover", real_discover)
+    assert migrate() == later
+
     for word in COMPANY_WORDS:
         assert kb.count_companies(word) == 1, word
 

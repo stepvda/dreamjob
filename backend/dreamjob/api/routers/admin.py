@@ -152,6 +152,24 @@ class AdminFlagIn(BaseModel):
     is_admin: bool
 
 
+class ContinuousIn(BaseModel):
+    """FR-161: the administrator's switch for the endless collection cycle."""
+
+    enabled: bool
+    interval_seconds: int | None = Field(
+        None, ge=300, le=86400, description="Seconds between phases (default 900)"
+    )
+
+
+class ContinuousRunIn(BaseModel):
+    """Run one phase now, whether or not it is due."""
+
+    phase: str | None = Field(
+        None, description="discover | contacts | enrich | score; default: the current phase"
+    )
+    force: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Configuration helpers (FR-362, FR-363)
 # ---------------------------------------------------------------------------
@@ -390,6 +408,70 @@ def metrics(admin: CurrentSeeker = Depends(current_admin)) -> dict:
         "per_campaign": repo.campaign_summaries(),
         "per_adapter": adapters,
     }
+
+
+# ---------------------------------------------------------------------------
+# Continuous data collection (FR-161..166)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/continuous")
+def continuous_status(admin: CurrentSeeker = Depends(current_admin)) -> dict:
+    """The endless collection cycle: switch, interval, cursor and last report."""
+    from dreamjob.pipeline import continuous  # noqa: PLC0415 - avoids an import cycle
+
+    return continuous.get_state()
+
+
+@router.put("/continuous")
+def set_continuous(
+    payload: ContinuousIn, admin: CurrentSeeker = Depends(current_admin)
+) -> dict:
+    """Turn the cycle on or off and set how often a phase runs (FR-161)."""
+    from dreamjob.pipeline import continuous  # noqa: PLC0415
+
+    try:
+        state = continuous.set_enabled(
+            payload.enabled, interval_seconds=payload.interval_seconds
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    record_audit(
+        "admin.continuous_changed",
+        "app_setting",
+        None,
+        seeker_id=admin.id,
+        detail=payload.model_dump(),
+    )
+    return state
+
+
+@router.post("/continuous/run")
+async def run_continuous_phase(
+    payload: ContinuousRunIn | None = None, admin: CurrentSeeker = Depends(current_admin)
+) -> dict:
+    """Run one phase now and return its report (administrator's manual tick)."""
+    from dreamjob.pipeline import continuous  # noqa: PLC0415
+
+    body = payload or ContinuousRunIn()
+    if body.phase and body.phase not in continuous.PHASES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"phase must be one of {', '.join(continuous.PHASES)}",
+        )
+    report = await continuous.run_phase(force=body.force, phase=body.phase)
+    record_audit(
+        "admin.continuous_run",
+        "app_setting",
+        None,
+        seeker_id=admin.id,
+        detail={
+            "phase": body.phase,
+            "force": body.force,
+            "outcome": report.get("phase") or report.get("skipped") or report.get("deferred"),
+        },
+    )
+    return report
 
 
 # ---------------------------------------------------------------------------

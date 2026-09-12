@@ -576,6 +576,30 @@ def browse_facets(
     }
 
 
+def count_visible_contacts(job_seeker_id: str) -> int:
+    """How many usable contact addresses this seeker can see (FR-301, FR-344).
+
+    :func:`browse_contacts` without a page: the same visibility rule (NFR-303 -
+    a campaign-scoped row belongs to its campaign, shared and unattached rows to
+    everybody) and the same ``usable_contact`` view, so an NFR-302 objection and
+    an FR-304 ``invalid`` address are excluded before the count sees them.
+
+    Unlike the browse list, a stored person with no address does not count: this
+    answers "how many people could I write to", and a name with no mailbox is
+    not one.  It is the ``contacts`` number of the topbar counters, and the
+    combined statement in ``db/repositories/overview.py`` embeds the identical
+    predicate.
+    """
+    row = query_one(
+        "SELECT COUNT(*) AS n FROM usable_contact c"
+        " WHERE c.email IS NOT NULL AND c.email <> ''"
+        " AND (c.shareable = 1 OR c.owning_campaign_id IS NULL"
+        " OR c.owning_campaign_id IN (SELECT id FROM campaign WHERE job_seeker_id = ?))",
+        (job_seeker_id,),
+    )
+    return int((row or {}).get("n") or 0)
+
+
 def upsert_contact(values: dict) -> tuple[str, bool]:
     """Insert or refresh one contact, minimised to FR-306.  Returns ``(id, created)``.
 

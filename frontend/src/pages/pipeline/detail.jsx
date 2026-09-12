@@ -15,6 +15,7 @@ import { Link } from 'react-router-dom'
 
 import { api } from '../../api/client'
 import { HelpTip } from '../../components/Help'
+import Icon from '../../components/Icon'
 import {
   Badge,
   ErrorBox,
@@ -47,6 +48,7 @@ export default function CardDetail({
   const detail = useFetch(() => api.get(`/pipeline/cards/${cardId}`), [cardId])
   const [busy, setBusy] = useState(null)
   const [actionError, setActionError] = useState(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   const card = detail.data?.card
   const replies = detail.data?.replies || []
@@ -67,25 +69,77 @@ export default function CardDetail({
     }
   }
 
+  // FR-421: the card is the seeker's own, and deleting it takes its stage
+  // history with it. It does not reload afterwards - the card is gone - so the
+  // pane closes and the board behind it is refreshed.
+  async function remove() {
+    setBusy('delete')
+    setActionError(null)
+    try {
+      await api.del(`/pipeline/cards/${cardId}`)
+      setConfirmDelete(false)
+      onClose?.()
+      onChanged?.()
+    } catch (err) {
+      setActionError(err)
+      setConfirmDelete(false)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <Modal
       wide
       title={card ? card.opportunity_title || 'Application' : 'Application'}
       onClose={onClose}
       actions={
-        <>
-          <button className="btn" disabled={!card} onClick={() => onRespond?.(card)}>
-            Record or correct a response
-          </button>
-          <button className="btn btn-ghost" onClick={onClose}>
-            Close
-          </button>
-        </>
+        confirmDelete ? (
+          <>
+            <button
+              className="btn"
+              disabled={busy === 'delete'}
+              onClick={() => setConfirmDelete(false)}
+            >
+              Keep it
+            </button>
+            <button className="btn btn-danger" disabled={busy === 'delete'} onClick={remove}>
+              {busy === 'delete' ? <span className="spinner" /> : 'Delete card'}
+            </button>
+          </>
+        ) : (
+          <>
+            <button className="btn" disabled={!card} onClick={() => onRespond?.(card)}>
+              Record or correct a response
+            </button>
+            <button
+              className="btn btn-danger"
+              disabled={!card || busy === 'delete'}
+              onClick={() => setConfirmDelete(true)}
+            >
+              <Icon name="trash" /> Delete card
+            </button>
+            <button className="btn btn-ghost" onClick={onClose}>
+              Close
+            </button>
+          </>
+        )
       }
     >
       {detail.loading && <Loading rows={4} />}
       {detail.error && <ErrorBox error={detail.error} onRetry={detail.reload} />}
       {actionError && <ErrorBox error={actionError} />}
+
+      {confirmDelete && (
+        <div className="alert alert-warn">
+          <Icon name="warning" />
+          <div>
+            <strong>Delete this card?</strong> The card and its stage history are removed
+            from the board, and this cannot be undone. The application package is not
+            touched — remove it separately from the Applications screen if you want it gone.
+          </div>
+        </div>
+      )}
 
       {card && (
         <>

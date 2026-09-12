@@ -257,6 +257,12 @@ export default function ApplyBrowserPage() {
             await api.post(`/applications/${pkg.id}/briefing/refresh`)
             reloadBoth()
           }),
+        onDelete: () =>
+          run('delete', async () => {
+            await api.del(`/applications/${pkg.id}`)
+            setSelectedId(null)
+            reloadBoth()
+          }),
         onApprove: () => setApproving([pkg.id]),
         onSend: () => run('send', () => sendOne(false)),
         onDismissSend: () => {

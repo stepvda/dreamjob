@@ -350,6 +350,9 @@ export default function BrowseContacts() {
   const [method, setMethod] = useState('')
   const [uncertain, setUncertain] = useState(false)
   const [offset, setOffset] = useState(0)
+  const [deletingId, setDeletingId] = useState(null)
+  const [deleteNotice, setDeleteNotice] = useState(null)
+  const [deleteError, setDeleteError] = useState(null)
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -382,6 +385,32 @@ export default function BrowseContacts() {
     setMethod('')
     setUncertain(false)
     setOffset(0)
+  }
+
+  /**
+   * NFR-303: a campaign-scoped row can be deleted; a shared one is refused by
+   * the API (409) and points at the objection route. The button is disabled for
+   * shared rows, so an unexpected 409 is surfaced rather than swallowed.
+   */
+  async function removeContact(contact) {
+    const label = contact.full_name || contact.email || 'this contact'
+    const confirmed = window.confirm(
+      `Delete ${label}? This removes the campaign-scoped record permanently. The person ` +
+        'is not blocked, so an objection is the way to stop contact for good (NFR-302).',
+    )
+    if (!confirmed) return
+    setDeletingId(contact.id)
+    setDeleteNotice(null)
+    setDeleteError(null)
+    try {
+      await api.del(`/contacts/${contact.id}`)
+      setDeleteNotice(`Deleted ${label}.`)
+      reload()
+    } catch (e) {
+      setDeleteError(e)
+    } finally {
+      setDeletingId(null)
+    }
   }
 
   return (
@@ -514,6 +543,16 @@ export default function BrowseContacts() {
         </Empty>
       )}
 
+      {deleteNotice && (
+        <div className="alert alert-ok">
+          <div style={{ flex: 1 }}>{deleteNotice}</div>
+          <button className="btn btn-sm btn-ghost" onClick={() => setDeleteNotice(null)}>
+            ✕
+          </button>
+        </div>
+      )}
+      {deleteError && <ErrorBox error={deleteError} onRetry={() => setDeleteError(null)} />}
+
       {!loading && !error && items.length > 0 && (
         <>
           <div className="table-wrap">
@@ -539,6 +578,7 @@ export default function BrowseContacts() {
                   <th>Source</th>
                   <th>Confidence</th>
                   <th>Collected</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
@@ -593,6 +633,31 @@ export default function BrowseContacts() {
                       {formatDate(c.collected_at)}
                       {c.retention_until && (
                         <div className="tiny muted">until {formatDate(c.retention_until)}</div>
+                      )}
+                    </td>
+                    <td className="nowrap">
+                      {c.shareable === 0 ? (
+                        <button
+                          className="btn btn-sm btn-danger"
+                          disabled={deletingId === c.id}
+                          onClick={() => removeContact(c)}
+                        >
+                          {deletingId === c.id ? (
+                            <span className="spinner" />
+                          ) : (
+                            <Icon name="trash" />
+                          )}
+                          Delete
+                        </button>
+                      ) : (
+                        <span
+                          title="Shared contact — use Object so it is never contacted"
+                          style={{ display: 'inline-flex' }}
+                        >
+                          <button className="btn btn-sm btn-ghost" disabled>
+                            <Icon name="trash" /> Delete
+                          </button>
+                        </span>
                       )}
                     </td>
                   </tr>

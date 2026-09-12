@@ -22,11 +22,13 @@ import {
   Badge,
   Empty,
   ErrorBox,
+  Field,
   Loading,
   Modal,
   formatDate,
   useFetch,
 } from '../components/ui'
+import { useSession } from '../session'
 
 const PAGE_SIZE = 25
 
@@ -89,6 +91,8 @@ function sectorLabel(codes) {
 }
 
 export default function CompaniesPage() {
+  const { session } = useSession()
+  const isAdmin = Boolean(session?.is_admin)
   // Text filters are drafted and applied on submit: country is an exact
   // two-letter match and sector a LIKE, so re-querying per keystroke would ask
   // the server a question the user has not finished typing.
@@ -106,7 +110,7 @@ export default function CompaniesPage() {
   const [trajectory, setTrajectory] = useState('')
   const [offset, setOffset] = useState(0)
 
-  const { data, error, loading, reload } = useFetch(
+  const { data, error, loading, reload, setData } = useFetch(
     () => api.get(`/companies?${queryString({ ...filters, limit: PAGE_SIZE, offset })}`),
     [filters.q, filters.country, filters.sector, filters.size_band, filters.ats_vendor, offset],
   )
@@ -118,6 +122,12 @@ export default function CompaniesPage() {
   const [busyId, setBusyId] = useState(null)
   const [actionError, setActionError] = useState(null)
   const [unwatching, setUnwatching] = useState(null)
+  // FR-341: suppression is the admin's reversible removal from the shared list.
+  const [suppressing, setSuppressing] = useState(null)
+  const [suppressReason, setSuppressReason] = useState('')
+  const [suppressBusy, setSuppressBusy] = useState(false)
+  const [suppressedNotice, setSuppressedNotice] = useState(null)
+  const [undoBusy, setUndoBusy] = useState(false)
 
   const watched = new Map((watchlist.data || []).map((w) => [w.company_id, w]))
   const total = data?.total ?? 0
@@ -197,6 +207,55 @@ export default function CompaniesPage() {
     }
   }
 
+  /**
+   * FR-341: a shared company is never deleted, only suppressed, and the row is
+   * taken off the page on the server's confirmation rather than waiting for a
+   * refetch that would only move the pagination under the reader.
+   */
+  async function suppress() {
+    const company = suppressing
+    if (!company || !suppressReason.trim()) return
+    setSuppressBusy(true)
+    setActionError(null)
+    try {
+      await api.post(`/companies/${company.id}/suppress`, {
+        reason: suppressReason.trim(),
+      })
+      setData((d) =>
+        d
+          ? {
+              ...d,
+              items: (d.items || []).filter((row) => row.id !== company.id),
+              total: Math.max(0, (d.total ?? 1) - 1),
+            }
+          : d,
+      )
+      setSuppressedNotice({ id: company.id, name: company.name })
+      setSuppressing(null)
+      setSuppressReason('')
+    } catch (e) {
+      setActionError(e)
+    } finally {
+      setSuppressBusy(false)
+    }
+  }
+
+  async function undoSuppress() {
+    const company = suppressedNotice
+    if (!company) return
+    setUndoBusy(true)
+    setActionError(null)
+    try {
+      await api.del(`/companies/${company.id}/suppress`)
+      setSuppressedNotice(null)
+      reload()
+    } catch (e) {
+      setActionError(e)
+    } finally {
+      setUndoBusy(false)
+    }
+  }
+
   /* Why this list is empty — a different question from whether the knowledge
      base is. Saying "606 companies are on record" under a search that matched
      none of them would report the wrong problem. */
@@ -227,6 +286,18 @@ export default function CompaniesPage() {
       <ScreenIntro pathname="/companies" />
 
       {actionError && <ErrorBox error={actionError} />}
+
+      {suppressedNotice && (
+        <div className="alert alert-ok">
+          <div style={{ flex: 1 }}>
+            <strong>{suppressedNotice.name}</strong> is suppressed and hidden from this list
+            and from every count.
+          </div>
+          <button className="btn btn-sm" disabled={undoBusy} onClick={undoSuppress}>
+            {undoBusy ? <span className="spinner" /> : 'Undo'}
+          </button>
+        </div>
+      )}
 
       {staleCount > 0 && (
         <Caution title={`${staleCount} of these profiles are past their freshness window`}>
@@ -497,23 +568,38 @@ export default function CompaniesPage() {
                         <Freshness row={c} />
                       </td>
                       <td className="nowrap">
-                        {entry ? (
-                          <button
-                            className="btn btn-sm"
-                            disabled={busyId === c.id}
-                            onClick={() => setUnwatching({ company: c, entry })}
-                          >
-                            Watching
-                          </button>
-                        ) : (
-                          <button
-                            className="btn btn-sm"
-                            disabled={busyId === c.id}
-                            onClick={() => watch(c)}
-                          >
-                            Watch
-                          </button>
-                        )}
+                        <div className="row" style={{ gap: 6 }}>
+                          {entry ? (
+                            <button
+                              className="btn btn-sm"
+                              disabled={busyId === c.id}
+                              onClick={() => setUnwatching({ company: c, entry })}
+                            >
+                              Watching
+                            </button>
+                          ) : (
+                            <button
+                              className="btn btn-sm"
+                              disabled={busyId === c.id}
+                              onClick={() => watch(c)}
+                            >
+                              Watch
+                            </button>
+                          )}
+                          {isAdmin && (
+                            <button
+                              className="btn btn-sm btn-danger"
+                              disabled={busyId === c.id}
+                              title="Hide this shared company from browse, search and every count"
+                              onClick={() => {
+                                setSuppressReason('')
+                                setSuppressing(c)
+                              }}
+                            >
+                              Suppress
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )
@@ -565,6 +651,48 @@ export default function CompaniesPage() {
             opens an office or files accounts, and nothing new is added to your ranked list from it
             (FR-401). The profile itself stays in the shared knowledge base.
           </p>
+        </Modal>
+      )}
+
+      {suppressing && (
+        <Modal
+          title={`Suppress ${suppressing.name}?`}
+          onClose={() => {
+            if (suppressBusy) return
+            setSuppressing(null)
+          }}
+          actions={
+            <>
+              <button
+                className="btn"
+                disabled={suppressBusy}
+                onClick={() => setSuppressing(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={suppressBusy || !suppressReason.trim()}
+                onClick={suppress}
+              >
+                {suppressBusy ? <span className="spinner" /> : 'Suppress'}
+              </button>
+            </>
+          }
+        >
+          <p>
+            A company is shared knowledge (FR-341), so it is never hard-deleted. Suppressing
+            hides it from search, browse and every count for everyone but an administrator,
+            who can undo the decision from the company page. The profile itself stays.
+          </p>
+          <Field label="Why (kept in the audit trail)">
+            <textarea
+              value={suppressReason}
+              autoFocus
+              onChange={(e) => setSuppressReason(e.target.value)}
+              placeholder="Scraped by mistake; duplicate of another record."
+            />
+          </Field>
         </Modal>
       )}
     </div>

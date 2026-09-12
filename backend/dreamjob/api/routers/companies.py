@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.adapters.website import crawler
-from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
+from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker, owned_or_404
 from dreamjob.db.repositories import companies as repo
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import company_profile, competitors, knowledge_base, signals
@@ -33,6 +33,7 @@ from dreamjob.security.audit import record_audit
 router = APIRouter()
 
 Seeker = Annotated[CurrentSeeker, Depends(current_seeker)]
+Admin = Annotated[CurrentSeeker, Depends(current_admin)]
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +63,19 @@ class SignalRefreshRequest(BaseModel):
     fetch_news: bool = True
 
 
-def _company_or_404(company_id: str) -> dict:
+class SuppressRequest(BaseModel):
+    """Why a shared company row is being hidden - kept with the row and audited."""
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+def _company_or_404(company_id: str, seeker: CurrentSeeker | None = None) -> dict:
     company = repo.get_company(company_id)
     if company is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "company not found")
+    # A suppressed company is hidden from everyone but an administrator, who
+    # still has to be able to open it in order to undo the decision.
+    if company.get("suppressed") and not (seeker and seeker.is_admin):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "company not found")
     return company
 
@@ -214,9 +225,58 @@ async def run_enrichment(
     return report.as_dict()
 
 
+# ---------------------------------------------------------------------------
+# Suppression: hiding a shared company instead of deleting it (FR-341, NFR-302)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{company_id}/suppress")
+def suppress_company(company_id: str, admin: Admin, payload: SuppressRequest) -> dict:
+    """Hide a shared company from browse, counts and non-admin detail (FR-341).
+
+    A knowledge-base row is shared property, so it is never hard-deleted; the
+    suppression is the reversible, administrated way to take it out of
+    circulation, and the admin detail view can still open it to undo this.
+    """
+    company = repo.suppress_company(company_id, payload.reason)
+    if company is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "company not found")
+    record_audit(
+        "company.suppressed",
+        entity_type="company",
+        entity_id=company_id,
+        seeker_id=admin.id,
+        detail={"reason": payload.reason},
+    )
+    return {
+        "company_id": company_id,
+        "suppressed": True,
+        "suppressed_at": company.get("suppressed_at"),
+        "suppressed_reason": company.get("suppressed_reason"),
+    }
+
+
+@router.delete("/{company_id}/suppress")
+def unsuppress_company(company_id: str, admin: Admin) -> dict:
+    """Restore a suppressed company to every browse, list and count."""
+    company = repo.unsuppress_company(company_id)
+    if company is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "company not found")
+    record_audit(
+        "company.unsuppressed",
+        entity_type="company",
+        entity_id=company_id,
+        seeker_id=admin.id,
+    )
+    return {"company_id": company_id, "suppressed": False}
+
+
 @router.get("/{company_id}")
 def company_profile_view(company_id: str, seeker: Seeker) -> dict:
     """The fixed-schema company profile, in the layout FR-222 prescribes."""
+    # A suppressed company 404s here for every non-admin; an admin keeps the
+    # door open because the un-suppress control lives on this view.
+    _company_or_404(company_id, seeker)
     profile = company_profile.standardised_profile(company_id)
     if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "company not found")
@@ -228,7 +288,7 @@ def crawled_pages(
     company_id: str, seeker: Seeker, limit: int = Query(100, ge=1, le=400)
 ) -> dict:
     """The page inventory of the last crawl, with what each page was read as (FR-221)."""
-    _company_or_404(company_id)
+    _company_or_404(company_id, seeker)
     pages = repo.crawled_pages(company_id, limit=limit)
     return {
         "company_id": company_id,
@@ -253,7 +313,7 @@ def crawled_pages(
 @router.get("/{company_id}/provenance")
 def field_provenance(company_id: str, seeker: Seeker) -> dict:
     """Per-field confidence and source, for the flags NFR-402 requires."""
-    _company_or_404(company_id)
+    _company_or_404(company_id, seeker)
     rows = repo.field_provenance(company_id)
     return {
         "company_id": company_id,
@@ -276,7 +336,7 @@ async def refresh_profile(
     Returns immediately with a ``job_run`` id: a 30-page crawl at the configured
     per-domain rate is a minute of work, which is not a request.
     """
-    company = _company_or_404(company_id)
+    company = _company_or_404(company_id, seeker)
     options = body or RefreshRequest()
 
     if not options.force and not company_profile.needs_refresh(company):
@@ -354,7 +414,7 @@ def list_competitors(
     company_id: str, seeker: Seeker, limit: int = Query(12, ge=1, le=50)
 ) -> dict:
     """Competitor links already on record, aggregated per peer."""
-    _company_or_404(company_id)
+    _company_or_404(company_id, seeker)
     suggestions = competitors.stored_suggestions(company_id, limit=limit)
     return {
         "company_id": company_id,
@@ -371,7 +431,7 @@ def suggest_competitors(
     company_id: str, seeker: Seeker, body: CompetitorRequest | None = None
 ) -> dict:
     """Run competitor discovery now and store what it finds (FR-224)."""
-    company = _company_or_404(company_id)
+    company = _company_or_404(company_id, seeker)
     options = body or CompetitorRequest()
     suggestions = competitors.suggest_competitors(
         company,
@@ -393,7 +453,7 @@ def suggest_competitors(
 @router.post("/{company_id}/competitors/{link_id}/adopt", status_code=status.HTTP_201_CREATED)
 def adopt_competitor(company_id: str, link_id: str, seeker: Seeker) -> dict:
     """Add a suggested peer to this job seeker's target list (FR-224)."""
-    _company_or_404(company_id)
+    _company_or_404(company_id, seeker)
     link = repo.get_competitor_link(link_id)
     if link is None or link["company_id"] != company_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "competitor link not found")
@@ -424,7 +484,7 @@ def _on_target_list(seeker_id: str, suggestion: dict[str, Any]) -> bool:
 @router.get("/{company_id}/signals")
 def list_signals(company_id: str, seeker: Seeker) -> dict:
     """Dated, sourced hiring signals plus the recommended application window."""
-    _company_or_404(company_id)
+    _company_or_404(company_id, seeker)
     return {"company_id": company_id, **signals.timing_summary(company_id)}
 
 
@@ -433,7 +493,7 @@ async def refresh_signals(
     company_id: str, seeker: Seeker, body: SignalRefreshRequest | None = None
 ) -> dict:
     """Re-read the newsroom, filings and postings and re-detect signals (FR-225)."""
-    company = _company_or_404(company_id)
+    company = _company_or_404(company_id, seeker)
     options = body or SignalRefreshRequest()
     await signals.refresh_signals(company, fetch_news=options.fetch_news)
     return {"company_id": company_id, **signals.timing_summary(company_id)}
@@ -442,5 +502,5 @@ async def refresh_signals(
 @router.get("/{company_id}/timing")
 def timing(company_id: str, seeker: Seeker) -> dict:
     """The application-window recommendation on its own (FR-402)."""
-    _company_or_404(company_id)
+    _company_or_404(company_id, seeker)
     return signals.recommend_window(company_id).as_dict()

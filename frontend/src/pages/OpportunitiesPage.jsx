@@ -394,6 +394,7 @@ function OpportunityRow({
   onToggleExpand,
   onPatch,
   onReject,
+  onDelete,
   draggable,
   dragOver,
   onDragStart,
@@ -583,6 +584,13 @@ function OpportunityRow({
           <Link className="btn btn-sm btn-ghost" to={`/opportunities/${item.id}`}>
             Open
           </Link>
+          <button
+            className="btn btn-sm btn-ghost"
+            title="Delete this opportunity"
+            onClick={() => onDelete(item)}
+          >
+            <Icon name="trash" /> Delete
+          </button>
         </div>
       </div>
 
@@ -801,6 +809,13 @@ export default function OpportunitiesPage() {
   const [busy, setBusy] = useState(false)
   const [recalculating, setRecalculating] = useState(null)
   const [selectionNonce, setSelectionNonce] = useState(0)
+  // FR-142/FR-144 deletion: one row at a time, or the whole selection. A row
+  // touching a user decision is refused once (409) and needs a second confirm.
+  const [deleting, setDeleting] = useState(null)
+  const [deleteForce, setDeleteForce] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [bulkDelete, setBulkDelete] = useState(false)
+  const [bulkRefused, setBulkRefused] = useState(null)
 
   // Which campaign the screen auto-selected, and whether the seeker has since
   // chosen one themselves. The empty-campaign fallback (below) may only move
@@ -1042,6 +1057,90 @@ export default function OpportunitiesPage() {
     if (!saved) return
     setRejecting(null)
     setReason('')
+  }
+
+  /** Everything a deletion changes: the page, the counts and the shortlist. */
+  function refreshAfterDelete() {
+    list.reload()
+    summary.reload()
+    facets.reload()
+    setSelectionNonce((n) => n + 1)
+  }
+
+  /**
+   * FR-142 / NFR-305: delete one row. The first call leaving a user decision
+   * intact is refused with a 409; that answer is what opens the second confirm
+   * ("delete anyway?"), and only the retry carries force=true.
+   */
+  async function deleteOpportunity(force = false) {
+    if (!deleting) return
+    setDeleteBusy(true)
+    setActionError(null)
+    try {
+      const res = await api.del(`/opportunities/${deleting.id}${force ? '?force=true' : ''}`)
+      setNotice(
+        res?.deleted
+          ? `Deleted “${deleting.title}”.`
+          : `“${deleting.title}” was not deleted.`,
+      )
+      setDeleting(null)
+      setDeleteForce(false)
+      refreshAfterDelete()
+    } catch (e) {
+      if (e.status === 409 && !force) {
+        setDeleteForce(true)
+      } else {
+        setActionError(e)
+        setDeleting(null)
+        setDeleteForce(false)
+      }
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  /**
+   * FR-144: the same rules over the shortlist. The bulk route answers with its
+   * own `refused` list instead of a 409, so the reasons are shown and force is
+   * offered as a second, explicit confirmation rather than guessed at.
+   */
+  async function deleteSelected(force = false) {
+    const ids = selected.map((s) => s.id)
+    if (!ids.length) return
+    const titles = new Map(selected.map((s) => [s.id, s.title]))
+    setDeleteBusy(true)
+    setActionError(null)
+    try {
+      const res = await api.post('/opportunities/delete', {
+        opportunity_ids: ids,
+        force,
+      })
+      const refused = res?.refused || []
+      const deleted = res?.deleted ?? 0
+      refreshAfterDelete()
+      if (refused.length && !force) {
+        setBulkRefused(
+          refused.map((r) => ({
+            id: r.id,
+            reason: r.reason,
+            title: titles.get(r.id) || r.id,
+          })),
+        )
+      } else {
+        setBulkDelete(false)
+        setBulkRefused(null)
+        setNotice(
+          `${deleted} ${deleted === 1 ? 'opportunity' : 'opportunities'} deleted` +
+            (refused.length ? `, ${refused.length} kept.` : '.'),
+        )
+      }
+    } catch (e) {
+      setActionError(e)
+      setBulkDelete(false)
+      setBulkRefused(null)
+    } finally {
+      setDeleteBusy(false)
+    }
   }
 
   async function dropOn(targetId) {
@@ -1593,6 +1692,21 @@ export default function OpportunitiesPage() {
           >
             Generate applications for the selected
           </button>
+          <button
+            className="btn btn-sm btn-danger"
+            disabled={selected.length === 0 || deleteBusy}
+            title={
+              selected.length
+                ? 'Delete the selected opportunities from every list'
+                : 'Tick the opportunities you want to delete first'
+            }
+            onClick={() => {
+              setBulkRefused(null)
+              setBulkDelete(true)
+            }}
+          >
+            <Icon name="trash" /> Delete selected
+          </button>
         </div>
 
         {list.loading && (
@@ -1691,6 +1805,10 @@ export default function OpportunitiesPage() {
                 setRejecting(o)
                 setReason('')
               }}
+              onDelete={(o) => {
+                setDeleting(o)
+                setDeleteForce(false)
+              }}
               draggable={canReorder}
               dragOver={overId === item.id}
               onDragStart={(e) => {
@@ -1762,6 +1880,151 @@ export default function OpportunitiesPage() {
               onChange={(e) => setReason(e.target.value)}
             />
           </Field>
+        </Modal>
+      )}
+
+      {deleting && (
+        <Modal
+          title={deleteForce ? 'Delete anyway?' : `Delete “${deleting.title}”?`}
+          onClose={() => {
+            if (deleteBusy) return
+            setDeleting(null)
+            setDeleteForce(false)
+          }}
+          actions={
+            <>
+              <button
+                className="btn"
+                disabled={deleteBusy}
+                onClick={() => {
+                  setDeleting(null)
+                  setDeleteForce(false)
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={deleteBusy}
+                onClick={() => deleteOpportunity(deleteForce)}
+              >
+                {deleteBusy ? (
+                  <span className="spinner" />
+                ) : deleteForce ? (
+                  'Delete anyway'
+                ) : (
+                  'Delete'
+                )}
+              </button>
+            </>
+          }
+        >
+          {deleteForce ? (
+            <p className="section-intro">
+              This opportunity has decisions attached — a pin, a position, a rejection, an
+              application or a package. Deleting it removes those with it, and this cannot
+              be undone (NFR-305).
+            </p>
+          ) : (
+            <p className="section-intro">
+              Delete <strong>{deleting.title}</strong>
+              {deleting.company_name ? ` at ${deleting.company_name}` : ''}? It disappears
+              from every list, and this cannot be undone.
+            </p>
+          )}
+        </Modal>
+      )}
+
+      {bulkDelete && (
+        <Modal
+          title={
+            bulkRefused
+              ? `${bulkRefused.length} of the selected were kept`
+              : `Delete ${selected.length} selected ${
+                  selected.length === 1 ? 'opportunity' : 'opportunities'
+                }?`
+          }
+          onClose={() => {
+            if (deleteBusy) return
+            setBulkDelete(false)
+            setBulkRefused(null)
+          }}
+          actions={
+            bulkRefused ? (
+              <>
+                <button
+                  className="btn"
+                  disabled={deleteBusy}
+                  onClick={() => {
+                    setBulkDelete(false)
+                    setBulkRefused(null)
+                  }}
+                >
+                  Keep them
+                </button>
+                <button
+                  className="btn btn-danger"
+                  disabled={deleteBusy}
+                  onClick={() => deleteSelected(true)}
+                >
+                  {deleteBusy ? <span className="spinner" /> : 'Delete anyway'}
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn" disabled={deleteBusy} onClick={() => setBulkDelete(false)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-danger"
+                  disabled={deleteBusy}
+                  onClick={() => deleteSelected(false)}
+                >
+                  {deleteBusy ? <span className="spinner" /> : 'Delete selected'}
+                </button>
+              </>
+            )
+          }
+        >
+          {bulkRefused ? (
+            <>
+              <p className="section-intro">
+                These carry a decision of yours — a pin, a position, a rejection, an
+                application or a package — so they were not deleted. Deleting them anyway
+                removes the decision with them (NFR-305).
+              </p>
+              <ul className="help-tips">
+                {bulkRefused.map((r) => (
+                  <li key={r.id}>
+                    <strong>{r.title}</strong>{' '}
+                    <span className="muted small">
+                      —{' '}
+                      {r.reason === 'user_decision'
+                        ? 'you have decided about this one'
+                        : String(r.reason || 'not deleted').replace(/_/g, ' ')}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <>
+              <p className="section-intro">
+                This permanently removes the {selected.length} selected{' '}
+                {selected.length === 1 ? 'opportunity' : 'opportunities'} from every list.
+                Pins, positions and rejections on those rows are removed with them
+                (NFR-305).
+              </p>
+              <ul className="help-tips">
+                {selected.slice(0, 12).map((s) => (
+                  <li key={s.id}>
+                    {s.title} — {s.company_name || 'company not identified'}
+                  </li>
+                ))}
+                {selected.length > 12 && <li>…and {selected.length - 12} more.</li>}
+              </ul>
+            </>
+          )}
         </Modal>
       )}
 

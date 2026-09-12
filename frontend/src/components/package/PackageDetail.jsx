@@ -61,6 +61,7 @@ export default function PackageDetail({
   onRecheck,
   onApprove,
   onDiscard,
+  onDelete,
   onSend,
   onRefreshBriefing,
   onDownload,
@@ -72,6 +73,7 @@ export default function PackageDetail({
   const [body, setBody] = useState('')
   const [instructions, setInstructions] = useState('')
   const [discarding, setDiscarding] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [reason, setReason] = useState('')
 
   // A save or a regeneration replaces the package; the editor follows it.
@@ -212,6 +214,34 @@ export default function PackageDetail({
             <button className="btn btn-danger" onClick={() => setDiscarding(true)}>
               Discard
             </button>
+          )}
+          {(pkg.status === 'draft' || pkg.status === 'discarded') && onDelete && (
+            <button
+              className="btn btn-danger"
+              disabled={busy === 'delete'}
+              title="Delete this package and its generated files"
+              onClick={() => setDeleting(true)}
+            >
+              {busy === 'delete' ? (
+                <span className="spinner" />
+              ) : (
+                <>
+                  <Icon name="trash" /> Delete
+                </>
+              )}
+            </button>
+          )}
+          {/* A sent package is part of the dispatch record, so the API keeps it
+              and the existing Discard route is how it is retired. */}
+          {sent && (
+            <span
+              title="A sent package is kept as a dispatch record — discard it instead"
+              style={{ display: 'inline-flex' }}
+            >
+              <button className="btn btn-danger" disabled>
+                <Icon name="trash" /> Delete
+              </button>
+            </span>
           )}
         </div>
 
@@ -372,6 +402,50 @@ export default function PackageDetail({
           <Field label="Why (kept in the audit trail)">
             <input type="text" value={reason} onChange={(e) => setReason(e.target.value)} />
           </Field>
+        </Modal>
+      )}
+
+      {/* FR-321/FR-331: a draft or discarded package is working material, so it
+          is deleted with its generated files; a sent one is kept instead. */}
+      {deleting && onDelete && (
+        <Modal
+          title="Delete this application package?"
+          onClose={() => {
+            if (busy === 'delete') return
+            setDeleting(false)
+          }}
+          actions={
+            <>
+              <button
+                className="btn"
+                disabled={busy === 'delete'}
+                onClick={() => setDeleting(false)}
+              >
+                Keep it
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={busy === 'delete'}
+                onClick={async () => {
+                  await onDelete()
+                  setDeleting(false)
+                }}
+              >
+                {busy === 'delete' ? <span className="spinner" /> : 'Delete'}
+              </button>
+            </>
+          }
+        >
+          <p>
+            The CV, briefing, motivation document and email for{' '}
+            <strong>{pkg.opportunity_title || 'this role'}</strong> at{' '}
+            <strong>{pkg.company_name || 'this company'}</strong> are deleted from disk with
+            the package. This cannot be undone. A package that was sent is kept as a dispatch
+            record and is discarded instead.
+          </p>
+          <p className="small muted" style={{ marginTop: 8 }}>
+            You can generate a new package for the same opportunity afterwards.
+          </p>
         </Modal>
       )}
     </div>

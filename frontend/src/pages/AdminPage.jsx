@@ -27,6 +27,7 @@ import WorkflowMap from '../components/WorkflowMap'
 import { Empty, Tabs, useFetch } from '../components/ui'
 import { useSession } from '../session'
 import ActivityTab from './admin/ActivityTab'
+import ContinuousTab from './admin/ContinuousTab'
 import { EmployerCoveragePanel } from './employers'
 import AuditTab from './admin/AuditTab'
 import DataTab from './admin/DataTab'
@@ -40,6 +41,7 @@ const TABS = [
   { key: 'models', label: 'Models' },
   { key: 'sources', label: 'Sources' },
   { key: 'activity', label: 'Activity' },
+  { key: 'continuous', label: 'Continuous' },
   { key: 'audit', label: 'Audit' },
   { key: 'logs', label: 'Logs' },
   { key: 'data', label: 'Data' },
@@ -86,6 +88,7 @@ export default function AdminPage() {
       {tab === 'models' && <ModelsTab />}
       {tab === 'sources' && <SourcesTab />}
       {tab === 'activity' && <ActivityTab onGoToSources={() => setTab('sources')} />}
+      {tab === 'continuous' && <ContinuousTab />}
       {tab === 'audit' && <AuditTab />}
       {tab === 'logs' && <LogsTab />}
       {tab === 'data' && <DataTab />}

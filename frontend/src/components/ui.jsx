@@ -7,7 +7,7 @@
  * list needs to stay readable.
  */
 
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 
 import Icon from './Icon'
 
@@ -37,6 +37,62 @@ export function useFetch(fn, deps = []) {
   }, [...deps, nonce])
 
   return { data, error, loading, reload: () => setNonce((n) => n + 1), setData }
+}
+
+/**
+ * Poll `fn` on mount and every `intervalMs`, for shell furniture that must keep
+ * moving while the user is on any screen.
+ *
+ * Ticks are skipped while the tab is hidden and the timer stops on unmount, so
+ * a background tab is quiet and a sign-out cannot leak an interval into the
+ * next session. A failing tick lands in `error` and leaves the last data in
+ * place; nothing is ever thrown at the caller. `enabled: false` disables the
+ * whole loop, and `reload` runs `fn` again immediately.
+ */
+export function usePolling(fn, intervalMs, { enabled = true } = {}) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [nonce, setNonce] = useState(0)
+  const fnRef = useRef(fn)
+
+  // The latest `fn` without restarting the timer every render: callers usually
+  // pass an inline closure.
+  useEffect(() => {
+    fnRef.current = fn
+  })
+
+  useEffect(() => {
+    if (!enabled) return undefined
+    let live = true
+    let busy = false
+
+    async function run() {
+      if (busy) return
+      busy = true
+      try {
+        const next = await fnRef.current()
+        if (live) {
+          setData(next)
+          setError(null)
+        }
+      } catch (err) {
+        if (live) setError(err)
+      } finally {
+        busy = false
+      }
+    }
+
+    run()
+    const timer = setInterval(() => {
+      if (!document.hidden) run()
+    }, intervalMs)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [enabled, intervalMs, nonce])
+
+  return { data, error, reload: () => setNonce((n) => n + 1) }
 }
 
 export function Loading({ rows = 3 }) {

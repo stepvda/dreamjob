@@ -27,10 +27,12 @@ from pydantic import BaseModel, Field
 from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
+from dreamjob.documents import package as package_module
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import compensation as comp_mod
 from dreamjob.pipeline import employer_product, scoring, speculative
 from dreamjob.pipeline import opportunities as synth
+from dreamjob.security.audit import record_audit
 
 router = APIRouter()
 
@@ -114,6 +116,13 @@ class WeightsIn(BaseModel):
 
 class CompareRequest(BaseModel):
     opportunity_ids: list[str] = Field(min_length=2, max_length=6)
+
+
+class BulkDeleteRequest(BaseModel):
+    """FR-142/FR-144 clean-up by hand: the rows the seeker wants gone."""
+
+    opportunity_ids: list[str] = Field(min_length=1, max_length=500)
+    force: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +555,95 @@ def score_unscored_endpoint(seeker: Seeker, payload: ScoreUnscoredRequest) -> di
         "campaigns": per_campaign,
         "remaining_unscored": repo.count_unscored(seeker.id),
     }
+
+
+# ---------------------------------------------------------------------------
+# Deleting opportunities (FR-142, FR-144, NFR-305)
+# ---------------------------------------------------------------------------
+
+
+def _delete_opportunities(seeker_id: str, opportunity_ids: list[str]) -> int:
+    """Delete owned rows and the generated files their packages named.
+
+    The paths are read first: ``application_package`` cascades with the
+    opportunity and the paths cascade with it.  The rows go through the
+    repository (which chunks them), the files follow, so a failed unlink can
+    only leave an orphan file, never a row pointing at nothing.
+    """
+    paths = repo.package_artifact_paths(seeker_id, opportunity_ids)
+    deleted = repo.delete_opportunities(seeker_id, opportunity_ids)
+    if deleted:
+        package_module.remove_artifacts(paths)
+    return deleted
+
+
+@router.post("/delete")
+def bulk_delete_opportunities(seeker: Seeker, payload: BulkDeleteRequest) -> dict:
+    """Delete several of this seeker's opportunities in one request (FR-144).
+
+    A row the seeker has decided about - pinned, selected, ranked, rejected,
+    applied to, or carrying a package or a card - is refused unless ``force``
+    is set: their decision outranks a clean-up (NFR-305).  An id that is not
+    theirs is refused as ``not_found``, never deleted.
+    """
+    ids = list(dict.fromkeys(payload.opportunity_ids))
+    owned = repo.owned_ids(seeker.id, ids)
+    refused = [
+        {"id": opportunity_id, "reason": "not_found"}
+        for opportunity_id in ids
+        if opportunity_id not in owned
+    ]
+    if payload.force:
+        deletable = sorted(owned)
+    else:
+        protected = repo.ids_touching_user_decisions(seeker.id, sorted(owned))
+        refused.extend(
+            {"id": opportunity_id, "reason": "user_decision"}
+            for opportunity_id in sorted(protected)
+        )
+        deletable = sorted(owned - protected)
+
+    deleted = _delete_opportunities(seeker.id, deletable)
+    if deleted:
+        record_audit(
+            "opportunity.deleted",
+            "opportunity",
+            seeker_id=seeker.id,
+            detail={
+                "requested": len(ids),
+                "deleted": deleted,
+                "ids": deletable,
+                "force": payload.force,
+            },
+        )
+    return {"deleted": deleted, "refused": refused}
+
+
+@router.delete("/{opportunity_id}")
+def delete_opportunity(seeker: Seeker, opportunity_id: str, force: bool = False) -> dict:
+    """Delete one of this seeker's opportunities (FR-142, NFR-305).
+
+    The owner filter is the route's, so another seeker's id is a 404.  A row
+    the seeker has decided about is a 409 until ``force=true``.
+    """
+    _opportunity_or_404(opportunity_id, seeker.id)
+    protected = repo.ids_touching_user_decisions(seeker.id, [opportunity_id])
+    if protected and not force:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this opportunity touches a user decision (pinned, selected, ranked, "
+            "rejected, applied or packaged); pass force=true to delete it (NFR-305)",
+        )
+    deleted = _delete_opportunities(seeker.id, [opportunity_id])
+    if deleted:
+        record_audit(
+            "opportunity.deleted",
+            "opportunity",
+            opportunity_id,
+            seeker_id=seeker.id,
+            detail={"force": force},
+        )
+    return {"deleted": deleted, "refused": []}
 
 
 # ---------------------------------------------------------------------------

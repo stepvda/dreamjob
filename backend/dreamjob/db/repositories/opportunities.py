@@ -127,6 +127,26 @@ def get_by_ids(opportunity_ids: list[str], job_seeker_id: str) -> list[dict]:
     return [by_id[i] for i in opportunity_ids if i in by_id]
 
 
+def owned_ids(job_seeker_id: str, opportunity_ids: list[str]) -> set[str]:
+    """The subset of these ids that belong to this seeker (FR-101, FR-344).
+
+    A delete request may name anything; the owner filter decides what it may
+    actually reach, so a foreign id is simply not in the answer.
+    """
+    if not opportunity_ids:
+        return set()
+    found: set[str] = set()
+    for start in range(0, len(opportunity_ids), 400):
+        chunk = opportunity_ids[start : start + 400]
+        marks = ",".join("?" for _ in chunk)
+        rows = query_all(
+            f"SELECT id FROM opportunity WHERE job_seeker_id = ? AND id IN ({marks})",
+            (job_seeker_id, *chunk),
+        )
+        found.update(str(r["id"]) for r in rows)
+    return found
+
+
 def _filter_clause(job_seeker_id: str, filters: dict[str, Any]) -> tuple[str, list[Any]]:
     sql = " WHERE o.job_seeker_id = ?"
     params: list[Any] = [job_seeker_id]
@@ -546,6 +566,30 @@ def delete_opportunities(job_seeker_id: str, opportunity_ids: list[str]) -> int:
     if deleted:
         invalidate_active_seeker_cache()
     return deleted
+
+
+def package_artifact_paths(job_seeker_id: str, opportunity_ids: list[str]) -> list[str]:
+    """The generated files of the packages that will cascade with these rows.
+
+    Read before the delete: once ``application_package`` has cascaded away the
+    paths are gone with it, and the files they name would be orphaned on disk.
+    """
+    if not opportunity_ids:
+        return []
+    columns = ("cv_pdf_path", "cv_docx_path", "briefing_pdf_path", "motivation_pdf_path")
+    select = ", ".join(columns)
+    paths: list[str] = []
+    for start in range(0, len(opportunity_ids), 400):
+        chunk = opportunity_ids[start : start + 400]
+        marks = ",".join("?" for _ in chunk)
+        rows = query_all(
+            f"SELECT {select} FROM application_package "
+            f"WHERE job_seeker_id = ? AND opportunity_id IN ({marks})",
+            (job_seeker_id, *chunk),
+        )
+        for row in rows:
+            paths.extend(str(row[column]) for column in columns if row.get(column))
+    return paths
 
 
 def ids_touching_user_decisions(job_seeker_id: str, opportunity_ids: list[str]) -> set[str]:

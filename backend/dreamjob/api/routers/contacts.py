@@ -831,6 +831,43 @@ async def validate_address(body: ValidateRequest, seeker: Seeker) -> dict[str, A
 
 
 # ---------------------------------------------------------------------------
+# NFR-303: deleting a campaign-scoped contact
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/{contact_id}")
+def delete_contact(contact_id: str, seeker: Seeker) -> dict[str, Any]:
+    """Remove a contact this seeker's own campaign collected (NFR-303).
+
+    Shared contacts are knowledge-base property and are never hard-deleted:
+    an objection is the route that blocks an address permanently (NFR-302).
+    A private contact belonging to somebody else does not exist for this
+    caller, so it is a 404 rather than a 409 that would confirm it.
+    """
+    contact = repo.get_contact(contact_id)
+    if contact is None or not repo.contact_owned_by(seeker.id, contact_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "contact not found")
+    if contact.get("shareable"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this contact is part of the shared knowledge base and is not deleted; "
+            "record an objection to block it permanently (POST /api/contacts/objections, NFR-302)",
+        )
+    if not repo.delete_contact(contact_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "contact not found")
+    # Objections persist: they are keyed on the address, not on this row
+    # (NFR-302), so deleting the contact cannot unblock the person.
+    record_audit(
+        "contact.deleted",
+        entity_type="contact",
+        entity_id=contact_id,
+        seeker_id=seeker.id,
+        detail={"owning_campaign_id": contact.get("owning_campaign_id")},
+    )
+    return {"contact_id": contact_id, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
 # NFR-302: objections
 # ---------------------------------------------------------------------------
 

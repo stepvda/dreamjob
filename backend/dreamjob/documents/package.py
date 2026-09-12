@@ -27,6 +27,7 @@ what will be sent to whom, which is written to the audit trail (NFR-702).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,9 @@ PARTS: tuple[str, ...] = ("cv", "briefing", "motivation", "email")
 #: FR-321: only the CV is ever attached to an outgoing message.
 SENDABLE_PATHS: tuple[str, ...] = ("cv_pdf_path", "cv_docx_path")
 SEEKER_ONLY_PATHS: tuple[str, ...] = ("briefing_pdf_path", "motivation_pdf_path")
+
+#: Every generated file a package row can name - what a hard delete must remove.
+ARTIFACT_PATH_COLUMNS: tuple[str, ...] = SENDABLE_PATHS + SEEKER_ONLY_PATHS
 
 DOWNLOADABLE: dict[str, str] = {
     "cv_pdf": "cv_pdf_path",
@@ -771,3 +775,22 @@ def regenerate_cv_only(
             "consistency_status": "not_run",
         },
     )
+
+
+def remove_artifacts(paths: Iterable[str | None]) -> int:
+    """Delete generated files named by a package row, count what was handled.
+
+    Called after the database row is gone, so a file that cannot be removed is
+    logged and orphaned rather than left as the only record of a deleted
+    package.  A path that is already absent is not an error.
+    """
+    handled = 0
+    for raw in paths:
+        if not raw:
+            continue
+        try:
+            Path(str(raw)).unlink(missing_ok=True)
+            handled += 1
+        except OSError:
+            log.warning("Could not remove generated file %s", raw, exc_info=True)
+    return handled

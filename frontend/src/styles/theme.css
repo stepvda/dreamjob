@@ -286,6 +286,14 @@
 .topbar h2 { display: flex; align-items: center; gap: 9px; }
 .topbar h2 .icon { color: var(--hue, var(--accent)); }
 
+/* Quiet shell furniture until pointed at; then unmistakably a link. */
+.topbar-counter:hover,
+.topbar-counter:focus-visible,
+.topbar-counter:active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 .card-header {
   background: linear-gradient(180deg, var(--surface-2), var(--surface));
 }

@@ -776,6 +776,11 @@ def standardised_profile(company_id: str) -> dict[str, Any] | None:
     return {
         "id": company_id,
         "name": company.get("name"),
+        # The suppression decision travels with the profile so the detail screen
+        # can show the banner and the un-suppress control on a direct load, not
+        # only after the action was just taken there (FR-341).
+        "suppressed": bool(company.get("suppressed")),
+        "suppressed_reason": company.get("suppressed_reason"),
         "identity": {
             "name": company.get("name"),
             "normalised_name": company.get("normalised_name"),

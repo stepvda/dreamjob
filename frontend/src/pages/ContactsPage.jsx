@@ -85,6 +85,9 @@ function ContactList() {
   )
   const coverage = useFetch(() => api.get('/contacts/coverage').catch(() => null), [])
   const [validating, setValidating] = useState(null)
+  const [deletingContact, setDeletingContact] = useState(null)
+  const [contactNotice, setContactNotice] = useState(null)
+  const [contactError, setContactError] = useState(null)
   const [scraping, setScraping] = useState(false)
   const [scrapeResult, setScrapeResult] = useState(null)
   const [scrapeError, setScrapeError] = useState(null)
@@ -106,6 +109,34 @@ function ContactList() {
       contacts.reload()
     } finally {
       setValidating(null)
+    }
+  }
+
+  /**
+   * NFR-303: only a campaign-collected contact can be removed; a shared row is
+   * knowledge-base property and the API refuses it with a 409 pointing at the
+   * objection route. The button is disabled for shared rows, so a 409 here is
+   * unexpected and shown rather than swallowed.
+   */
+  async function removeContact(contact) {
+    const label = contact.full_name || contact.email || 'this contact'
+    const confirmed = window.confirm(
+      `Delete ${label}? This removes the campaign-scoped record permanently. The person ` +
+        'is not blocked, so an objection is the way to stop contact for good (NFR-302).',
+    )
+    if (!confirmed) return
+    setDeletingContact(contact.id)
+    setContactNotice(null)
+    setContactError(null)
+    try {
+      await api.del(`/contacts/${contact.id}`)
+      setContactNotice(`Deleted ${label}.`)
+      contacts.reload()
+      coverage.reload()
+    } catch (e) {
+      setContactError(e)
+    } finally {
+      setDeletingContact(null)
     }
   }
 
@@ -400,6 +431,21 @@ function ContactList() {
                 </span>
               </div>
 
+              {contactNotice && (
+                <div className="alert alert-ok">
+                  <div style={{ flex: 1 }}>{contactNotice}</div>
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => setContactNotice(null)}
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+              {contactError && (
+                <ErrorBox error={contactError} onRetry={() => setContactError(null)} />
+              )}
+
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -476,19 +522,44 @@ function ContactList() {
                             </div>
                           )}
                         </td>
-                        <td>
-                          <button
-                            className="btn btn-sm"
-                            disabled={!c.email || validating === c.id || c.objected === 1}
-                            onClick={() => validate(c)}
-                          >
-                            {validating === c.id ? (
-                              <span className="spinner" />
+                        <td className="nowrap">
+                          <div className="row" style={{ gap: 6 }}>
+                            <button
+                              className="btn btn-sm"
+                              disabled={!c.email || validating === c.id || c.objected === 1}
+                              onClick={() => validate(c)}
+                            >
+                              {validating === c.id ? (
+                                <span className="spinner" />
+                              ) : (
+                                <Icon name="refresh" />
+                              )}
+                              Re-check
+                            </button>
+                            {c.shareable === 0 ? (
+                              <button
+                                className="btn btn-sm btn-danger"
+                                disabled={deletingContact === c.id}
+                                onClick={() => removeContact(c)}
+                              >
+                                {deletingContact === c.id ? (
+                                  <span className="spinner" />
+                                ) : (
+                                  <Icon name="trash" />
+                                )}
+                                Delete
+                              </button>
                             ) : (
-                              <Icon name="refresh" />
+                              <span
+                                title="Shared contact — use Object so it is never contacted"
+                                style={{ display: 'inline-flex' }}
+                              >
+                                <button className="btn btn-sm btn-ghost" disabled>
+                                  <Icon name="trash" /> Delete
+                                </button>
+                              </span>
                             )}
-                            Re-check
-                          </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
