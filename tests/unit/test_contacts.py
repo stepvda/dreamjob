@@ -17,15 +17,16 @@ import secrets
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from dreamjob.config import get_settings
 from dreamjob.db.connection import insert_row, query_one, utcnow
 from dreamjob.db.repositories import contacts as repo
+from dreamjob.pipeline import contact_backup, introductions
 from dreamjob.pipeline import contacts as pipeline
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
-from dreamjob.pipeline import introductions
 
 _ENV_KEYS = (
     "DREAMJOB_DATA_DIR",
@@ -470,6 +471,60 @@ def test_discovery_stores_only_the_minimal_record(monkeypatch: pytest.MonkeyPatc
 # ---------------------------------------------------------------------------
 # NFR-302: the permanent block
 # ---------------------------------------------------------------------------
+
+
+def test_discovery_falls_back_to_the_backup_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FR-303: when every normal tier is ruled out, the backup stage answers.
+
+    The tiers still run first - the flag must cost nothing when they succeed -
+    and a published backup address is stored without the uncertain mark.
+    """
+    ids = _seed()
+
+    def _verdict(email: str, **kwargs: object) -> validation.ValidationResult:
+        result = (
+            validation.UNKNOWN if email == "jobs@recovered.be" else validation.INVALID
+        )
+        return validation.ValidationResult(email=email, result=result, detail={})
+
+    monkeypatch.setattr(validation, "validate", _verdict)
+
+    async def _backup(company: dict, **kwargs: Any) -> Any:
+        return (
+            [
+                contact_backup.BackupFinding(
+                    patterns.FoundAddress(
+                        email="jobs@recovered.be",
+                        method=patterns.METHOD_STORED_DOCUMENT,
+                        source_url="https://board.example/acme",
+                        confidence=patterns.METHOD_CONFIDENCE[
+                            patterns.METHOD_STORED_DOCUMENT
+                        ],
+                    ),
+                    "Published in the employer's stored posting (FR-303 stored_document)",
+                )
+            ],
+            "recovered.be",
+            "backup found stored_document=1",
+        )
+
+    monkeypatch.setattr(pipeline.contact_backup, "harvest_backup_addresses", _backup)
+    report = asyncio.run(
+        pipeline.discover_for_opportunity(
+            ids["seeker_id"],
+            ids["opportunity_id"],
+            crawl_site=False,
+            allow_smtp=False,
+            persist=True,
+            backup=True,
+        )
+    )
+    assert report.domain == "recovered.be"
+    assert any("backup" in note for note in report.notes)
+    assert [c.email for c in report.candidates] == ["jobs@recovered.be"]
+    row = query_one("SELECT * FROM contact WHERE email = ?", ("jobs@recovered.be",))
+    assert row["email_source_method"] == patterns.METHOD_STORED_DOCUMENT
+    assert row["email_uncertain"] == 0
 
 
 def test_objection_blocks_the_address_for_everyone() -> None:

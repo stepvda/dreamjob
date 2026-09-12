@@ -52,13 +52,18 @@ Admin = Annotated[CurrentSeeker, Depends(current_admin)]
 
 
 class DiscoverRequest(BaseModel):
-    """FR-301.  ``crawl_site`` and ``allow_smtp`` are the two network switches."""
+    """FR-301.  ``crawl_site`` and ``allow_smtp`` are the two network switches.
+
+    ``backup_methods`` opts into the last-resort sources (stored postings and
+    the ATS board) for a company the normal ladder cannot answer (FR-303).
+    """
 
     crawl_site: bool = True
     allow_smtp: bool = True
     use_lookup_service: bool = False
     max_candidates: int = Field(default=8, ge=1, le=25)
     persist: bool = True
+    backup_methods: bool = False
 
 
 class CampaignDiscoverRequest(DiscoverRequest):
@@ -76,6 +81,7 @@ class CompanyDiscoverRequest(BaseModel):
     allow_smtp: bool = False
     derive_domains: bool = True
     allow_generic: bool = True
+    backup_methods: bool = False
 
 
 class DiscoverAllRequest(BaseModel):
@@ -104,6 +110,7 @@ class DiscoverAllRequest(BaseModel):
     allow_generic: bool = True
     refresh: bool = False
     order: str = Field(default="vacancies", pattern="^(vacancies|recency)$")
+    backup_methods: bool = False
 
 
 class BackfillRequest(BaseModel):
@@ -121,6 +128,7 @@ class BackfillRequest(BaseModel):
     allow_smtp: bool = False
     crawl_site: bool = True
     use_lookup_service: bool = False
+    backup_methods: bool = False
 
 
 class ValidateRequest(BaseModel):
@@ -296,6 +304,7 @@ async def discover_contacts(
             use_lookup_service=body.use_lookup_service,
             max_candidates=body.max_candidates,
             persist=body.persist,
+            backup=body.backup_methods,
         )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
@@ -317,6 +326,7 @@ async def discover_for_campaign(
         use_lookup_service=body.use_lookup_service,
         max_candidates=body.max_candidates,
         persist=body.persist,
+        backup=body.backup_methods,
     )
     return {
         "campaign_id": campaign_id,
@@ -351,6 +361,7 @@ async def discover_company_contacts(
             allow_smtp=body.allow_smtp,
             derive_domains=body.derive_domains,
             allow_generic=body.allow_generic,
+            backup=body.backup_methods,
         )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc

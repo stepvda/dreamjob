@@ -47,6 +47,7 @@ from dreamjob.db.repositories import contacts as repo
 from dreamjob.db.repositories import knowledge as kb
 from dreamjob.egress.client import EgressClient
 from dreamjob.jobs.runner import JobContext, runner
+from dreamjob.pipeline import contact_backup
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
 from dreamjob.security.audit import record_audit
@@ -415,6 +416,10 @@ def score_candidate(candidate: ContactCandidate) -> float:
             patterns.METHOD_VACANCY: 0.95,
             patterns.METHOD_PRESS: 0.9,
             patterns.METHOD_LOOKUP: 0.85,
+            # A published backup address: the employer wrote it down, but in a
+            # stored posting or on a board rather than on its own site.
+            patterns.METHOD_ATS_BOARD: 0.8,
+            patterns.METHOD_STORED_DOCUMENT: 0.8,
             patterns.METHOD_PATTERN: 0.65,
         }.get(method or "", 0.7)
     elif candidate.linkedin_url:
@@ -586,6 +591,34 @@ def is_blocked(email: str | None, linkedin_url: str | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _backup_candidates(findings: list[contact_backup.BackupFinding]) -> list[ContactCandidate]:
+    """FR-301 candidates for the backup findings, method labels preserved.
+
+    A published backup address (``stored_document``/``ats_board``) keeps its
+    method and is never uncertain; a composed generic from a recovered domain
+    stays ``pattern_inference`` and is marked uncertain below unless FR-304
+    says ``valid``.
+    """
+    out: list[ContactCandidate] = []
+    for finding in findings:
+        address = finding.address
+        role = validation.is_role_address(address.email)
+        out.append(
+            ContactCandidate(
+                full_name=address.full_name,
+                role_title="Careers mailbox" if role else None,
+                tier=TIER_GENERIC if role else classify_role(address.context),
+                source=address.source_url or address.method,
+                email=address.email,
+                email_source_method=address.method,
+                is_generic_mailbox=role,
+                confidence=address.confidence,
+                rationale=finding.rationale,
+            )
+        )
+    return out
+
+
 @dataclass
 class DiscoveryReport:
     """What one FR-301 run found, for the interface and the audit trail."""
@@ -624,6 +657,7 @@ async def discover_for_opportunity(
     max_candidates: int = 8,
     egress: EgressClient | None = None,
     persist: bool = True,
+    backup: bool = False,
 ) -> DiscoveryReport:
     """Find and rank the hiring contacts for one opportunity (FR-301, FR-303, FR-304).
 
@@ -631,6 +665,11 @@ async def discover_for_opportunity(
     its own: with no site to crawl the pattern inference still runs off stored
     addresses, with no addresses at all the generic mailbox remains, and with
     no network access the stored knowledge base is still ranked and returned.
+
+    ``backup=True`` appends the last-resort sources of
+    :mod:`dreamjob.pipeline.contact_backup` - the stored postings and the ATS
+    board - but only when the tiers above produced no usable candidate, so the
+    ordinary path pays nothing for the flag.
     """
     context = repo.opportunity_context(opportunity_id, job_seeker_id)
     if context is None:
@@ -760,23 +799,61 @@ async def discover_for_opportunity(
     # --- FR-304: validate before anything is used --------------------------
     # The MX lookup and the RCPT probe are blocking sockets; off the event loop
     # they would stall every other request for the length of a probe timeout.
-    for candidate in candidates:
-        if candidate.email and candidate.validation is None:
-            verdict = await asyncio.to_thread(
-                validation.validate, candidate.email, allow_smtp=allow_smtp
-            )
-            candidate.validation = verdict.result
-            candidate.validation_detail = verdict.detail
-            if verdict.detail.get("role"):
-                candidate.is_generic_mailbox = True
-        if candidate.email and is_blocked(candidate.email, candidate.linkedin_url):
-            candidate.blocked = True  # NFR-302
+    async def check(items: list[ContactCandidate]) -> None:
+        for candidate in items:
+            if candidate.email and candidate.validation is None:
+                verdict = await asyncio.to_thread(
+                    validation.validate, candidate.email, allow_smtp=allow_smtp
+                )
+                candidate.validation = verdict.result
+                candidate.validation_detail = verdict.detail
+                if verdict.detail.get("role"):
+                    candidate.is_generic_mailbox = True
+            if candidate.email and is_blocked(candidate.email, candidate.linkedin_url):
+                candidate.blocked = True  # NFR-302
 
-    usable = [
-        c
-        for c in candidates
-        if not c.blocked and c.validation != validation.INVALID and (c.email or c.linkedin_url)
-    ]
+    def usable_of(items: list[ContactCandidate]) -> list[ContactCandidate]:
+        return [
+            c
+            for c in items
+            if not c.blocked
+            and c.validation != validation.INVALID
+            and (c.email or c.linkedin_url)
+        ]
+
+    await check(candidates)
+    usable = usable_of(candidates)
+
+    # --- FR-303 backup sources, only when nothing above is usable ----------
+    if backup and not usable:
+        company = {
+            "company_id": company_id,
+            "company_name": context.get("company_name") or "",
+            "company_domain": context.get("company_domain"),
+            "careers_url": context.get("company_careers_url"),
+        }
+        try:
+            findings, recovered, note = await contact_backup.harvest_backup_addresses(
+                company, egress=egress, crawl_site=crawl_site
+            )
+        except Exception as exc:  # noqa: BLE001 - a backup source is optional evidence
+            log.info("Backup contact discovery failed for %s: %s", company_id, exc)
+            findings, recovered, note = [], None, f"backup failed: {type(exc).__name__}"
+        if note:
+            report.notes.append(note)
+        if recovered:
+            report.domain = recovered
+        fresh = _backup_candidates(findings)
+        await check(fresh)
+        for candidate in fresh:
+            if (
+                candidate.email_source_method == patterns.METHOD_PATTERN
+                and candidate.validation != validation.VALID
+            ):
+                candidate.email_uncertain = True
+        candidates.extend(fresh)
+        usable = usable_of(candidates)
+
     report.candidates = rank(usable)[:max_candidates]
 
     if persist:

@@ -52,6 +52,8 @@ const METHODS = [
   'json_ld',
   'security_txt',
   'sitemap',
+  'ats_board',
+  'stored_document',
 ]
 
 function browseQuery({ q, validation, method, uncertain, offset }) {
@@ -93,6 +95,7 @@ function EmailBackfillPanel({ onContactsChanged }) {
   const [limit, setLimit] = useState(BACKFILL_LIMIT)
   const [crawlSite, setCrawlSite] = useState(true)
   const [allowSmtp, setAllowSmtp] = useState(false)
+  const [backupMethods, setBackupMethods] = useState(false)
   const [batch, setBatch] = useState(null)
   const [error, setError] = useState(null)
 
@@ -114,6 +117,7 @@ function EmailBackfillPanel({ onContactsChanged }) {
         allow_smtp: allowSmtp,
         crawl_site: crawlSite,
         use_lookup_service: false,
+        backup_methods: backupMethods,
       })
       setBatch({
         job_id: started.job_id,
@@ -237,6 +241,23 @@ function EmailBackfillPanel({ onContactsChanged }) {
                   Opens a probe connection to the mail server to confirm a mailbox exists.
                   It is much slower and less polite than reading published pages, so it is
                   off by default and should be used sparingly.
+                </HelpTip>
+              </label>
+            </div>
+
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>&nbsp;</label>
+              <label className="row small" style={{ gap: 6, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={backupMethods}
+                  disabled={running}
+                  onChange={(e) => setBackupMethods(e.target.checked)}
+                />
+                Backup methods
+                <HelpTip title="Backup methods">
+                  Also try the company&apos;s stored postings, its ATS board and its
+                  legal/imprint pages when the normal search finds nothing.
                 </HelpTip>
               </label>
             </div>
@@ -415,10 +436,11 @@ export default function BrowseContacts() {
             <label>
               Source method
               <HelpTip title="How the address was found">
-                From the company website, a press page, inferred from the pattern of other
-                addresses on the same domain, a lookup service, a vacancy, a search provider
-                or structured data. An inferred address deserves less confidence than one
-                published on the company&apos;s own site.
+                From the company website, a press page, a stored posting or its ATS board,
+                a legal/imprint page, inferred from the pattern of other addresses on the
+                same domain, a lookup service, a vacancy, a search provider or structured
+                data. An inferred address deserves less confidence than one published on
+                the company&apos;s own site.
               </HelpTip>
             </label>
             <select

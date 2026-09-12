@@ -638,6 +638,24 @@ def vacancies_carrying_an_address(company_id: str, limit: int = 12) -> list[dict
     )
 
 
+def vacancies_for_company(company_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Stored postings of one company, newest first, for the backup scan (FR-303).
+
+    The backup stage reads the posting text and URL fields the corpus already
+    holds before anything is fetched.  :func:`vacancies_carrying_an_address`
+    cannot serve it: that query only returns postings that contain an ``@`` and
+    this stage also wants the URLs.  ``limit`` is the bound - fifty postings of
+    one company is enough text to find an address in, and a bigger read would
+    be neither necessary nor polite.
+    """
+    return query_all(
+        "SELECT id, title, application_channel, application_target, source_url, description "
+        "  FROM vacancy WHERE company_id = ? "
+        " ORDER BY COALESCE(posted_at, collected_at) DESC LIMIT ?",
+        (company_id, max(1, int(limit))),
+    )
+
+
 def company_people(company_id: str) -> dict[str, Any]:
     """``key_people`` and ``structure``, the input to FR-303 pattern inference."""
     row = query_one(
@@ -704,9 +722,14 @@ def set_company_domain(company_id: str, domain: str) -> None:
 
 #: How a stored address is labelled in a coverage figure.  Only an address
 #: that nobody published - inferred *and* generic - is a conventional mailbox.
+#: The backup methods (``ats_board``, ``stored_document``) are published
+#: addresses and keep their own label, named explicitly so no future bucket
+#: folds them into the inferred one.
 _METHOD_BUCKET_RESOLUTION = (
     "CASE WHEN method = 'pattern_inference' AND is_generic = 1 "
-    "     THEN 'conventional_mailbox' ELSE method END"
+    "     THEN 'conventional_mailbox' "
+    "     WHEN method IN ('ats_board', 'stored_document') THEN method "
+    "     ELSE method END"
 )
 
 
@@ -908,6 +931,8 @@ def coverage_by_method() -> dict[str, Any]:
         )
         SELECT CASE WHEN ct.email_source_method = 'pattern_inference'
                           AND ct.is_generic_mailbox = 1 THEN 'conventional_mailbox'
+                    WHEN ct.email_source_method IN ('ats_board', 'stored_document')
+                         THEN ct.email_source_method
                     ELSE COALESCE(ct.email_source_method, 'unknown') END AS method,
                COALESCE(ct.email_validation, 'unknown') AS validation,
                COUNT(*) AS vacancies,

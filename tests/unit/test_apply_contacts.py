@@ -588,6 +588,31 @@ def test_an_address_in_an_older_posting_is_still_the_employers_channel(
     assert outcome.method == patterns.METHOD_VACANCY
 
 
+def test_the_pass_forwards_the_backup_flag_to_the_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``backup=True`` reaches the backup stage through the whole batch pass."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    company_id = _company("Nowhere BV")
+    _vacancy(company_id)
+    seen: list[bool] = []
+
+    async def _backup(company: dict, **kwargs: Any) -> Any:
+        seen.append(True)
+        return [], None, "backup ran; no address found in the stored postings or on the ATS board"
+
+    monkeypatch.setattr(pipeline.contact_backup, "harvest_backup_addresses", _backup)
+    report = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=10, concurrency=1, crawl_site=False,
+            derive_domains=False, backup=True,
+        )
+    )
+    assert report.companies_visited == 1
+    assert seen == [True]
+    # The backup attempt is visible in the report the screen reads.
+    assert any(bucket.startswith("backup") for bucket in report.unreachable_reasons)
+
+
 def test_a_confirmed_domain_yields_the_published_address(monkeypatch: pytest.MonkeyPatch) -> None:
     _offline(monkeypatch)
     company_id = _company("Acme Data BV", domain=None)

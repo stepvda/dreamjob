@@ -40,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +49,7 @@ from dreamjob.db.repositories import contacts as contacts_repo
 from dreamjob.egress.client import EgressClient
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import apply_contacts as apply
+from dreamjob.pipeline import contact_backup
 from dreamjob.pipeline import contacts as discovery
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
@@ -206,6 +207,8 @@ async def _address_guesses(
     company: dict[str, Any],
     egress: EgressClient,
     use_lookup_service: bool,
+    backup: bool = False,
+    backup_findings: Callable[[], Awaitable[list[patterns.FoundAddress]]] | None = None,
 ) -> list[patterns.FoundAddress]:
     """The addresses to try for one person, published evidence first."""
     full_name = (person.get("full_name") or "").strip()
@@ -219,6 +222,8 @@ async def _address_guesses(
             guesses.append(match)
         guesses.extend(
             patterns.candidates_for_person(full_name, domain, inference=inference, limit=3)
+            if domain
+            else []
         )
         if use_lookup_service and patterns.lookup_service_enabled():
             try:
@@ -228,12 +233,22 @@ async def _address_guesses(
                 log.info("Lookup service disabled: %s", exc)
             except Exception:  # noqa: BLE001 - one source must not stop the person
                 log.info("Lookup service failed for %s", full_name, exc_info=True)
-    else:
+    elif domain:
         # A row with no usable name - a department label, a role - can still be
         # reached through the company's conventional mailbox (FR-301 tier 3).
         guesses.extend(
             patterns.generic_candidates(domain, careers_url=company.get("careers_url"))
         )
+
+    # The normal sources produced nothing for this row: the backup findings are
+    # the last resort.  They are company-level, so a named person is only
+    # offered a role mailbox - a mailbox reaches the employer, a stranger's
+    # published address does not belong on this row (FR-303, RK-08).
+    if not guesses and backup and backup_findings is not None:
+        for address in await backup_findings():
+            if full_name and not validation.is_role_address(address.email):
+                continue
+            guesses.append(address)
     return guesses
 
 
@@ -248,6 +263,8 @@ async def _backfill_person(
     allow_smtp: bool,
     use_lookup_service: bool,
     result: _CompanyResult,
+    backup: bool = False,
+    backup_findings: Callable[[], Awaitable[list[patterns.FoundAddress]]] | None = None,
 ) -> None:
     """Find one address, validate it and store it if it survives FR-304."""
     contact_id = str(person.get("id") or "")
@@ -263,6 +280,8 @@ async def _backfill_person(
         company=company,
         egress=egress,
         use_lookup_service=use_lookup_service,
+        backup=backup,
+        backup_findings=backup_findings,
     )
     if not guesses:
         result.skipped_unresolved += 1
@@ -316,6 +335,7 @@ async def _backfill_company(
     use_lookup_service: bool,
     harvest_cache: dict[str, asyncio.Future[list[patterns.FoundAddress]]],
     cache_lock: asyncio.Lock,
+    backup: bool = False,
 ) -> _CompanyResult:
     """One company: resolve its domain once, crawl once, then serve its people."""
     result = _CompanyResult(companies_visited=1)
@@ -333,29 +353,65 @@ async def _backfill_company(
         "vacancy_count": 0,
     }
 
+    async def backup_findings() -> list[patterns.FoundAddress]:
+        """The backup stage's addresses for this company, fetched at most once.
+
+        It is only reached from :func:`_address_guesses` when a row's normal
+        guesses are empty, so a company whose people can be served the ordinary
+        way never pays for the backup sources (FR-303).  The future is
+        published before the harvest starts so a second row of the same company
+        waits instead of fetching the board again (FR-305).
+        """
+        key = f"backup:{company_id}"
+        loop = asyncio.get_running_loop()
+        async with cache_lock:
+            future = harvest_cache.get(key)
+            owner = future is None
+            if owner:
+                future = loop.create_future()
+                harvest_cache[key] = future
+        if not owner and future is not None:
+            return await future
+        found: list[patterns.FoundAddress] = []
+        try:
+            harvested, _domain, _note = await contact_backup.harvest_backup_addresses(
+                company, egress=egress, crawl_site=crawl_site
+            )
+            found = [finding.address for finding in harvested]
+        except Exception:  # noqa: BLE001 - a backup source is optional evidence
+            log.info("Backup harvest failed for %s", company_id, exc_info=True)
+        if future is not None:
+            future.set_result(found)
+        return found
+
     # The company's own domain, or the full CR-405 derivation when it has none.
     domain, _source, _note = await apply.resolve_domain(company, [], [], egress=egress)
-    if not domain:
+    if not domain and not backup:
         result.skipped_no_domain += len(people)
         return result
 
-    harvested = await _harvest(
-        domain,
-        careers_url=company.get("careers_url"),
-        egress=egress,
-        crawl_site=crawl_site,
-        harvest_cache=harvest_cache,
-        cache_lock=cache_lock,
-    )
-    published = {a.email: a for a in harvested}
-    observations = [
-        (a.full_name, a.email)
-        for a in harvested
-        if a.full_name and not validation.is_role_address(a.email)
-    ]
-    inference = await asyncio.to_thread(
-        patterns.learn_domain_pattern, domain, observations
-    )
+    harvested: list[patterns.FoundAddress] = []
+    inference: patterns.PatternInference | None = None
+    if domain:
+        harvested = await _harvest(
+            domain,
+            careers_url=company.get("careers_url"),
+            egress=egress,
+            crawl_site=crawl_site,
+            harvest_cache=harvest_cache,
+            cache_lock=cache_lock,
+        )
+        published = {a.email: a for a in harvested}
+        observations = [
+            (a.full_name, a.email)
+            for a in harvested
+            if a.full_name and not validation.is_role_address(a.email)
+        ]
+        inference = await asyncio.to_thread(
+            patterns.learn_domain_pattern, domain, observations
+        )
+    else:
+        published = {}
 
     for person in people:
         await _backfill_person(
@@ -368,6 +424,8 @@ async def _backfill_company(
             allow_smtp=allow_smtp,
             use_lookup_service=use_lookup_service,
             result=result,
+            backup=backup,
+            backup_findings=backup_findings,
         )
     return result
 
@@ -381,6 +439,7 @@ async def backfill_missing_emails(
     allow_smtp: bool = False,
     crawl_site: bool = True,
     use_lookup_service: bool = False,
+    backup: bool = False,
     egress: EgressClient | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> BackfillReport:
@@ -397,6 +456,10 @@ async def backfill_missing_emails(
     concurrently behind a semaphore and a single shared
     :class:`~dreamjob.egress.client.EgressClient`, whose per-domain pacing keeps
     the pass polite (FR-182, FR-305).
+
+    ``backup=True`` lets a row whose normal guesses are empty fall back to
+    :mod:`dreamjob.pipeline.contact_backup` - the stored postings and the ATS
+    board - harvested once per company and only when it is genuinely needed.
     """
     seeker = job_seeker_id if scope == "mine" else None
     rows = await asyncio.to_thread(
@@ -446,6 +509,7 @@ async def backfill_missing_emails(
                         use_lookup_service=use_lookup_service,
                         harvest_cache=harvest_cache,
                         cache_lock=cache_lock,
+                        backup=backup,
                     )
                 except Exception:  # noqa: BLE001 - one company never stops a pass
                     log.exception("E-mail backfill failed for company %s", company_id)
@@ -494,6 +558,11 @@ async def contact_email_backfill_worker(ctx: JobContext):
     """
     options = dict((ctx.checkpoint or {}).get("options") or {})
     limit = int(options.pop("limit", 500) or 500)
+    # The API stores the flag under its request name; the pass calls it
+    # ``backup``.  Translating here keeps the checkpoint faithful to the
+    # request that created it and the call signature faithful to FR-303.
+    if "backup_methods" in options:
+        options["backup"] = bool(options.pop("backup_methods"))
 
     def on_progress(payload: dict[str, Any]) -> None:
         total = payload.get("total")

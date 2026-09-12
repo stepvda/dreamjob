@@ -92,6 +92,7 @@ function ContactList() {
   const [batchError, setBatchError] = useState(null)
   const [target, setTarget] = useState(DISCOVERY_LIMIT)
   const [scope, setScope] = useState('shortlist')
+  const [backupMethods, setBackupMethods] = useState(false)
 
   const list = Array.isArray(companies.data)
     ? companies.data
@@ -115,7 +116,9 @@ function ContactList() {
     setScrapeResult(null)
     setScrapeError(null)
     try {
-      const result = await api.post(`/contacts/companies/${companyId}/discover`, {})
+      const result = await api.post(`/contacts/companies/${companyId}/discover`, {
+        backup_methods: backupMethods,
+      })
       setScrapeResult(result)
       contacts.reload()
       coverage.reload()
@@ -142,7 +145,11 @@ function ContactList() {
       : DISCOVERY_LIMIT
     setTarget(limit)
     try {
-      const started = await api.post('/contacts/discover', { limit, scope })
+      const started = await api.post('/contacts/discover', {
+        limit,
+        scope,
+        backup_methods: backupMethods,
+      })
       setBatch({
         job_id: started.job_id,
         job: null,
@@ -236,6 +243,22 @@ function ContactList() {
               <option value="shortlist">My shortlist</option>
               <option value="all">All companies in the database</option>
             </select>
+          </div>
+          <div className="field" style={{ marginBottom: 0 }}>
+            <label>&nbsp;</label>
+            <label className="row small" style={{ gap: 6, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={backupMethods}
+                disabled={running}
+                onChange={(e) => setBackupMethods(e.target.checked)}
+              />
+              Backup methods
+              <HelpTip title="Backup methods">
+                Also try the company&apos;s stored postings, its ATS board and its
+                legal/imprint pages when the normal search finds nothing.
+              </HelpTip>
+            </label>
           </div>
           <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 240 }}>
             <label>&nbsp;</label>

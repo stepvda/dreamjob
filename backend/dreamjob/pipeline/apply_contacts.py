@@ -97,6 +97,7 @@ from dreamjob.db.repositories import contacts as contacts_repo
 from dreamjob.db.repositories import registry_identity as identity_repo
 from dreamjob.egress.client import EgressClient, RobotsDisallowed
 from dreamjob.jobs.runner import JobContext, runner
+from dreamjob.pipeline import contact_backup
 from dreamjob.pipeline import contacts as discovery
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
@@ -108,6 +109,10 @@ log = logging.getLogger(__name__)
 SOURCE_COMPANY = "company"
 SOURCE_VACANCY_TEXT = "vacancy_text"
 SOURCE_DERIVED = "derived_confirmed"
+#: A domain the backup stage recovered from structured board evidence or the
+#: posting's own URL fields, after the identity gate confirmed nothing.  Kept
+#: apart from ``derived_confirmed`` because nobody judged its identity.
+SOURCE_BACKUP = "backup_recovered"
 
 # --- FR-305 cache windows --------------------------------------------------
 #: How long a confirm/reject verdict for a domain stands before it is re-probed.
@@ -811,6 +816,58 @@ def first_usable(
     return fallback
 
 
+def backup_candidates(
+    findings: list[contact_backup.BackupFinding],
+) -> list[discovery.ContactCandidate]:
+    """FR-301 candidates for the backup findings, labels preserved.
+
+    A published backup address (``stored_document``/``ats_board``) keeps its
+    method and is therefore never marked uncertain; a composed generic from a
+    recovered domain stays ``pattern_inference`` and stays uncertain.  The
+    ranking, validation and storage steps then treat them like any other
+    candidate (FR-301, FR-303, FR-304).
+    """
+    out: list[discovery.ContactCandidate] = []
+    for finding in findings:
+        address = finding.address
+        role = validation.is_role_address(address.email)
+        out.append(
+            discovery.ContactCandidate(
+                full_name=address.full_name,
+                role_title="Careers mailbox" if role else None,
+                tier=discovery.TIER_GENERIC if role else discovery.classify_role(address.context),
+                source=address.source_url or address.method,
+                email=address.email,
+                email_source_method=address.method,
+                is_generic_mailbox=role,
+                confidence=address.confidence,
+                rationale=finding.rationale,
+            )
+        )
+    return out
+
+
+async def _walk_backup(
+    company: dict[str, Any],
+    *,
+    egress: EgressClient | None,
+    crawl_site: bool,
+) -> tuple[list[contact_backup.BackupFinding], str, str]:
+    """The backup stage, never allowed to fail the ladder.
+
+    The harvested findings already include the crawl and generics of a
+    recovered domain (that is the module's own bounded work), so the caller
+    appends them rather than fetching the same pages a second time.
+    """
+    try:
+        return await contact_backup.harvest_backup_addresses(
+            company, egress=egress, crawl_site=crawl_site
+        )
+    except Exception as exc:  # noqa: BLE001 - a backup source is optional evidence
+        log.info("Backup contact discovery failed for %s: %s", company.get("company_id"), exc)
+        return [], "", f"backup failed: {type(exc).__name__}"
+
+
 async def resolve_company(
     company: dict[str, Any],
     *,
@@ -820,8 +877,15 @@ async def resolve_company(
     crawl_site: bool = True,
     derive_domains: bool = True,
     allow_generic: bool = True,
+    backup: bool = False,
 ) -> CompanyOutcome:
-    """Walk the whole FR-301 ladder for one company and record the answer."""
+    """Walk the whole FR-301 ladder for one company and record the answer.
+
+    ``backup=True`` adds the last-resort sources of
+    :mod:`dreamjob.pipeline.contact_backup` - the stored postings and the ATS
+    board - but only after the ordinary ladder has produced nothing usable
+    (FR-303).  A company the ladder can already answer costs no backup fetch.
+    """
     outcome = CompanyOutcome(
         company_id=company.get("company_id") or "",
         company_name=company.get("company_name") or "",
@@ -883,24 +947,48 @@ async def resolve_company(
         crawl_site=crawl_site and bool(domain), allow_generic=allow_generic and bool(domain),
         diagnostics=diagnostics,
     )
-    if not candidates:
-        if diagnostics.get("challenge_pages"):
+    chosen = (
+        await asyncio.to_thread(first_usable, candidates, allow_smtp=allow_smtp)
+        if candidates
+        else None
+    )
+    backup_note = ""
+    if chosen is None and backup:
+        # The ladder produced nothing usable.  Only now do the backup sources
+        # run, so a company the ordinary path can answer costs no fetch at all
+        # (FR-303).  The recovered domain's crawl and generics already travel
+        # inside the findings, so they are not fetched a second time.
+        findings, backup_domain, backup_note = await _walk_backup(
+            company, egress=egress, crawl_site=crawl_site
+        )
+        if findings:
+            candidates.extend(backup_candidates(findings))
+        if backup_domain and not outcome.domain:
+            outcome.domain = backup_domain
+            outcome.domain_source = SOURCE_BACKUP
+        if backup_note:
+            outcome.notes.append(backup_note)
+        if candidates:
+            chosen = await asyncio.to_thread(first_usable, candidates, allow_smtp=allow_smtp)
+
+    if chosen is None:
+        if candidates:
+            blocked = sum(1 for c in candidates if c.blocked)
+            outcome.reason = (
+                f"{len(candidates)} candidate address(es) were found and none survived FR-304"
+                + (f"; {blocked} carry an objection (NFR-302)" if blocked else "")
+            )
+        elif diagnostics.get("challenge_pages"):
             outcome.reason = (
                 f"{note or 'the domain resolved'}; the site answered with a bot-protection "
                 "challenge (F5/Cloudflare/Incapsula), so no page could be read for an address"
             )
         else:
             outcome.reason = note or "no address could be found for this company"
-        await asyncio.to_thread(repo.record_resolution, outcome.company_id, _resolution(outcome))
-        return outcome
-
-    chosen = await asyncio.to_thread(first_usable, candidates, allow_smtp=allow_smtp)
-    if chosen is None:
-        blocked = sum(1 for c in candidates if c.blocked)
-        outcome.reason = (
-            f"{len(candidates)} candidate address(es) were found and none survived FR-304"
-            + (f"; {blocked} carry an objection (NFR-302)" if blocked else "")
-        )
+        if backup_note:
+            # ``unreachable_reasons`` must say the backup stage was tried; a
+            # bucket that only repeated "no address" would hide the attempt.
+            outcome.reason = f"backup attempted: {backup_note}; {outcome.reason}"
         await asyncio.to_thread(repo.record_resolution, outcome.company_id, _resolution(outcome))
         return outcome
 
@@ -946,6 +1034,7 @@ async def resolve_company_by_id(
     derive_domains: bool = True,
     allow_generic: bool = True,
     egress: EgressClient | None = None,
+    backup: bool = False,
 ) -> CompanyOutcome:
     """Walk the FR-301 ladder for one company named by id (FR-301, FR-303).
 
@@ -972,6 +1061,7 @@ async def resolve_company_by_id(
             crawl_site=crawl_site,
             derive_domains=derive_domains,
             allow_generic=allow_generic,
+            backup=backup,
         )
 
     if egress is None:
@@ -1018,6 +1108,10 @@ class ApplyContactsReport:
             method = outcome.method or "unknown"
             if outcome.is_generic and method == patterns.METHOD_PATTERN:
                 method = "generic_mailbox"
+            # A published backup address keeps its own label - ``ats_board`` or
+            # ``stored_document`` - so the report never counts it as a composed
+            # conventional mailbox.  A composed backup generic stays
+            # ``pattern_inference`` and is bucketed as usual.
             self.by_method[method] += 1
             self.by_validation[outcome.validation or validation.UNKNOWN] += 1
             self.by_domain_source[outcome.domain_source or "none"] += 1
@@ -1126,6 +1220,7 @@ async def ensure_apply_contacts(
     crawl_site: bool = True,
     derive_domains: bool = True,
     allow_generic: bool = True,
+    backup: bool = False,
     refresh: bool = False,
     order: str = "vacancies",
     on_progress: Callable[[dict[str, Any]], None] | None = None,
@@ -1258,6 +1353,7 @@ async def ensure_apply_contacts(
                         crawl_site=crawl_site,
                         derive_domains=derive_domains,
                         allow_generic=allow_generic,
+                        backup=backup,
                     )
                 except Exception as exc:  # noqa: BLE001 - one company never stops a pass
                     log.exception(
@@ -1330,6 +1426,11 @@ async def contacts_discovery_worker(ctx: JobContext):
     options = dict((ctx.checkpoint or {}).get("options") or {})
     limit = int(options.pop("limit", 500) or 500)
     campaign_id = options.pop("campaign_id", None) or ctx.campaign_id
+    # The API stores the flag under its request name; the pass calls it
+    # ``backup``.  Translating here keeps the checkpoint faithful to the
+    # request that created it and the call signature faithful to FR-303.
+    if "backup_methods" in options:
+        options["backup"] = bool(options.pop("backup_methods"))
 
     def on_progress(payload: dict[str, Any]) -> None:
         total = payload.get("total")

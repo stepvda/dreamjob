@@ -22,6 +22,7 @@ import pytest
 from dreamjob.config import get_settings
 from dreamjob.db.connection import from_json, insert_row, query_one, utcnow
 from dreamjob.db.repositories import contacts as repo
+from dreamjob.pipeline import contact_backup
 from dreamjob.pipeline import contact_email_backfill as backfill
 from dreamjob.pipeline import email_patterns as patterns
 from dreamjob.pipeline import email_validate as validation
@@ -396,6 +397,61 @@ def test_backfill_reports_a_row_that_gained_an_address_since_selection(
     assert report.considered == 1
     assert report.updated == 0
     assert report.already_had_email == 1
+
+
+# ---------------------------------------------------------------------------
+# The backup sources, when a row's normal guesses are empty (FR-303)
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_falls_back_to_the_backup_sources_for_a_nameless_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row the pattern inference cannot serve is reached through the backup.
+
+    A single-token name fits no naming convention, so the normal guesses are
+    empty and only then is the company's backup pool consulted; the published
+    role mailbox it carries is stored with its own label and no uncertainty.
+    """
+    ids = _seed()
+    contact_id = _contact(ids["company_id"], name="Vacatures")
+    _mx(monkeypatch)
+    calls: list[dict] = []
+
+    async def _backup(company: dict, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return (
+            [
+                contact_backup.BackupFinding(
+                    patterns.FoundAddress(
+                        email="jobs@acme-data.example",
+                        method=patterns.METHOD_ATS_BOARD,
+                        source_url="https://boards.example/acme",
+                        confidence=patterns.METHOD_CONFIDENCE[patterns.METHOD_ATS_BOARD],
+                    ),
+                    "Published on the employer's ATS board (FR-303 ats_board)",
+                )
+            ],
+            "acme-data.example",
+            "backup found ats_board=1",
+        )
+
+    monkeypatch.setattr(backfill.contact_backup, "harvest_backup_addresses", _backup)
+    report = asyncio.run(
+        backfill.backfill_missing_emails(ids["seeker_id"], crawl_site=False, backup=True)
+    )
+    assert report.updated == 1
+    assert calls, "the backup pool was consulted"
+    row = query_one("SELECT * FROM contact WHERE id = ?", (contact_id,))
+    assert row["email"] == "jobs@acme-data.example"
+    assert row["email_source_method"] == patterns.METHOD_ATS_BOARD
+    assert row["email_uncertain"] == 0
+
+    # Without the flag the same pass stores nothing: the backup is opt-in.
+    second = _contact(ids["company_id"], name="Carrieres")
+    plain = asyncio.run(backfill.backfill_missing_emails(ids["seeker_id"], crawl_site=False))
+    assert plain.updated == 0
+    assert query_one("SELECT email FROM contact WHERE id = ?", (second,))["email"] is None
 
 
 # ---------------------------------------------------------------------------

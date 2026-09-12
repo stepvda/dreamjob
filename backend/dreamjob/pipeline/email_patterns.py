@@ -57,6 +57,12 @@ METHOD_SEARCH = "search"
 METHOD_SECURITY_TXT = "security_txt"
 METHOD_SITEMAP = "sitemap"
 METHOD_JSONLD = "json_ld"
+#: The backup sources.  ``stored_document`` is the address printed in a posting
+#: the corpus already holds; ``ats_board`` is the address printed on the
+#: employer's applicant-tracking board's own pages.  Both were published by the
+#: employer, so neither is composed and neither is uncertain.
+METHOD_ATS_BOARD = "ats_board"
+METHOD_STORED_DOCUMENT = "stored_document"
 
 #: Confidence attached to an address purely because of how it was obtained.
 METHOD_CONFIDENCE = {
@@ -66,6 +72,8 @@ METHOD_CONFIDENCE = {
     METHOD_PRESS: 0.8,
     METHOD_SECURITY_TXT: 0.75,
     METHOD_JSONLD: 0.8,
+    METHOD_ATS_BOARD: 0.6,
+    METHOD_STORED_DOCUMENT: 0.45,
     METHOD_LOOKUP: 0.7,
     METHOD_SEARCH: 0.6,
     METHOD_SITEMAP: 0.75,
@@ -137,6 +145,8 @@ CONTACT_PATHS: tuple[str, ...] = (
     "/contact-us",
     "/contacts",
     "/contacteer-ons",
+    "/contacteer",
+    "/contactez-nous",
     "/nous-contacter",
     "/kontakt",
     "/about/contact",
@@ -145,10 +155,16 @@ CONTACT_PATHS: tuple[str, ...] = (
     "/about",
     "/about-us",
     "/over-ons",
+    "/wie-zijn-wij",
+    "/overons",
     "/a-propos",
+    "/a-propos-de-nous",
     "/uber-uns",
     "/team",
     "/our-team",
+    "/nos-equipes",
+    "/unser-team",
+    "/meet-the-team",
     "/people",
     "/leadership",
     "/management",
@@ -156,24 +172,64 @@ CONTACT_PATHS: tuple[str, ...] = (
     "/equipe",
     "/imprint",
     "/impressum",
+    "/legal",
+    "/legal/impressum",
     "/legal-notice",
     "/mentions-legales",
     "/disclaimer",
     "/privacy",
     "/privacy-policy",
+    "/privacybeleid",
+    "/privacyverklaring",
+    "/datenschutz",
+    "/confidentialite",
+    "/conditions-generales",
     "/terms",
     "/press",
     "/pers",
     "/presse",
+    "/press-releases",
     "/newsroom",
+    "/news",
+    "/nieuws",
+    "/actualites",
     "/media",
     "/about/press",
     "/jobs",
     "/careers",
     "/career",
     "/vacatures",
+    "/vacature",
+    "/vacancies",
     "/werken-bij",
     "/jobs/contact",
+    "/carriere",
+    "/carrieres",
+    "/karriere",
+    "/bewerbung",
+    "/emploi",
+    "/recrutement",
+    "/offres-emploi",
+    "/nous-rejoindre",
+    "/solliciteren",
+    "/join-us",
+    "/join",
+    # Locale-prefixed guesses, because the four-language market serves the same
+    # page as ``/nl/contact`` and ``/fr/a-propos`` as often as at the root.
+    *(
+        f"/{locale}{path}"
+        for locale in ("nl", "fr", "en", "de")
+        for path in (
+            "/contact",
+            "/contact-us",
+            "/over-ons",
+            "/a-propos",
+            "/uber-uns",
+            "/kontakt",
+            "/careers",
+            "/jobs",
+        )
+    ),
 )
 
 #: Local parts that reach the hiring function - the FR-301 generic fallback.
@@ -460,6 +516,47 @@ def extract_addresses(text: str, *, source_url: str = "", method: str = METHOD_W
             f"{match.group(1)}@{match.group(2)}.{match.group(3)}",
             _around(haystack, match.start()),
         )
+    return list(found.values())
+
+
+#: Local parts that are machinery, not a person or the hiring function.  A
+#: stored posting and an ATS board page both carry the platform's own sender
+#: addresses, and returning ``noreply@`` as the employer's contact would be the
+#: backup stage inventing a contact out of boilerplate.
+_NOISE_LOCAL_PARTS = frozenset(
+    {
+        "noreply", "no-reply", "donotreply", "do-not-reply", "mailer-daemon",
+        "postmaster", "sentry", "wixpress",
+    }
+)
+
+#: Local parts that are a hash or an asset stem, not a mailbox.
+_HASH_LOCAL_RE = re.compile(r"^[0-9a-f]{16,}$", re.IGNORECASE)
+
+
+def addresses_in_text(
+    text: str,
+    *,
+    source_url: str | None = None,
+    method: str = METHOD_STORED_DOCUMENT,
+    domain: str | None = None,
+) -> list[FoundAddress]:
+    """Addresses in raw text that was not a page (FR-303 backup sources).
+
+    :func:`extract_addresses` reads a fetched page; this reads the text the
+    corpus already holds - a vacancy description, an application target, a JSON
+    payload - and the pages of an ATS board.  Same regexes, same de-duplication,
+    plus the ``method`` the caller wants recorded and a filter for the image and
+    machinery "addresses" that only appear in such text.
+    """
+    found: dict[str, FoundAddress] = {}
+    for item in extract_addresses(
+        text or "", source_url=source_url or "", method=method, domain=domain
+    ):
+        local = item.local_part
+        if local in _NOISE_LOCAL_PARTS or _HASH_LOCAL_RE.fullmatch(local):
+            continue
+        found.setdefault(item.email, item)
     return list(found.values())
 
 
