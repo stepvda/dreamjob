@@ -84,7 +84,7 @@ import logging
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1231,6 +1231,7 @@ async def ensure_apply_contacts(
     backup: bool = False,
     refresh: bool = False,
     order: str = "vacancies",
+    skip_company_ids: Collection[str] | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> ApplyContactsReport:
     """Give the seeker something to apply to, at one of two scopes (FR-301, FR-303).
@@ -1268,8 +1269,18 @@ async def ensure_apply_contacts(
     what keeps that polite, since its per-domain rate limit and robots.txt
     cache are per client, not per task (FR-182, FR-305).  Every company is
     a different domain, so the concurrency costs no single site anything.
+
+    ``skip_company_ids`` is the resume seam (NFR-401).  A worker that survives
+    a restart keeps the companies it already visited in its checkpoint and
+    passes them here, so the sweep neither re-walks nor re-counts them.  The
+    work list is asked for ``ceiling + len(skip_company_ids)`` rows and the
+    skipped companies are dropped afterwards, which keeps the selected set the
+    same size it would have been without the skips rather than shrinking it.
+    When every selected company is skipped the pass emits its terminal
+    ``done`` tick and returns an empty report rather than failing.
     """
     sweep_all = scope == "all"
+    skip = {str(company_id) for company_id in (skip_company_ids or ()) if company_id}
     # The corpus figures below used to be read before any progress was emitted,
     # and the corpus queries could take minutes; the screen sat blank for the
     # whole of it.  Say what is happening first, with no total yet.
@@ -1292,11 +1303,16 @@ async def ensure_apply_contacts(
         ceiling = limit if max_companies is None else min(limit, max_companies)
         work = await asyncio.to_thread(
             repo.all_companies_for_contact,
-            ceiling,
+            ceiling + len(skip),
             job_seeker_id=job_seeker_id,
             include_covered=refresh,
             order=order,
         )
+        if skip:
+            work = [
+                row for row in work
+                if str(row.get("company_id") or "") not in skip
+            ][:ceiling]
         # ``requested`` reports how many companies the sweep set out to visit,
         # which is what a caller comparing it to ``companies_visited`` wants.
         report.requested = len(work)
@@ -1321,12 +1337,17 @@ async def ensure_apply_contacts(
         ceiling = max_companies if max_companies is not None else max(50, 2 * report.shortfall)
         work = await asyncio.to_thread(
             repo.companies_needing_contact,
-            ceiling,
+            ceiling + len(skip),
             job_seeker_id=job_seeker_id,
             include_resolved=refresh,
             resolved_before=_stale_before(RESOLUTION_MAX_AGE_DAYS) if refresh else None,
             order=order,
         )
+        if skip:
+            work = [
+                row for row in work
+                if str(row.get("company_id") or "") not in skip
+            ][:ceiling]
     total = len(work)
     if not work:
         report.finished_at = utcnow()
@@ -1387,6 +1408,7 @@ async def ensure_apply_contacts(
                         "phase": "company",
                         "done": report.companies_visited,
                         "total": total,
+                        "company_id": outcome.company_id,
                         "report": report.progress(),
                     },
                 )
@@ -1430,6 +1452,13 @@ async def contacts_discovery_worker(ctx: JobContext):
 
     The caller stores the pass options in the job checkpoint (``{"options":
     {...}}``), which is what makes the worker resumable without a closure.
+    ``visited_company_ids`` in the same checkpoint is the other half of that:
+    every company the callback reports is appended and persisted, and a
+    restarted worker passes the set back to :func:`ensure_apply_contacts` so
+    the sweep continues instead of starting over (NFR-401).  The UI counter is
+    therefore reported as ``base + done``, where ``base`` is how many companies
+    earlier runs already visited, so a resumed bar keeps moving forward rather
+    than jumping back to zero.
     """
     options = dict((ctx.checkpoint or {}).get("options") or {})
     limit = int(options.pop("limit", 500) or 500)
@@ -1440,16 +1469,35 @@ async def contacts_discovery_worker(ctx: JobContext):
     if "backup_methods" in options:
         options["backup"] = bool(options.pop("backup_methods"))
 
+    visited = [str(cid) for cid in (ctx.checkpoint or {}).get("visited_company_ids") or []]
+    visited_set = set(visited)
+    base = len(visited)
+
     def on_progress(payload: dict[str, Any]) -> None:
+        company_id = payload.get("company_id")
+        if company_id:
+            company_id = str(company_id)
+            if company_id not in visited_set:
+                visited.append(company_id)
+                visited_set.add(company_id)
         total = payload.get("total")
         if total:
-            ctx.progress(int(payload.get("done") or 0), int(total))
-        if payload.get("report"):
-            ctx.save_checkpoint(report=payload["report"])
+            done = int(payload.get("done") or 0)
+            if payload.get("phase") in ("start", "company"):
+                ctx.progress(base + done, base + int(total))
+            else:
+                ctx.progress(done, int(total))
+        if payload.get("report") or company_id:
+            extra: dict[str, Any] = {}
+            if payload.get("report"):
+                extra["report"] = payload["report"]
+            if company_id:
+                extra["visited_company_ids"] = visited[-30000:]
+            ctx.save_checkpoint(**extra)
 
     report = await ensure_apply_contacts(
         ctx.job_seeker_id or "", limit, campaign_id=campaign_id,
-        on_progress=on_progress, **options,
+        skip_company_ids=visited_set, on_progress=on_progress, **options,
     )
     payload = report.as_dict()
     ctx.save_checkpoint(report=payload)

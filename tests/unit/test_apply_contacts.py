@@ -1095,3 +1095,164 @@ def test_the_discovery_worker_drives_the_bar_from_the_callback(
     assert (0, 3) in ctx.progress_calls
     assert (3, 3) in ctx.progress_calls
     assert ctx.progress_calls[-1] == (1, 1)
+
+
+# ---------------------------------------------------------------------------
+# NFR-401: the sweep resumes across restarts
+# ---------------------------------------------------------------------------
+
+
+def _reachable_company(index: int) -> str:
+    company_id = _company(f"Acme {index} BV", domain=f"acme{index}.example")
+    _vacancy(
+        company_id,
+        application_channel="email",
+        application_target=f"jobs@acme{index}.example",
+    )
+    return company_id
+
+
+def test_skip_company_ids_excludes_them_from_the_shortlist_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _offline(monkeypatch)
+    seed = _seeker()
+    companies = [_reachable_company(index) for index in range(4)]
+
+    events: list[dict[str, Any]] = []
+    report = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=4, concurrency=1, crawl_site=False,
+            derive_domains=False, skip_company_ids={companies[0], companies[1]},
+            on_progress=events.append,
+        )
+    )
+    assert report.companies_visited == 2
+    assert {outcome.company_id for outcome in report.outcomes} == set(companies[2:])
+    assert [event for event in events if event["phase"] == "company"]
+
+    # Everything selected is skipped: the pass ends terminally instead of erroring.
+    events.clear()
+    empty = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=4, concurrency=1, crawl_site=False,
+            derive_domains=False, skip_company_ids=set(companies),
+            on_progress=events.append,
+        )
+    )
+    assert empty.companies_visited == 0
+    assert [event["phase"] for event in events] == ["preparing", "done"]
+    assert events[-1]["done"] == 1 and events[-1]["total"] == 1
+
+
+def test_skip_company_ids_excludes_them_from_the_all_companies_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _offline(monkeypatch)
+    seed = _seeker()
+    companies = [_company(f"Standalone {index} BV") for index in range(3)]
+
+    report = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=3, scope="all", concurrency=1, crawl_site=False,
+            derive_domains=False, skip_company_ids={companies[0]},
+        )
+    )
+    assert report.companies_visited == 2
+    assert {outcome.company_id for outcome in report.outcomes} == set(companies[1:])
+
+
+def test_the_company_progress_payload_carries_the_company_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker needs the id to persist which companies a run already visited."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    companies = [_reachable_company(index) for index in range(3)]
+
+    events: list[dict[str, Any]] = []
+    asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=50, concurrency=1, crawl_site=False,
+            derive_domains=False, on_progress=events.append,
+        )
+    )
+    company_events = [event for event in events if event["phase"] == "company"]
+    assert len(company_events) == len(companies)
+    assert {event["company_id"] for event in company_events} == set(companies)
+
+
+class _WorkerCtx:
+    """The slice of JobContext the discovery worker uses, with the checkpoint read."""
+
+    def __init__(self, seed: dict[str, str], checkpoint: dict[str, Any]) -> None:
+        self.job_seeker_id = seed["seeker_id"]
+        self.campaign_id = seed["campaign_id"]
+        self.checkpoint = checkpoint
+        self.checkpoints: list[dict[str, Any]] = []
+        self.progress_calls: list[tuple[int, int | None]] = []
+
+    def save_checkpoint(self, **kwargs: Any) -> None:
+        self.checkpoints.append(kwargs)
+
+    def progress(self, done: int, total: int | None = None) -> None:
+        self.progress_calls.append((done, total))
+
+
+def _run_discovery_worker(ctx: _WorkerCtx) -> None:
+    async def run() -> None:
+        async for _ in pipeline.contacts_discovery_worker(ctx):  # type: ignore[arg-type]
+            pass
+
+    asyncio.run(run())
+
+
+def _worker_checkpoint(visited: list[str] | None = None) -> dict[str, Any]:
+    checkpoint: dict[str, Any] = {
+        "options": {"limit": 10, "crawl_site": False, "derive_domains": False, "concurrency": 1},
+    }
+    if visited is not None:
+        checkpoint["visited_company_ids"] = visited
+    return checkpoint
+
+
+def test_the_discovery_worker_resumes_from_the_visited_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NFR-401: a restarted worker skips what an earlier run already visited."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    visited_company = _reachable_company(0)
+    fresh_company = _reachable_company(1)
+
+    ctx = _WorkerCtx(seed, _worker_checkpoint(visited=[visited_company]))
+    _run_discovery_worker(ctx)
+
+    assert repo.get_resolution(visited_company) is None
+    assert repo.get_resolution(fresh_company)["status"] == "reachable"
+    persisted = [
+        values["visited_company_ids"]
+        for values in ctx.checkpoints
+        if "visited_company_ids" in values
+    ]
+    assert persisted and persisted[-1] == [visited_company, fresh_company]
+    # The bar counts from the visited base: one remaining company, one behind it.
+    assert (1, 2) in ctx.progress_calls
+    assert (2, 2) in ctx.progress_calls
+    assert ctx.progress_calls[-1] == (1, 1)
+
+
+def test_the_worker_progress_counts_from_the_visited_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run keeps moving forward instead of restarting the UI at zero."""
+    _offline(monkeypatch)
+    seed = _seeker()
+    already_visited = [_company(f"Earlier {index} BV") for index in range(4)]
+    _reachable_company(4)
+
+    ctx = _WorkerCtx(seed, _worker_checkpoint(visited=already_visited))
+    _run_discovery_worker(ctx)
+
+    assert (4, 5) in ctx.progress_calls
+    assert (5, 5) in ctx.progress_calls
