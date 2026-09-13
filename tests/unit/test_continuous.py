@@ -449,6 +449,17 @@ def test_the_continuous_campaign_is_reused_not_recreated(ready_seeker: str) -> N
 # ---------------------------------------------------------------------------
 
 
+def _pool(*, normal: bool, retry: bool):
+    """A stand-in for ``all_companies_for_contact`` with fixed pool sizes."""
+
+    def fake(limit, **kwargs):
+        if kwargs.get("ignore_backoff"):
+            return [{"company_id": "retry-co"}] if retry else []
+        return [{"company_id": "normal-co"}] if normal else []
+
+    return fake
+
+
 def test_contacts_phase_starts_bounded_backfill_then_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -458,6 +469,14 @@ def test_contacts_phase_starts_bounded_backfill_then_discovery(
         started.append(job_id)
 
     monkeypatch.setattr(runner, "start", fake_start)
+    # Both branches have work: a named person without an address, and a
+    # company the backoff hides (so only the retry selector sees it).
+    monkeypatch.setattr(continuous, "_backfill_pending", lambda: 1)
+    monkeypatch.setattr(
+        continuous.apply_repo,
+        "all_companies_for_contact",
+        _pool(normal=False, retry=True),
+    )
 
     first = asyncio.run(continuous.run_phase(force=True, phase="contacts"))
     assert first["mode"] == "backfill"
@@ -476,51 +495,71 @@ def test_contacts_phase_starts_bounded_backfill_then_discovery(
     second = asyncio.run(continuous.run_phase(force=True, phase="contacts"))
     assert second["mode"] == "discovery"
     assert second["job_kind"] == "contacts_discovery"
+    assert second["retry_recent"] is True, "the backoff hides the only available company"
     row = query_one("SELECT * FROM job_run WHERE id = ?", (second["job_id"],))
     options = (from_json(row["checkpoint"], {}) or {}).get("options") or {}
     assert options["scope"] == "all"
     assert options["limit"] == continuous.CONTACT_LIMIT
     assert options["backup_methods"] is True
     assert options["allow_smtp"] is False
+    assert options["retry_recent"] is True
 
 
-def test_contacts_phase_alternates_the_retry_recent_discovery(
+def test_contacts_phase_retries_when_the_backoff_hides_the_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every second discovery tick ignores the freshness backoff.
+    """A discovery tick ignores the freshness backoff when nothing else has work.
 
     The live loop reported ``requested: 0`` because all 1,989 no-contact
     companies had been attempted inside the seven-day window, so a
-    backoff-respecting discovery selected nothing.  Alternating retries keeps
-    that pool moving without re-walking it on every cycle.
+    backoff-respecting discovery selected nothing.  The phase must not spend a
+    cycle on an empty pool - it retries the recent verdicts instead, keeping
+    the no-contact filter and never re-walking covered companies.
     """
     async def fake_start(job_id, worker=None):
         return None
 
     monkeypatch.setattr(runner, "start", fake_start)
+    monkeypatch.setattr(continuous, "_backfill_pending", lambda: 0)
+    monkeypatch.setattr(
+        continuous.apply_repo,
+        "all_companies_for_contact",
+        _pool(normal=False, retry=True),
+    )
 
-    reports = [
-        asyncio.run(continuous.run_phase(force=True, phase="contacts"))
-        for _ in range(4)
-    ]
+    report = asyncio.run(continuous.run_phase(force=True, phase="contacts"))
 
-    assert [report["mode"] for report in reports] == [
-        "backfill", "discovery", "backfill", "discovery"
-    ]
-    assert [report["retry_recent"] for report in reports] == [False, False, False, True]
+    assert report["mode"] == "discovery"
+    assert report["retry_recent"] is True
+    row = query_one("SELECT checkpoint FROM job_run WHERE id = ?", (report["job_id"],))
+    options = (from_json(row["checkpoint"], {}) or {}).get("options") or {}
+    assert options["retry_recent"] is True
+    assert options["scope"] == "all"
+    assert options["limit"] == continuous.CONTACT_LIMIT
+    assert options["backup_methods"] is True
+    assert options["crawl_site"] is True
 
-    discovery_options = []
-    for report in reports:
-        row = query_one("SELECT checkpoint FROM job_run WHERE id = ?", (report["job_id"],))
-        options = (from_json(row["checkpoint"], {}) or {}).get("options") or {}
-        if report["mode"] == "discovery":
-            discovery_options.append(options)
-    assert [options["retry_recent"] for options in discovery_options] == [False, True]
-    for options in discovery_options:
-        assert options["scope"] == "all"
-        assert options["limit"] == continuous.CONTACT_LIMIT
-        assert options["backup_methods"] is True
-        assert options["crawl_site"] is True
+
+def test_contacts_phase_skips_when_there_is_no_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing to do is reported, not a job that would immediately no-op."""
+
+    async def fake_start(job_id, worker=None):  # pragma: no cover - must not run
+        raise AssertionError("no job should be started")
+
+    monkeypatch.setattr(runner, "start", fake_start)
+    monkeypatch.setattr(continuous, "_backfill_pending", lambda: 0)
+    monkeypatch.setattr(
+        continuous.apply_repo,
+        "all_companies_for_contact",
+        _pool(normal=False, retry=False),
+    )
+
+    report = asyncio.run(continuous.run_phase(force=True, phase="contacts"))
+
+    assert report["skipped"] == "no companies without a contact"
+    assert report["phase"] == "contacts"
 
 
 def test_contacts_phase_gives_way_to_a_running_job(

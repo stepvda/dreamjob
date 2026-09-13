@@ -1195,6 +1195,59 @@ def test_the_pass_reports_a_terminal_done_when_there_is_nothing_to_do(
     assert events[-1]["done"] == 1 and events[-1]["total"] == 1
 
 
+def test_one_hung_company_cannot_freeze_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A site that never answers is one unreachable, not a job that never ends.
+
+    Reproduces the live 299/300 sweep: ``asyncio.as_completed`` waits for every
+    task, so one resolution that never returned held the pass - and every later
+    contacts phase behind it.  The per-company timeout turns it into a recorded
+    outcome and the pass still emits its terminal ``done`` tick.
+    """
+    _offline(monkeypatch)
+    seed = _seeker()
+    hung = _company("Hung BV", domain="hung.example")
+    quick = _company("Quick BV", domain="quick.example")
+    for company_id in (hung, quick):
+        _vacancy(company_id)
+
+    async def _resolve(company: dict[str, Any], **_: Any) -> pipeline.CompanyOutcome:
+        if company["company_id"] == hung:
+            await asyncio.sleep(3600)
+        return pipeline.CompanyOutcome(
+            company_id=str(company["company_id"]),
+            company_name=str(company.get("company_name") or ""),
+            vacancy_count=int(company.get("vacancy_count") or 0),
+            status="reachable",
+            reason="stubbed resolution",
+        )
+
+    monkeypatch.setattr(pipeline, "resolve_company", _resolve)
+    monkeypatch.setattr(pipeline, "COMPANY_TIMEOUT_SECONDS", 0.05)
+
+    events: list[dict[str, Any]] = []
+    report = asyncio.run(
+        pipeline.ensure_apply_contacts(
+            seed["seeker_id"], limit=10, concurrency=2, crawl_site=False,
+            derive_domains=False, on_progress=events.append,
+        )
+    )
+
+    assert report.companies_visited == 2
+    assert report.companies_reachable == 1
+    assert report.companies_unreachable == 1
+    assert report.companies_visited == (
+        report.companies_reachable + report.companies_unreachable
+    )
+    assert report.unreachable_reasons["timed out"] == 1
+    timed_out = next(outcome for outcome in report.outcomes if outcome.company_id == hung)
+    assert "timed out" in timed_out.reason
+    # The timeout is a resolution like any other: the next pass can see it.
+    assert repo.get_resolution(hung)["status"] == "unreachable"
+    assert events[-1]["phase"] == "done"
+    assert events[-1]["done"] == 1 and events[-1]["total"] == 1
+    assert [event for event in events if event["phase"] == "company"]
+
+
 def test_the_discovery_worker_drives_the_bar_from_the_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

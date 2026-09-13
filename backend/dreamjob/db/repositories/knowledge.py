@@ -248,6 +248,20 @@ def company_by_domain(domain: str) -> dict | None:
     )
 
 
+def company_by_ats_board(vendor: str, slug: str) -> dict | None:
+    """The company that runs this board (the unique index from migration 091).
+
+    The pair is the identity ``uq_company_ats_board`` makes unique, so this
+    returns at most one row.  The caller passes both parts non-empty, which is
+    the index's own predicate (``ats_vendor IS NOT NULL AND ats_slug IS NOT
+    NULL``); an absent board is the absence of an identity, not a NULL board.
+    """
+    return query_one(
+        "SELECT * FROM company WHERE ats_vendor = ? AND ats_slug = ? LIMIT 1",
+        (vendor, slug),
+    )
+
+
 def companies_by_normalised_name(
     normalised_name: str, country: str | None = None, limit: int = 25
 ) -> list[dict]:

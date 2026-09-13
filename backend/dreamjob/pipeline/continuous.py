@@ -54,6 +54,7 @@ from typing import Any
 
 from dreamjob.db.connection import query_all, query_one, to_json, update_row, utcnow
 from dreamjob.db.repositories import admin as admin_repo
+from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import seekers as seeker_repo
 from dreamjob.jobs.runner import QUEUED_ERROR_MARKER, runner
@@ -551,6 +552,16 @@ async def _launch_job(
     return job_id
 
 
+def _backfill_pending() -> int:
+    """Contacts that name a person but carry no address (the backfill's work)."""
+    row = query_one(
+        "SELECT COUNT(*) AS c FROM contact "
+        "WHERE (email IS NULL OR email = '') AND objected = 0 "
+        "AND company_id IS NOT NULL AND company_id != ''"
+    )
+    return int((row or {}).get("c") or 0)
+
+
 async def _phase_contacts() -> dict[str, Any]:
     """Start one bounded contacts pass, alternating backfill and discovery.
 
@@ -574,12 +585,20 @@ async def _phase_contacts() -> dict[str, Any]:
     if running:
         return {"skipped": "job running", "job_kind": running}
 
+    # Which branch actually has work?  The backfill only has rows that already
+    # name a person but carry no address (often none), while discovery walks
+    # the companies that have nobody at all.  Alternation still balances them
+    # when both have work, but a branch with nothing to do must not burn a
+    # whole cycle: the loop otherwise spends 20 minutes to do zero work.
+    backfill_pending = _backfill_pending()
     try:
         tick = int(_setting(SETTING_CONTACTS_TICK, 0) or 0)
     except (TypeError, ValueError):
         tick = 0
+
     retry_recent = False
-    if tick % 2 == 0:
+    mode = "backfill"
+    if backfill_pending and tick % 2 == 0:
         kind = contact_email_backfill.BACKFILL_JOB_KIND
         options = {
             "limit": CONTACT_LIMIT,
@@ -590,12 +609,21 @@ async def _phase_contacts() -> dict[str, Any]:
             "use_lookup_service": False,
             "backup_methods": True,
         }
-        mode = "backfill"
         estimated = max(60, min(CONTACT_LIMIT, 1000) * 2)
     else:
+        # Discovery when the backfill has nothing (or its turn is done).  The
+        # normal pool respects the freshness backoff; when that is empty but
+        # the retry pool is not, this tick retries the recent no-contact
+        # verdicts, keeping the no-contact filter and never re-walking covered
+        # companies.
+        normal_pool = await asyncio.to_thread(apply_repo.all_companies_for_contact, 1)
+        retry_pool = await asyncio.to_thread(
+            apply_repo.all_companies_for_contact, 1, ignore_backoff=True
+        )
+        if not retry_pool:
+            return {"skipped": "no companies without a contact"}
+        retry_recent = not normal_pool
         kind = apply_contacts.DISCOVERY_JOB_KIND
-        # Discovery runs on odd ticks; among those, every second one retries.
-        retry_recent = (tick // 2) % 2 == 1
         options = {
             "limit": CONTACT_LIMIT,
             "scope": "all",

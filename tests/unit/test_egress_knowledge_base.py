@@ -339,6 +339,155 @@ def test_a_posting_creates_the_company_it_names() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# DR-101 / FR-184: the board identity merges, it never drops a company
+# ---------------------------------------------------------------------------
+
+
+def test_a_second_record_for_a_known_board_merges_instead_of_dropping() -> None:
+    """Reproduces the live drop: an existing (vendor, slug) is a merge, not an error.
+
+    The company arrives through the board path with a name spelling the earlier
+    row does not carry and no other identity the lookup asks for; before this,
+    ``insert_company`` hit ``uq_company_ats_board`` and the writer counted a
+    ``write_error`` while the incoming fields were lost.
+    """
+    writer = KnowledgeBaseWriter(adapter_key="ats.greenhouse", plan_item_id="pi-1")
+    first = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.6,
+            "data": {"name": "Collibra", "ats_vendor": "greenhouse", "ats_slug": "collibra"},
+        }
+    )
+    assert first is not None and first.created
+    before = query_one("SELECT * FROM company WHERE id = ?", (first.entity_id,))
+
+    second = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.7,
+            "data": {
+                "name": "Collibra NV",
+                "domain": "collibra.com",
+                "ats_vendor": "greenhouse",
+                "ats_slug": "collibra",
+            },
+        }
+    )
+
+    assert second is not None, "a known board identity must not be dropped"
+    assert second.created is False
+    assert second.entity_id == first.entity_id
+    assert writer.failures == [], "the conflict is a merge, not a write_error"
+    rows = query_all("SELECT * FROM company")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["name"] == "Collibra NV", "the incoming non-empty name is merged in"
+    assert row["domain"] == "collibra.com"
+    assert (row["ats_vendor"], row["ats_slug"]) == ("greenhouse", "collibra")
+    assert row["collected_at"] == before["collected_at"], "the first sighting is preserved"
+    assert row["refreshed_at"] >= before["collected_at"]
+
+
+def test_a_conflict_after_a_lookup_miss_still_merges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lookup and the insert are not one transaction; the loser must merge."""
+    from dreamjob.pipeline import knowledge_base
+
+    writer = KnowledgeBaseWriter(adapter_key="ats.greenhouse", plan_item_id="pi-1")
+    first = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.6,
+            "data": {"name": "Collibra", "ats_vendor": "greenhouse", "ats_slug": "collibra"},
+        }
+    )
+    assert first is not None and first.created
+    # A race (or a code path that did not ask the board question) makes the
+    # pre-insert lookup miss; the unique index is still the authority.
+    monkeypatch.setattr(knowledge_base, "resolve_company", lambda data: (None, None))
+
+    second = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.7,
+            "data": {
+                "name": "Collibra BVBA",
+                "domain": "collibra.com",
+                "ats_vendor": "greenhouse",
+                "ats_slug": "collibra",
+            },
+        }
+    )
+
+    assert second is not None and second.created is False
+    assert second.entity_id == first.entity_id
+    assert writer.failures == []
+    assert len(query_all("SELECT * FROM company")) == 1
+    row = query_one("SELECT * FROM company WHERE id = ?", (first.entity_id,))
+    assert row["name"] == "Collibra BVBA"
+    assert row["domain"] == "collibra.com"
+
+
+def test_a_legal_identifier_conflict_also_merges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same guard covers the other unique key on company(FR-184)."""
+    from dreamjob.pipeline import knowledge_base
+
+    writer = KnowledgeBaseWriter(adapter_key="kbo", plan_item_id="pi-1")
+    first = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.6,
+            "data": {"name": "Acme BV", "legal_id": "0123456789", "legal_id_type": "kbo"},
+        }
+    )
+    assert first is not None and first.created
+    monkeypatch.setattr(knowledge_base, "resolve_company", lambda data: (None, None))
+
+    second = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.7,
+            "data": {
+                "name": "Acme Group BV",
+                "legal_id": "0123456789",
+                "legal_id_type": "kbo",
+            },
+        }
+    )
+
+    assert second is not None and second.created is False
+    assert writer.failures == []
+    rows = query_all("SELECT * FROM company")
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Acme Group BV"
+
+
+def test_a_new_board_identity_still_inserts_a_new_company() -> None:
+    """The merge path must not turn every company write into an update."""
+    writer = KnowledgeBaseWriter(adapter_key="ats.greenhouse", plan_item_id="pi-1")
+    first = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.6,
+            "data": {"name": "Alpha BV", "ats_vendor": "greenhouse", "ats_slug": "alpha"},
+        }
+    )
+    second = writer.write(
+        {
+            "entity_type": "company",
+            "confidence": 0.6,
+            "data": {"name": "Beta BV", "ats_vendor": "greenhouse", "ats_slug": "beta"},
+        }
+    )
+    assert first is not None and first.created
+    assert second is not None and second.created
+    assert writer.failures == []
+    assert len(query_all("SELECT * FROM company")) == 2
+
+
 def test_a_merge_never_relabels_the_posting_it_merged_into() -> None:
     """FR-184: a merge enriches a row; it must not repoint it at another job."""
     writer = KnowledgeBaseWriter(adapter_key="board.stub", plan_item_id="pi-1")

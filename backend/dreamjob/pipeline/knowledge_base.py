@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -302,17 +303,90 @@ class KnowledgeBaseWriter:
         existing, matched_on = resolve_company(data)
         now = utcnow()
         if existing:
-            merged = _merge(existing, data)
-            merged["refreshed_at"] = now
-            merged["confidence"] = max(
-                float(existing.get("confidence") or 0), float(confidence or 0)
-            )
-            repo.update_company(existing["id"], merged)
-            return WriteOutcome("company", existing["id"], created=False, matched_on=matched_on)
+            return self._merge_company(existing, data, confidence, matched_on, now)
         data.setdefault("collected_at", now)
         data["refreshed_at"] = now
         data.setdefault("confidence", confidence)
-        return WriteOutcome("company", repo.insert_company(data), created=True)
+        try:
+            company_id = repo.insert_company(data)
+        except sqlite3.IntegrityError:
+            # The lookup above and this insert are not one transaction, and a
+            # record can carry an identity the lookup did not ask for.  Either
+            # way the insert lost a race against a unique index on
+            # ``(ats_vendor, ats_slug)`` (migration 091) or
+            # ``(legal_id, legal_id_type)``: follow the identity to the row that
+            # owns it and merge.  A dropped company record is exactly the bug
+            # this writer must not have (FR-184, DR-101).
+            existing, matched_on = _company_identity_owner(data)
+            if existing is None:
+                raise
+            log.info(
+                "Company %r collided with existing row %s on %s; merging the record (FR-184)",
+                data.get("name"), existing["id"], matched_on,
+            )
+            return self._merge_company(existing, data, confidence, matched_on, now)
+        return WriteOutcome("company", company_id, created=True)
+
+    def _merge_company(
+        self,
+        existing: dict,
+        data: dict,
+        confidence: float,
+        matched_on: str | None,
+        now: str,
+    ) -> WriteOutcome:
+        """Merge ``data`` into a row that already owns one of its identities.
+
+        ``repo.update_company`` can itself hit a unique index: one record may
+        claim a board owned by one row and a legal identifier owned by another.
+        Rather than dropping it, walk the rows that own its identities and merge
+        into each in turn; if every one of them conflicts, the identity columns
+        are left where they are and the remaining fields are merged into the
+        row the record first matched, so the record enriches the knowledge base
+        instead of vanishing (FR-184, DR-101).
+        """
+        rows: list[tuple[dict, str | None]] = [(existing, matched_on)]
+        seen = {str(existing["id"])}
+        for owner, key in _company_identity_owners(data):
+            if str(owner["id"]) not in seen:
+                seen.add(str(owner["id"]))
+                rows.append((owner, key))
+        while rows:
+            row, key = rows.pop(0)
+            merged = _merge(row, data)
+            merged["refreshed_at"] = now
+            merged["confidence"] = max(
+                float(row.get("confidence") or 0), float(confidence or 0)
+            )
+            try:
+                repo.update_company(row["id"], merged)
+            except sqlite3.IntegrityError:
+                if rows:
+                    log.info(
+                        "Company %r carries an identity owned by another row; "
+                        "merging into that row instead of dropping the record",
+                        data.get("name"),
+                    )
+                    continue
+                log.info(
+                    "Company %r carries identities owned by %d rows; keeping each "
+                    "row's own identity and merging the remaining fields into %s",
+                    data.get("name"), len(seen), existing["id"],
+                )
+                remainder = {
+                    k: v for k, v in data.items() if k not in _COMPANY_IDENTITY_FIELDS
+                }
+                merged = _merge(existing, remainder)
+                merged["refreshed_at"] = now
+                merged["confidence"] = max(
+                    float(existing.get("confidence") or 0), float(confidence or 0)
+                )
+                repo.update_company(existing["id"], merged)
+                return WriteOutcome(
+                    "company", existing["id"], created=False, matched_on=matched_on
+                )
+            return WriteOutcome("company", row["id"], created=False, matched_on=key)
+        raise AssertionError("unreachable: the first row is always a candidate")
 
     def _write_vacancy(
         self, data: dict, confidence: float, raw_document_id: str | None = None
@@ -451,6 +525,21 @@ def _normalise_company_fields(data: dict) -> dict:
         data["domain"] = domain
     elif "domain" in data:
         data.pop("domain")
+    # The board identity is stored the way migration 091 left it - lower-case
+    # vendor, trimmed slug, empty means absent - because that is the shape
+    # ``uq_company_ats_board`` sees.  A vendor written in another case or a slug
+    # with a trailing space would look like a different board to the index and
+    # then be dropped on insert against the next spelling's row.
+    vendor = str(data.get("ats_vendor") or "").strip().lower()
+    if vendor:
+        data["ats_vendor"] = vendor
+    elif "ats_vendor" in data:
+        data.pop("ats_vendor")
+    slug = str(data.get("ats_slug") or "").strip()
+    if slug:
+        data["ats_slug"] = slug
+    elif "ats_slug" in data:
+        data.pop("ats_slug")
     if data.get("legal_id"):
         data["legal_id"] = dedup.normalise_legal_id(data["legal_id"], data.get("legal_id_type"))
     if data.get("vat_number"):
@@ -459,6 +548,59 @@ def _normalise_company_fields(data: dict) -> dict:
     if data.get("country"):
         data["country"] = str(data["country"]).upper()[:2]
     return data
+
+
+#: Columns whose values are identities a different company row may own.  A
+#: merge that cannot place them anywhere keeps them where they are and merges
+#: the rest, rather than dropping the incoming record (FR-184, DR-101).
+_COMPANY_IDENTITY_FIELDS = frozenset(
+    {"legal_id", "legal_id_type", "vat_number", "domain", "ats_vendor", "ats_slug"}
+)
+
+
+def _ats_board_key(data: dict) -> tuple[str, str] | None:
+    """The board identity this record claims, read exactly as the index reads it.
+
+    Lower-case vendor and trimmed slug, both non-empty - the predicate of
+    ``uq_company_ats_board``.  A looser reading would look up a row the index is
+    not about to collide with.
+    """
+    vendor = str(data.get("ats_vendor") or "").strip().lower()
+    slug = str(data.get("ats_slug") or "").strip()
+    if vendor and slug:
+        return vendor, slug
+    return None
+
+
+def _company_identity_owners(data: dict) -> list[tuple[dict, str]]:
+    """Every existing row that owns an identity the incoming record claims (DR-101)."""
+    found: list[tuple[dict, str]] = []
+
+    def add(row: dict | None, key: str) -> None:
+        if row and all(str(r["id"]) != str(row["id"]) for r, _ in found):
+            found.append((row, key))
+
+    board = _ats_board_key(data)
+    if board:
+        add(repo.company_by_ats_board(*board), "ats_board")
+    legal = dedup.normalise_legal_id(data.get("legal_id"), data.get("legal_id_type"))
+    if legal:
+        add(repo.company_by_legal_id(legal, data.get("legal_id_type")), "legal_id")
+    vat = dedup.normalise_legal_id(data.get("vat_number"), "vat")
+    if vat:
+        add(repo.company_by_vat(vat), "vat")
+    domain = dedup.normalise_domain(
+        data.get("domain") or data.get("website") or data.get("careers_url")
+    )
+    if domain:
+        add(repo.company_by_domain(domain), "domain")
+    return found
+
+
+def _company_identity_owner(data: dict) -> tuple[dict | None, str | None]:
+    """The strongest existing owner of an identity this record claims, if any."""
+    owners = _company_identity_owners(data)
+    return owners[0] if owners else (None, None)
 
 
 def resolve_company(data: dict) -> tuple[dict | None, str | None]:
@@ -481,6 +623,16 @@ def resolve_company(data: dict) -> tuple[dict | None, str | None]:
                 found = rows[0]
         if found:
             return found, key.kind
+    # The board identity sits beside the domain (DR-101, migration 091): it is
+    # issued by the vendor and unique within it.  Without this lookup a record
+    # that names no legal identifier, no domain and a differently-spelled
+    # employer did not find the row that already runs its board, and the insert
+    # against ``uq_company_ats_board`` was the drop the log recorded.
+    board = _ats_board_key(data)
+    if board:
+        found = repo.company_by_ats_board(*board)
+        if found:
+            return found, "ats_board"
     nname = data.get("normalised_name") or dedup.normalise_company_name(data.get("name"))
     if nname:
         first = nname.split(" ")[0]

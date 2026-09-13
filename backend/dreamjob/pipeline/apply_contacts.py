@@ -124,6 +124,20 @@ RESOLUTION_MAX_AGE_DAYS = 14
 #: judged: "no answer" is usually the network, not the company.
 UNREACHABLE_RETRY_DAYS = 3
 
+#: How long one company's resolution may run before the pass gives up on it.
+#: ``asyncio.as_completed`` waits for every task, so a site that accepted the
+#: connection and then never answered froze the whole sweep: the live job sat at
+#: 299/300 for over twenty minutes and every later contacts phase queued behind
+#: it.  180 s is generous next to the egress client's own per-request budget and
+#: turns the one hung site into one recorded outcome.
+COMPANY_TIMEOUT_SECONDS = 180.0
+
+#: How long the pass waits for cancelled company tasks to unwind before it
+#: settles anyway.  Cancellation is deliverable at every await in the ladder, so
+#: this only bites when a task is stuck below the event loop; the job must not
+#: share its fate.
+CANCELLATION_GRACE_SECONDS = 10.0
+
 #: Legal forms and the noise around them.  Stripped before a domain is spelled
 #: from a name, because no company registers ``acme-bv.be``.
 LEGAL_FORMS = frozenset(
@@ -1237,6 +1251,8 @@ def _reason_bucket(reason: str) -> str:
     not a report.
     """
     text = (reason or "").lower()
+    if "timed out" in text:
+        return "timed out"
     if "no word a domain" in text:
         return "company name carries no identifying word"
     if "too short to spell" in text:
@@ -1266,6 +1282,36 @@ def _notify(cb: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]
         cb(payload)
     except Exception:  # noqa: BLE001 - progress must never fail a pass
         log.debug("progress callback failed", exc_info=True)
+
+
+async def _settle_tasks(tasks: list[asyncio.Task]) -> None:
+    """Cancel company tasks and wait a bounded time for them, never for ever.
+
+    The completion path used to be a bare ``gather(..., return_exceptions=True)``
+    after cancelling, which waits however long a task takes to unwind.  A task
+    that refuses to unwind then pinned the pass - and the job - with it.
+    ``asyncio.wait`` returns at the grace deadline whatever the tasks do, so the
+    sweep always reaches its terminal tick; stragglers are named in the log and
+    left to the loop, which cancels them again at shutdown.
+    """
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    done, pending = await asyncio.wait(tasks, timeout=CANCELLATION_GRACE_SECONDS)
+    for task in done:
+        if task.cancelled():
+            continue
+        exc = task.exception()
+        if exc is not None:
+            log.warning("A company task ended with %s after cancellation", exc)
+    if pending:
+        log.warning(
+            "Contacts pass: %d company task(s) did not unwind within %.0fs of "
+            "cancellation; settling the job without waiting for them: %s",
+            len(pending), CANCELLATION_GRACE_SECONDS,
+            [task.get_name() for task in pending],
+        )
 
 
 async def ensure_apply_contacts(
@@ -1437,16 +1483,42 @@ async def ensure_apply_contacts(
                 if done.is_set():
                     return None
                 try:
-                    return await resolve_company(
-                        company,
-                        egress=client,
-                        campaign_id=campaign_id,
-                        allow_smtp=allow_smtp,
-                        crawl_site=crawl_site,
-                        derive_domains=derive_domains,
-                        allow_generic=allow_generic,
-                        backup=backup,
+                    return await asyncio.wait_for(
+                        resolve_company(
+                            company,
+                            egress=client,
+                            campaign_id=campaign_id,
+                            allow_smtp=allow_smtp,
+                            crawl_site=crawl_site,
+                            derive_domains=derive_domains,
+                            allow_generic=allow_generic,
+                            backup=backup,
+                        ),
+                        timeout=COMPANY_TIMEOUT_SECONDS,
                     )
+                except TimeoutError:
+                    # A company that never answers is an outcome, not a stopped
+                    # pass: record it unreachable and let the sweep finish.
+                    log.warning(
+                        "Contact resolution timed out after %.0fs for company %s",
+                        COMPANY_TIMEOUT_SECONDS, company.get("company_id"),
+                    )
+                    outcome = CompanyOutcome(
+                        company_id=company.get("company_id") or "",
+                        company_name=company.get("company_name") or "",
+                        vacancy_count=int(company.get("vacancy_count") or 0),
+                        reason=f"timed out after {COMPANY_TIMEOUT_SECONDS:.0f}s",
+                    )
+                    try:
+                        await asyncio.to_thread(
+                            repo.record_resolution, outcome.company_id, _resolution(outcome)
+                        )
+                    except Exception:  # noqa: BLE001 - recording must not stop the pass
+                        log.warning(
+                            "Could not record the timed-out resolution for company %s",
+                            outcome.company_id, exc_info=True,
+                        )
+                    return outcome
                 except Exception as exc:  # noqa: BLE001 - one company never stops a pass
                     log.exception(
                         "Contact resolution failed for company %s", company.get("company_id")
@@ -1458,7 +1530,10 @@ async def ensure_apply_contacts(
                         reason=f"resolution failed: {type(exc).__name__}: {exc}"[:200],
                     )
 
-        tasks = [asyncio.create_task(one(company)) for company in work]
+        tasks = [
+            asyncio.create_task(one(company), name=f"contacts:{company.get('company_id')}")
+            for company in work
+        ]
         try:
             for task in asyncio.as_completed(tasks):
                 outcome = await task
@@ -1478,11 +1553,19 @@ async def ensure_apply_contacts(
                 if not sweep_all and report.vacancies_covered >= report.shortfall:
                     done.set()
         finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await _settle_tasks(tasks)
 
     report.finished_at = utcnow()
+    # The terminal tick.  Every early return above emits one; the normal path
+    # must too, otherwise a UI that keys completion off ``phase`` sits on the
+    # last company event for ever - which is exactly how the live sweep read as
+    # stuck even after the work had stopped.  Same shape as the early returns:
+    # a terminal marker, with the counters already carried by the last company
+    # event.
+    _notify(
+        on_progress,
+        {"phase": "done", "done": 1, "total": 1, "report": report.progress()},
+    )
     log.info(
         "Apply contacts (%s): %d/%d vacancies newly covered across %d companies "
         "(%d reachable, %d unreachable, %d reused); %d were covered before the pass",
