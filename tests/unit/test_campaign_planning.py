@@ -23,7 +23,7 @@ from dreamjob.adapters.base import (
 )
 from dreamjob.adapters.compensation.eurostat import EurostatEarningsAdapter
 from dreamjob.config import get_settings
-from dreamjob.db.connection import insert_row, query_all, query_one, upsert_row, utcnow
+from dreamjob.db.connection import execute, insert_row, query_all, query_one, upsert_row, utcnow
 from dreamjob.db.migrator import migrate
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import knowledge as kb_repo
@@ -660,6 +660,184 @@ def test_reuse_assesses_per_target_not_per_adapter(db):
     assert by_slug["initech"]["status"] == "planned"
     assert by_slug["globex"]["estimated_pages"] == 1
     assert by_slug["initech"]["estimated_pages"] == 1
+
+
+def _ats_items(campaign_id: str, slugs: tuple[str, ...], **values) -> None:
+    for slug in slugs:
+        campaign_repo.insert_plan_item(
+            campaign_id,
+            {
+                "adapter_key": "ats.greenhouse",
+                "native_query": {"slug": slug},
+                "rationale": f"{slug} board",
+                "caps": {"planned_pages": 1, "records_per_page": 100},
+                "estimated_pages": 1,
+                "estimated_seconds": 8,
+                "estimated_cost_eur": 0.0,
+                **values,
+            },
+        )
+
+
+def test_reuse_age_unset_keeps_the_staleness_window(db):
+    """FR-342: without the option, a target inside the policy window is reused."""
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue(
+        "ats.greenhouse",
+        source_type="ats",
+        query_capabilities={"max_results_per_query": 100, "pagination": False},
+    )
+    _ats_items(campaign_id, ("acme", "globex"))
+    # Five days old: outside a 3-day reuse cap, but inside the 7-day policy.
+    egress_client.record_fetch(
+        "ats.greenhouse",
+        "greenhouse/acme",
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs",
+        http_status=200,
+        record_count=10,
+        fetched_at=_iso(5),
+    )
+
+    report = knowledge_base.assess_reuse(campaign_id, countries=["BE", "NL"])
+    by_slug = {
+        (i["native_query"] or {}).get("slug"): i
+        for i in campaign_repo.list_plan_items(campaign_id)
+        if i["adapter_key"] == "ats.greenhouse"
+    }
+    assert by_slug["acme"]["status"] == "skipped"
+    assert report.refreshed == 0
+    decisions = {d.plan_item_id: d for d in report.decisions}
+    assert decisions[by_slug["acme"]["id"]].action == "skip"
+
+
+def test_max_reuse_age_reopens_older_targets_and_reuses_fresh_ones(db):
+    """FR-342: the cap re-opens an old read and still reuses a fresh one."""
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue(
+        "ats.greenhouse",
+        source_type="ats",
+        query_capabilities={"max_results_per_query": 100, "pagination": False},
+    )
+    _ats_items(
+        campaign_id,
+        ("acme",),
+        status="skipped",
+        records_collected=25,
+        error_count=2,
+        last_error="stale run",
+        activity_at=utcnow(),
+        activity_kind="done",
+    )
+    _ats_items(campaign_id, ("globex",))
+    egress_client.record_fetch(
+        "ats.greenhouse",
+        "greenhouse/acme",
+        "https://boards-api.greenhouse.io/v1/boards/acme/jobs",
+        http_status=200,
+        record_count=10,
+        fetched_at=_iso(5),
+    )
+    egress_client.record_fetch(
+        "ats.greenhouse",
+        "greenhouse/globex",
+        "https://boards-api.greenhouse.io/v1/boards/globex/jobs",
+        http_status=200,
+        record_count=10,
+        fetched_at=_iso(1),
+    )
+
+    report = knowledge_base.assess_reuse(
+        campaign_id, countries=["BE", "NL"], max_reuse_age_days=3
+    )
+    by_slug = {
+        (i["native_query"] or {}).get("slug"): i
+        for i in campaign_repo.list_plan_items(campaign_id)
+        if i["adapter_key"] == "ats.greenhouse"
+    }
+    # The board read five days ago is re-opened, counters and all...
+    assert by_slug["acme"]["status"] == "planned"
+    assert by_slug["acme"]["records_collected"] == 0
+    assert by_slug["acme"]["error_count"] == 0
+    assert by_slug["acme"]["last_error"] is None
+    assert by_slug["acme"]["activity_at"] is None
+    assert by_slug["acme"]["estimated_pages"] == 1
+    # ...while the one read yesterday is reused exactly as before.
+    assert by_slug["globex"]["status"] == "skipped"
+    assert report.refreshed == 1
+    assert report.per_entity["vacancy"]["refreshed"] == 1
+    assert report.to_dict()["refreshed_items"] == 1
+    decisions = {d.plan_item_id: d for d in report.decisions}
+    assert decisions[by_slug["acme"]["id"]].action == "collect"
+    assert "re-opened" in decisions[by_slug["acme"]["id"]].reason
+    assert decisions[by_slug["globex"]["id"]].action == "skip"
+
+
+def test_max_reuse_age_caps_source_level_reuse(db):
+    """FR-342: the cap also moves the corpus-freshness cutoff a source reuses against."""
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("vdab", query_capabilities={"max_results_per_query": 10, "pagination": True})
+    planning.generate_plan(campaign_id, seeker, use_llm=False, assess_knowledge_base=False)
+
+    # 40 vacancies collected five days ago: inside the 7-day policy, outside 3.
+    for n in range(40):
+        vacancy_id = kb_repo.insert_vacancy(
+            {
+                "title": f"Data Engineer {n}",
+                "company_name_raw": "Acme NV",
+                "country": "BE",
+                "source_adapter": "vdab",
+                "collected_at": _iso(5),
+            }
+        )
+        kb_repo.record_provenance("vacancy", vacancy_id, adapter_key="vdab")
+    # Provenance is stamped when the record was written, so a past collection
+    # is simulated by dating it too - the freshness queries read both.
+    execute(
+        "UPDATE provenance SET created_at = ? WHERE entity_type = 'vacancy' "
+        "AND adapter_key = 'vdab'",
+        (_iso(5),),
+    )
+
+    base = knowledge_base.assess_reuse(campaign_id, countries=["BE", "NL"])
+    assert [d for d in base.decisions if d.adapter_key == "vdab"][0].action == "skip"
+    assert base.refreshed == 0
+
+    capped = knowledge_base.assess_reuse(
+        campaign_id, countries=["BE", "NL"], max_reuse_age_days=3
+    )
+    vdab = [i for i in campaign_repo.list_plan_items(campaign_id) if i["adapter_key"] == "vdab"]
+    assert vdab[0]["status"] == "planned", "the cap re-opened what the policy would reuse"
+    assert vdab[0]["estimated_pages"] > 0
+    assert capped.refreshed == 1
+
+
+def test_plan_summary_reports_refreshed_and_reused_counts(db, monkeypatch):
+    """FR-342: the plan summary carries how much was reused and refreshed."""
+    seeker = _seeker()
+    campaign_id = _campaign(seeker)
+    _catalogue("vdab", query_capabilities={"max_results_per_query": 10, "pagination": True})
+    seen: dict = {}
+
+    def fake_assess(campaign_id, *, countries=None, max_reuse_age_days=None, **kwargs):
+        seen["max_reuse_age_days"] = max_reuse_age_days
+        report = knowledge_base.ReuseReport()
+        report.per_entity["vacancy"] = {"reused": 12, "scheduled": 3, "refreshed": 2}
+        report.refreshed = 2
+        campaign_repo.update_campaign(campaign_id, {"reuse_report": report.to_dict()})
+        return report
+
+    monkeypatch.setattr(knowledge_base, "assess_reuse", fake_assess)
+    summary = planning.generate_plan(
+        campaign_id, seeker, use_llm=False, max_reuse_age_days=3
+    )
+
+    assert seen["max_reuse_age_days"] == 3
+    assert summary["reuse"] == {"max_reuse_age_days": 3, "reused": 12, "refreshed": 2}
+    assert summary["totals"]["records_reused"] == 12
+    assert summary["totals"]["sources_refreshed_by_age"] == 2
 
 
 def test_reuse_headline_is_capped_by_what_the_knowledge_base_holds(db):

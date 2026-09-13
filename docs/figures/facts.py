@@ -15,38 +15,41 @@ from __future__ import annotations
 # find backend/dreamjob -name '*.py' -not -path '*__pycache__*' | xargs wc -l
 
 CODEBASE = {
-    "backend_files": 219,
-    "backend_lines": 110_773,
+    "backend_files": 227,
+    "backend_lines": 120_881,
     "frontend_files": 140,
-    "frontend_lines": 40_650,
-    "test_files": 94,
-    "test_lines": 51_165,
-    "tests_passing": 1_725,
-    "api_routes": 337,
-    "db_tables": 87,
-    "db_indexes": 144,
-    "migrations": 34,
+    "frontend_lines": 43_932,
+    "test_files": 114,
+    "test_lines": 61_396,
+    "tests_collected": 2_061,
+    "tests_passing": 2_061,
+    "api_routes": 422,
+    "api_paths": 351,
+    "db_tables": 88,
+    "db_indexes": 158,
+    "db_fts": 2,
+    "migrations": 43,
     "prompt_templates": 24,
 }
 
 # Lines per backend package.
 PACKAGE_LINES = {
-    "pipeline": 41_897,
-    "db/repositories": 13_700,
-    "adapters": 11_771,
-    "api/routers": 10_765,
-    "documents": 6_886,
-    "postapp": 5_719,
-    "mail": 3_823,
+    "pipeline": 48_100,
+    "db/repositories": 15_088,
+    "adapters": 11_793,
+    "api/routers": 11_543,
+    "documents": 7_088,
+    "postapp": 5_752,
+    "mail": 3_903,
     "intelligence": 3_969,
-    "browser": 3_565,
-    "monitoring": 1_742,
-    "observability": 1_625,
-    "egress": 1_077,
-    "security": 993,
-    "llm": 812,
+    "browser": 3_786,
+    "monitoring": 1_862,
+    "observability": 1_627,
+    "egress": 1_137,
+    "security": 1_085,
+    "llm": 1_270,
     "exporting": 798,
-    "jobs": 676,
+    "jobs": 729,
 }
 
 # --- Requirement coverage ---------------------------------------------------
@@ -96,11 +99,11 @@ ADAPTER_NAMES = {
 BUNDLE = {
     "before_kb": 858.25,
     "before_gzip_kb": 243.13,
-    "after_initial_kb": 347.7,
-    "after_initial_gzip_kb": 109.6,
-    "largest_page_kb": 74.0,       # AdminPage
-    "smallest_page_kb": 7.4,       # HomePage
-    "lazy_chunks": 24,
+    "after_initial_kb": 312.4,
+    "after_initial_gzip_kb": 105.5,
+    "largest_page_kb": 88.2,       # AdminPage
+    "smallest_page_kb": 7.6,       # HomePage
+    "lazy_chunks": 33,
 }
 
 # --- Accessibility ----------------------------------------------------------
@@ -291,8 +294,8 @@ SEGMENT_DIMENSIONS = 9
 
 SCHEMA_SCOPES = {
     "private": 49,      # carry job_seeker_id, or are the seeker row itself
-    "shared": 37,       # carry no link back to a job seeker
-    "restricted": 1,    # contact, inside the 37 above (NFR-303)
+    "shared": 38,       # carry no link back to a job seeker
+    "restricted": 1,    # contact, inside the 38 above (NFR-303)
     "ledger": 1,        # schema_migration
 }
 

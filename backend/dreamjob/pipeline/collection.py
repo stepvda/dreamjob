@@ -195,6 +195,39 @@ COUNTER_INTERVAL_SECONDS = 2.0
 
 
 # ---------------------------------------------------------------------------
+# Bounded waits: one silent source may not hold the whole run (FR-186, NFR-401)
+# ---------------------------------------------------------------------------
+#
+# A campaign that sat at "0 of 25 pages" for thirty-five minutes was not slow,
+# it was frozen: one source accepted the connection and never answered, and the
+# page loop had no upper bound at all.  Every adapter page and every plan item
+# is now raced against a clock, and the job itself against a stall deadline, so
+# a source that stops answering settles as the failure it is instead of
+# becoming the run's whole wall-clock.
+
+#: One adapter page: fetch, parse, write.  A source slower than this is treated
+#: as failed rather than waited for (FR-185).
+PAGE_TIMEOUT_SECONDS = 90.0
+
+#: One plan item's whole run, however many pages it was planned for.  A source
+#: that keeps answering just under the page limit cannot add up to an unbounded
+#: item.
+SOURCE_TIMEOUT_SECONDS = 300.0
+
+#: The run's own watchdog.  No page and no record written for this long means
+#: the job is not making progress, whatever the reason, and is stopped
+#: gracefully so the queue can move on.  Deliberately larger than the two
+#: limits above: their expiry is progress of a kind (a source is settled and
+#: charged), and this is the backstop for everything else.
+STALL_SECONDS = 600.0
+
+
+def _seconds_label(seconds: float) -> str:
+    """A limit as the operator should read it: ``90s``, ``300s``, ``0.05s``."""
+    return f"{seconds:g}s"
+
+
+# ---------------------------------------------------------------------------
 # Rate-limit buckets (FR-182, NFR-103; plan sections 2.2 and 5.2 item N5)
 # ---------------------------------------------------------------------------
 
@@ -595,8 +628,11 @@ def _cap_hit(stats: CollectionStats, caps: Caps, started: float) -> str | None:
         return "max_companies"
     if len(stats.people) >= caps.max_people:
         return "max_people"
+    # The wall-clock budget the campaign carries (``max_duration_seconds``,
+    # 45 minutes for an autopilot run and four hours otherwise).  Reported as
+    # ``deadline`` because that is what ended the run: the budget, not a fault.
     if time.monotonic() - started >= caps.max_duration_seconds:
-        return "max_duration_seconds"
+        return "deadline"
     return None
 
 
@@ -1254,7 +1290,46 @@ def _last_detail(refusals: list[Any]) -> str:
     return last.detail if isinstance(last, Refusal) else str(last)
 
 
-async def _run_page(unit: _Unit, page: int, books: _Bookkeeping) -> ItemOutcome:
+def _item_url(unit: _Unit) -> str:
+    """The URL to name when something times out: the last fetched, else the plan's."""
+    view = unit.egress
+    last = getattr(view, "last_url", None) if view is not None else None
+    if last:
+        return str(last)
+    query = unit.item.get("native_query")
+    if isinstance(query, dict):
+        for key in _QUERY_URL_KEYS:
+            value = query.get(key)
+            if isinstance(value, str) and value.startswith("http"):
+                return value
+        for key in _QUERY_URL_LISTS:
+            values = query.get(key)
+            if isinstance(values, (list, tuple)) and values and isinstance(values[0], str):
+                return str(values[0])
+    return "unknown"
+
+
+def _note_stall(unit: _Unit, stats: CollectionStats, books: _Bookkeeping) -> None:
+    """Stop a run that has made no progress (FR-185, NFR-401).
+
+    The backstop behind the page and source limits: those settle a source that
+    stops answering, this catches a run that has stopped moving for any other
+    reason.  It is charged to no source - what is left unrun is left runnable -
+    so the job ends ``done`` with ``stopped_by="stalled"`` in its report and the
+    normal terminal path does the rest.
+    """
+    elapsed = books.since_progress()
+    stats.stopped_by = "stalled"
+    log.warning(
+        "[%s] collection stalled: no page completed and no record written for %.0fs "
+        "(limit %s); stopping the run; url=%s",
+        unit.adapter_key, elapsed, _seconds_label(STALL_SECONDS), _item_url(unit),
+    )
+
+
+async def _run_page(
+    unit: _Unit, page: int, books: _Bookkeeping, stats: CollectionStats
+) -> ItemOutcome:
     """One page of one source, measured at every step (FR-181, NFR-403)."""
     step = ItemOutcome()
     plan_item = PlanItem(
@@ -1284,8 +1359,34 @@ async def _run_page(unit: _Unit, page: int, books: _Bookkeeping) -> ItemOutcome:
 
     attempts_before, successes_before = _extraction_counters(unit.adapter)
     failures_before = len(getattr(unit.writer, "failures", ()) or ())
+    # FR-186 / NFR-401: one page may not wait for ever.  The wait is bounded by
+    # the page limit and by what is left of the stall window, so a source that
+    # has gone quiet is stopped at the watchdog's deadline rather than at the
+    # page's - the two are different outcomes, and only one ends the job.
+    wait = min(PAGE_TIMEOUT_SECONDS, books.stall_remaining())
+    page_started = time.monotonic()
     try:
-        records = await unit.adapter.run(plan_item)
+        records = await asyncio.wait_for(unit.adapter.run(plan_item), timeout=wait)
+    except TimeoutError:
+        elapsed = time.monotonic() - page_started
+        measure()
+        if books.stalled():
+            # The run itself has gone quiet for STALL_SECONDS, not just this
+            # page: the watchdog stops the job and this page is not charged.
+            _note_stall(unit, stats, books)
+            return step
+        step.errors = 1
+        step.last_error = f"timed out after {_seconds_label(PAGE_TIMEOUT_SECONDS)}"
+        # NFR-403: a request that was made and yielded nothing is an extraction
+        # attempt that failed, exactly as a crash is.
+        step.pages = 1 if step.requests else 0
+        step.charged = step.requests
+        log.warning(
+            "[%s] page %d timed out after %.1fs (limit %s); url=%s",
+            unit.adapter_key, page, elapsed,
+            _seconds_label(PAGE_TIMEOUT_SECONDS), _item_url(unit),
+        )
+        return step
     except RobotsDisallowed as exc:
         # FR-182 / IR-101: we declined this source; the source did not fail us.
         # No page is counted, so NFR-403's breakage detector is not fed a
@@ -1436,11 +1537,53 @@ class _Bookkeeping:
         self._progress_at = 0.0
         self._counters: dict[str, dict[str, Any]] = {}
         self._counters_at = 0.0
+        #: When the run last did something: a page finished or a record landed.
+        #: ``time.monotonic``, because a wall-clock step must not look like a
+        #: stall (or hide one).  The stall watchdog reads it, and it starts
+        #: fresh here: preparation is not a page the run is waiting for.
+        self.last_progress_at = time.monotonic()
+        #: Seconds spent paused.  A pause is the seeker's time, not the
+        #: source's, so the per-item clock does not count it (see ``_run_unit``).
+        self.paused_total = 0.0
+
+    # -- the stall watchdog (FR-185) ----------------------------------------
+    def progress_made(self) -> None:
+        """Mark that the run did something a person would call progress."""
+        self.last_progress_at = time.monotonic()
+
+    def since_progress(self) -> float:
+        """Seconds since the last page completed or record was written."""
+        return time.monotonic() - self.last_progress_at
+
+    def stalled(self) -> bool:
+        """Has the run gone quiet for longer than the watchdog allows?"""
+        return self.since_progress() >= STALL_SECONDS
+
+    def stall_remaining(self) -> float:
+        """Seconds left before a run that is doing nothing is stalled."""
+        return max(0.0, STALL_SECONDS - self.since_progress())
 
     # -- FR-185: where pause and cancel are honoured ------------------------
     async def barrier(self) -> None:
-        """Yield to the loop and honour pause/cancel (FR-185, NFR-401)."""
-        await self.ctx.checkpoint_barrier()
+        """Yield to the loop and honour pause/cancel (FR-185, NFR-401).
+
+        A pause is not a stall: while the seeker holds the job, the stall clock
+        is not running, or a ten-minute pause would be read as a ten-minute
+        silence and the job would be stopped the moment it was resumed.  The
+        time is recorded as well, so the per-item clock can leave it out.
+        """
+        control = getattr(self.ctx, "_control", None)
+        paused = bool(getattr(control, "paused", False))
+        started = time.monotonic()
+        try:
+            await self.ctx.checkpoint_barrier()
+        finally:
+            # Recorded even when the wait was cancelled by an item timeout, so
+            # the retry knows the clock was spent on the seeker, not the source.
+            if paused:
+                self.paused_total += time.monotonic() - started
+        if paused:
+            self.progress_made()
 
     # -- the progress bar (FR-185) -----------------------------------------
     def progress(self, done: int, total: int | None = None) -> None:
@@ -1557,11 +1700,17 @@ async def _write_records(unit: _Unit, records: list[Any], books: _Bookkeeping) -
     board behaves exactly as it did.
     """
     if len(records) <= WRITE_BATCH:
-        return unit.writer.write_many(records)
+        written = unit.writer.write_many(records)
+        if records:
+            # A record landing is progress the stall watchdog can see, and it
+            # is the slowest step of a large page besides.
+            books.progress_made()
+        return written
     written: list[Any] = []
     for start in range(0, len(records), WRITE_BATCH):
         await books.barrier()
         written.extend(unit.writer.write_many(records[start : start + WRITE_BATCH]))
+        books.progress_made()
     return written
 
 
@@ -1651,6 +1800,10 @@ async def collection_worker(ctx: JobContext) -> None:
             # numerator can never overtake the denominator (FR-185).
             total_pages = stats.pages_done + sum(u.remaining for u in units)
             books.progress(stats.pages_done, total_pages)
+            # Preparing the plan is not a page the run is waiting for: the
+            # stall watchdog starts counting from the first fetch, not from
+            # however long it took to build the units.
+            books.progress_made()
 
             # FR-186: every runnable source is guaranteed a floor of the budget
             # before any source is allowed to take more than its share, so an
@@ -1672,6 +1825,7 @@ async def collection_worker(ctx: JobContext) -> None:
                                                 budget=max(0, caps.max_pages - stats.pages),
                                                 declined=declined_now)
                 )
+                books.progress_made()
                 return stats.pages_done + sum(u.remaining for u in units)
 
             for pass_limit in (floor, caps.max_pages_per_source):
@@ -2448,6 +2602,11 @@ async def _run_wave(
         for unit in units:
             if stats.stopped_by:
                 return
+            if books.stalled():
+                # No page and no record for the watchdog's window: stop before
+                # this bucket adds another source to whatever is stuck (FR-185).
+                _note_stall(unit, stats, books)
+                return
             # A cap ends the run and is recorded as the reason; a stage
             # reservation only ends this wave.  The cap is tested first, or a
             # stage that had spent its share would swallow the reason the run
@@ -2509,10 +2668,49 @@ async def _run_unit(
     Whatever this source accumulated is written before the source is left,
     however it is left, so no increment is still queued for a row that
     :func:`_settle` is about to write a verdict onto.
+
+    The whole item is bounded by ``SOURCE_TIMEOUT_SECONDS``: a source with many
+    pages each just under the page limit still may not add up to an unbounded
+    run.  Its expiry is the source's failure, not the job's - the error is
+    recorded on the plan item exactly as a page crash is, and the run moves on.
     """
     unit.running = True
     try:
-        await _drive_unit(unit, limit, books, stats, caps, started, completed, total_pages)
+        while True:
+            paused_before = books.paused_total
+            source_started = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    _drive_unit(unit, limit, books, stats, caps, started, completed, total_pages),
+                    timeout=SOURCE_TIMEOUT_SECONDS,
+                )
+                break
+            except TimeoutError:
+                if books.paused_total > paused_before:
+                    # The clock expired while the seeker held the job, not while
+                    # the source did work: that time is not charged to it, and
+                    # the item restarts with a fresh clock on resume.
+                    continue
+                elapsed = time.monotonic() - source_started
+                reason = f"timed out after {_seconds_label(SOURCE_TIMEOUT_SECONDS)}"
+                # The item is failed and closed, not paged through further: the
+                # pages it did complete are kept in its outcome, and the next
+                # campaign - or this one after a raise of the budget - can
+                # resume it.
+                unit.outcome.errors += 1
+                unit.outcome.last_error = reason
+                unit.pages = unit.done
+                books.count(unit.id, errors=1, last_error=reason)
+                books.ctx.record_error(reason)
+                stats.adapter(unit.adapter_key)["errors"] += 1
+                stats.errors += 1
+                log.warning(
+                    "[%s] source run timed out after %.1fs (limit %s); "
+                    "%d page(s) completed; url=%s",
+                    unit.adapter_key, elapsed, _seconds_label(SOURCE_TIMEOUT_SECONDS),
+                    unit.done, _item_url(unit),
+                )
+                break
     finally:
         books.flush_counters(unit.id)
         _stamp_finished(unit)
@@ -2551,14 +2749,33 @@ async def _drive_unit(
             # the next stage is exactly what the reservation was protecting.
             return
         await books.barrier()  # FR-185 pause / cancel
+        if stats.stopped_by:
+            # The stall watchdog, a cap or a deadline ended the run while this
+            # source waited at the barrier; it does not start another page.
+            return
+        if books.stalled():
+            # Nothing has completed for the watchdog's window.  Stop here,
+            # whatever this source was about to do.
+            _note_stall(unit, stats, books)
+            return
         page = unit.done + 1
         try:
-            step = await _run_page(unit, page, books)
+            step = await _run_page(unit, page, books, stats)
         except JobCancelled:
             raise
         except Exception as exc:  # noqa: BLE001 - the item fails, the run continues
             log.exception("[%s] failed outside the page loop", unit.adapter_key)
             step = ItemOutcome(errors=1, last_error=f"{type(exc).__name__}: {exc}")
+        if stats.stopped_by == "stalled":
+            # The page was cut short by the stall deadline rather than by its
+            # own limit: keep whatever requests it made, charge nothing, and
+            # stop without counting it as a completed page.
+            _absorb(unit, step)
+            return
+        # A page that came back only after the watchdog's window would have
+        # tripped it while in flight; the run stops here, with this page's
+        # work counted first so nothing already done is lost.
+        late = books.stalled()
         _absorb(unit, step)
         unit.done = page
         # FR-185: the bar's numerator is one *planned page* completed, whatever
@@ -2620,6 +2837,10 @@ async def _drive_unit(
         books.ctx.save_checkpoint(completed=completed, stats=stats.to_dict())
         # ... and this one's is a preference, so it is coalesced (NFR-102).
         books.progress(stats.pages_done, total_pages)
+        if late:
+            _note_stall(unit, stats, books)
+            return
+        books.progress_made()
         if step.errors:
             return
 

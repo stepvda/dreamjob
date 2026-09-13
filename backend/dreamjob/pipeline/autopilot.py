@@ -135,6 +135,12 @@ class AutopilotOptions:
     max_duration_seconds: int | None = None
     #: Cap on the companies the campaign plans against (FR-186).
     max_companies: int | None = None
+    #: Re-open sources and targets whose last successful read is older than
+    #: this many days instead of reusing them (FR-342).  ``None`` keeps the
+    #: knowledge-base staleness policy alone, which is what a supervised run
+    #: wants; the continuous cycle passes a short window so its periodic runs
+    #: re-check known boards and career pages for new postings.
+    max_reuse_age_days: int | None = None
     #: Campaign name; a sensible one is derived when omitted.
     campaign_name: str | None = None
     #: Name for the saved directive set.
@@ -563,7 +569,10 @@ def _plan(campaign_id: str, job_seeker_id: str, options: AutopilotOptions) -> di
     from dreamjob.pipeline import planning  # noqa: PLC0415
 
     summary = planning.generate_plan(
-        campaign_id, job_seeker_id, use_llm=options.use_llm
+        campaign_id,
+        job_seeker_id,
+        use_llm=options.use_llm,
+        max_reuse_age_days=options.max_reuse_age_days,
     )
     if not isinstance(summary, dict):
         return {"result": str(summary)}

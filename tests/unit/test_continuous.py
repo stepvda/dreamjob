@@ -384,7 +384,11 @@ def test_discover_bounds_the_run_and_the_campaign(
         "max_companies": 10,
         "max_duration_seconds": 15 * 60,
         "company_limit": continuous.CONTINUOUS_COMPANY_LIMIT,
+        # FR-342: the periodic run re-opens sources it has not read for a day
+        # instead of reusing them for the whole policy window.
+        "max_reuse_age_days": continuous.CONTINUOUS_DISCOVER_REUSE_AGE_DAYS,
     }
+    assert continuous.CONTINUOUS_DISCOVER_REUSE_AGE_DAYS == 1
     caps = campaign_repo.get_campaign_any(started["campaign_id"])["caps"]
     assert caps["max_pages"] == 60, "the plan and collection read the campaign's caps"
     assert caps["max_companies"] == 10
@@ -410,6 +414,7 @@ def test_autopilot_start_accepts_the_bounded_option_dict(
     assert options["max_pages_per_source"] == 5
     assert options["max_duration_seconds"] == 15 * 60
     assert options["company_limit"] == continuous.CONTINUOUS_COMPANY_LIMIT
+    assert options["max_reuse_age_days"] == continuous.CONTINUOUS_DISCOVER_REUSE_AGE_DAYS
 
 
 def test_a_seeker_without_a_profile_is_skipped_with_a_reason(

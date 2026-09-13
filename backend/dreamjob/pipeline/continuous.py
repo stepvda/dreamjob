@@ -122,6 +122,17 @@ CONTINUOUS_DISCOVER_CAPS: dict[str, int] = {
     "max_companies": 10,
     "max_duration_seconds": 15 * 60,
 }
+#: How old a source's last successful read may be before a continuous discover
+#: phase re-opens it instead of reusing it (FR-342).  The cycle re-plans the
+#: same campaign every interval, and the 7-day vacancy staleness window meant a
+#: board read once stayed "fresh" all week: new postings at known employers
+#: were never collected, and the phase reported 0 records while the boards held
+#: them.  One day keeps the periodic run bounded (the phase caps pages anyway)
+#: while actually re-checking ATS boards and career pages for what appeared
+#: since the last pass - the corpus itself is only a day or two old, so a
+#: longer window would leave the first refreshes with nothing to do.  A
+#: supervised autopilot run leaves the option unset and keeps the policy alone.
+CONTINUOUS_DISCOVER_REUSE_AGE_DAYS = 1
 #: Company profiles and financials one continuous autopilot run builds.
 CONTINUOUS_COMPANY_LIMIT = 5
 
@@ -471,6 +482,10 @@ def _discover_options() -> dict[str, Any]:
         "max_companies": CONTINUOUS_DISCOVER_CAPS["max_companies"],
         "max_duration_seconds": CONTINUOUS_DISCOVER_CAPS["max_duration_seconds"],
         "company_limit": CONTINUOUS_COMPANY_LIMIT,
+        # FR-342: each phase re-opens what has not been read for a day, so the
+        # next cycle actually asks the ATS and career-page sources for the
+        # postings that appeared since the last one.
+        "max_reuse_age_days": CONTINUOUS_DISCOVER_REUSE_AGE_DAYS,
     }
 
 

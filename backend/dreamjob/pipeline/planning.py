@@ -1342,8 +1342,17 @@ def generate_plan(
     use_llm: bool = True,
     llm: LLMClient | None = None,
     assess_knowledge_base: bool = True,
+    max_reuse_age_days: int | None = None,
 ) -> dict:
-    """Produce, persist and summarise a campaign plan (FR-161..166, FR-342)."""
+    """Produce, persist and summarise a campaign plan (FR-161..166, FR-342).
+
+    ``max_reuse_age_days`` is handed to the knowledge-base reuse assessment: a
+    source or target whose last successful collection is older than that many
+    days is re-opened as fresh plan work - its row back to ``planned`` with
+    clean counters - instead of reused, so a periodic run finds what appeared
+    since the last pass while still reusing what is genuinely fresh (FR-342).
+    ``None`` keeps the staleness policy alone.
+    """
     campaign = repo.get_campaign(campaign_id, job_seeker_id)
     if campaign is None:
         raise LookupError(f"No campaign {campaign_id} for this job seeker")
@@ -1732,8 +1741,13 @@ def generate_plan(
         },
     )
 
+    reuse_assessment: knowledge_base.ReuseReport | None = None
     if assess_knowledge_base and planned:
-        knowledge_base.assess_reuse(campaign_id, countries=countries)
+        reuse_assessment = knowledge_base.assess_reuse(
+            campaign_id,
+            countries=countries,
+            max_reuse_age_days=max_reuse_age_days,
+        )
 
     summary = plan_summary(campaign_id, job_seeker_id)
     summary.update(
@@ -1749,6 +1763,18 @@ def generate_plan(
             "plan_notice": notice,
             "llm_used": llm_used,
             "degraded_reason": degraded_reason,
+            # FR-342: how much was reused and how many sources the reuse-age
+            # cap re-opened, so the review screen and the run report can say
+            # "12 reused, 3 refreshed" instead of only "done".
+            "reuse": (
+                {
+                    "max_reuse_age_days": max_reuse_age_days,
+                    "reused": reuse_assessment.reused_total,
+                    "refreshed": reuse_assessment.refreshed,
+                }
+                if reuse_assessment is not None
+                else None
+            ),
         }
     )
     return summary
@@ -2349,6 +2375,8 @@ def plan_summary(
         item["label_detail"] = label_detail
         item["target_key"] = target_key(item["adapter_key"], item.get("native_query"))
     notice = campaign.get("plan_notice") if isinstance(campaign.get("plan_notice"), dict) else {}
+    stored_reuse = campaign.get("reuse_report")
+    reuse = stored_reuse if isinstance(stored_reuse, dict) else {}
     return {
         "campaign_id": campaign_id,
         "status": campaign.get("status"),
@@ -2369,6 +2397,10 @@ def plan_summary(
             "adapters": len(by_adapter),
             "sources_excluded": sum(1 for i in items if i["excluded_by_user"]),
             "sources_skipped_by_reuse": sum(1 for i in items if i["status"] == "skipped"),
+            # FR-342: what the last reuse assessment saved, and how many plan
+            # items the reuse-age cap sent back out for a refresh.
+            "records_reused": int(reuse.get("reused_records") or 0),
+            "sources_refreshed_by_age": int(reuse.get("refreshed_items") or 0),
             "estimated_pages": planned_pages,
             "estimated_seconds": sum(int(i["estimated_seconds"] or 0) for i in active),
             "estimated_cost_eur": round(

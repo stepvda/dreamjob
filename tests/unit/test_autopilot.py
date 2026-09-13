@@ -290,11 +290,33 @@ def test_options_round_trip_through_a_checkpoint(seeker):
     """A resumed job reads the same options the user chose."""
     from dreamjob.pipeline.autopilot import AutopilotOptions
 
-    chosen = AutopilotOptions(company_limit=3, use_llm=False, max_pages=40)
+    chosen = AutopilotOptions(
+        company_limit=3, use_llm=False, max_pages=40, max_reuse_age_days=3
+    )
     restored = AutopilotOptions.from_checkpoint({"options": chosen.to_dict()})
     assert restored == chosen
+    assert restored.max_reuse_age_days == 3
     # Unknown keys in a checkpoint are ignored rather than raising.
     assert AutopilotOptions.from_checkpoint({"options": {"nonsense": 1}}).company_limit == 12
+
+
+def test_max_reuse_age_threads_from_options_into_planning(seeker, monkeypatch):
+    """FR-342: the run's reuse window must reach ``planning.generate_plan``."""
+    from dreamjob.pipeline import autopilot, planning
+
+    captured: dict = {}
+
+    def fake_generate(campaign_id, job_seeker_id, **options):
+        captured.update(options)
+        return {"items": [], "reuse": {"reused": 4, "refreshed": 2}}
+
+    monkeypatch.setattr(planning, "generate_plan", fake_generate)
+    plan = autopilot._plan(
+        "campaign-1", seeker, autopilot.AutopilotOptions(max_reuse_age_days=3)
+    )
+
+    assert captured["max_reuse_age_days"] == 3
+    assert plan["reuse"] == {"reused": 4, "refreshed": 2}
 
 
 # ---------------------------------------------------------------------------

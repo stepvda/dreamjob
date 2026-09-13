@@ -76,6 +76,19 @@ ENTITY_FOR_SOURCE_TYPE: dict[str, str | None] = {
 
 DEFAULT_RECORDS_PER_PAGE = 25
 
+#: FR-342: a plan item re-opened by the reuse-age cap starts over.  Its status
+#: returns to ``planned`` - the schema's pending - and the previous run's
+#: counters and activity stamps are cleared, so collection's numbers describe
+#: the new fetch rather than the sum of every fetch the item has ever done.
+REOPENED_PLAN_VALUES: dict[str, Any] = {
+    "status": "planned",
+    "records_collected": 0,
+    "error_count": 0,
+    "last_error": None,
+    "activity_at": None,
+    "activity_kind": None,
+}
+
 
 # ---------------------------------------------------------------------------
 # Staleness policy (FR-343)
@@ -688,6 +701,14 @@ class ReuseReport:
     seconds_saved: int = 0
     cost_saved_eur: float = 0.0
     fresh_in_knowledge_base: dict[str, int] = field(default_factory=dict)
+    #: FR-342: plan items whose last successful read fell outside the
+    #: reuse-age cap and which were therefore re-opened instead of skipped.
+    refreshed: int = 0
+
+    @property
+    def reused_total(self) -> int:
+        """Reused records across every record type, after the corpus cap."""
+        return sum(int(bucket.get("reused") or 0) for bucket in self.per_entity.values())
 
     def to_dict(self) -> dict:
         return {
@@ -697,6 +718,8 @@ class ReuseReport:
             "fresh_in_knowledge_base": self.fresh_in_knowledge_base,
             "estimated_seconds_saved": self.seconds_saved,
             "estimated_cost_saved_eur": round(self.cost_saved_eur, 4),
+            "reused_records": self.reused_total,
+            "refreshed_items": self.refreshed,
             "decisions": [d.__dict__ for d in self.decisions],
             "headline": self.headline(),
         }
@@ -732,6 +755,7 @@ def assess_reuse(
     countries: list[str] | None = None,
     apply_decisions: bool = True,
     policy: dict[str, int] | None = None,
+    max_reuse_age_days: int | None = None,
 ) -> ReuseReport:
     """Compare the plan against the knowledge base and skip what is already fresh.
 
@@ -739,24 +763,67 @@ def assess_reuse(
     reported.  A source whose fresh contribution already covers the volume its
     plan item would have produced is marked ``skipped``; a partially covered
     source keeps a proportionally smaller page budget.
+
+    ``max_reuse_age_days`` bounds reuse by the *age of the last successful
+    read* on top of the record type's staleness policy: a target last read
+    longer ago than the cap is re-opened - its plan item returns to
+    ``planned`` with clean counters - even while it still sits inside the
+    policy window, so a periodic run picks up what appeared since.  ``None``
+    leaves the policy as the only window, exactly as before.  The window
+    actually enforced is the tighter of the two.
     """
     policy = policy or get_staleness_policy()
+    cap: int | None = None
+    if max_reuse_age_days is not None:
+        try:
+            cap = max(0, int(max_reuse_age_days))
+        except (TypeError, ValueError):
+            log.warning("Ignoring non-numeric max_reuse_age_days %r", max_reuse_age_days)
     report = ReuseReport(policy=policy)
     items = campaign_repo.list_plan_items(campaign_id, include_excluded=False)
     catalogue = {c["adapter_key"]: c for c in campaign_repo.list_catalogue(enabled_only=False)}
 
+    def policy_days(entity_type: str) -> float:
+        """The staleness window FR-343 gives this record type."""
+        return float(policy.get(entity_type) or DEFAULT_STALENESS_DAYS.get(entity_type) or 7)
+
+    def reuse_days(entity_type: str) -> float:
+        """The window a target must have been read inside to be reusable."""
+        days = policy_days(entity_type)
+        return days if cap is None else min(days, float(cap))
+
+    def is_capped(entity_type: str) -> bool:
+        return reuse_days(entity_type) < policy_days(entity_type)
+
+    def window_label(entity_type: str) -> str:
+        return f"{reuse_days(entity_type):g}"
+
+    def counts_for(entity_type: str, days: float) -> dict[str, int]:
+        """Fresh record counts per adapter under a window of ``days``."""
+        cutoff = cutoff_for(entity_type, {**policy, entity_type: max(0, int(days))})
+        counts = repo.fresh_counts_by_adapter(entity_type, cutoff)
+        if entity_type == "vacancy":
+            for key, value in repo.fresh_vacancy_counts_by_source(cutoff, countries).items():
+                if key:
+                    counts[key] = max(counts.get(key, 0), value)
+        return counts
+
+    # The policy-window counts and the capped-window counts are kept apart:
+    # the former answer "what does the knowledge base hold", which is what the
+    # report is capped by, and the latter decide reuse.  Comparing the two is
+    # also what tells the report which items the cap re-opened (FR-342).
     fresh_by_type: dict[str, dict[str, int]] = {}
+    reuse_counts: dict[str, dict[str, int]] = {}
     for entity_type in ("vacancy", "company"):
-        cutoff = cutoff_for(entity_type, policy)
-        fresh_by_type[entity_type] = repo.fresh_counts_by_adapter(entity_type, cutoff)
-        report.fresh_in_knowledge_base[entity_type] = repo.count_fresh(
-            entity_type, cutoff, countries
+        fresh_by_type[entity_type] = counts_for(entity_type, policy_days(entity_type))
+        reuse_counts[entity_type] = (
+            counts_for(entity_type, reuse_days(entity_type))
+            if is_capped(entity_type)
+            else fresh_by_type[entity_type]
         )
-    vacancy_cutoff = cutoff_for("vacancy", policy)
-    by_source = repo.fresh_vacancy_counts_by_source(vacancy_cutoff, countries)
-    for key, value in by_source.items():
-        if key:
-            fresh_by_type["vacancy"][key] = max(fresh_by_type["vacancy"].get(key, 0), value)
+        report.fresh_in_knowledge_base[entity_type] = repo.count_fresh(
+            entity_type, cutoff_for(entity_type, policy), countries
+        )
 
     # FR-342, N4: how many plan items each source carries decides *which*
     # question freshness is.  A keyword source is planned once, so "has this
@@ -770,19 +837,19 @@ def assess_reuse(
     items_per_adapter: dict[str, int] = {}
     for item in items:
         items_per_adapter[item["adapter_key"]] = items_per_adapter.get(item["adapter_key"], 0) + 1
-    fresh_targets_cache: dict[str, set[str]] = {}
+    fresh_targets_cache: dict[tuple[str, float], set[str]] = {}
 
-    def fresh_targets_for(adapter_key: str, entity_type: str) -> set[str]:
-        if adapter_key not in fresh_targets_cache:
-            days = policy.get(entity_type) or DEFAULT_STALENESS_DAYS.get(entity_type) or 7
+    def fresh_targets_for(adapter_key: str, days: float) -> set[str]:
+        cache_key = (adapter_key, float(days))
+        if cache_key not in fresh_targets_cache:
             try:
-                fresh_targets_cache[adapter_key] = egress_client.fresh_targets(
+                fresh_targets_cache[cache_key] = egress_client.fresh_targets(
                     adapter_key, float(days)
                 )
             except Exception:  # noqa: BLE001 - no ledger is "nothing is fresh", never a failure
                 log.warning("Could not read the fetch ledger for %s", adapter_key, exc_info=True)
-                fresh_targets_cache[adapter_key] = set()
-        return fresh_targets_cache[adapter_key]
+                fresh_targets_cache[cache_key] = set()
+        return fresh_targets_cache[cache_key]
 
     for item in items:
         entry = catalogue.get(item["adapter_key"], {})
@@ -799,12 +866,33 @@ def assess_reuse(
         reused = 0
         per_target = entity_type is not None and items_per_adapter[item["adapter_key"]] > 1
         target_fresh = False
+        capped = entity_type is not None and is_capped(entity_type)
+        #: Pages this item would have fetched had the policy window alone
+        #: applied.  Only computed where the cap actually removes reuse; a
+        #: difference from ``pages_after`` is what "the cap re-opened it" means.
+        base_pages_after: int | None = None
         if per_target:
             target = _target_key_for(item)
-            target_fresh = target in fresh_targets_for(item["adapter_key"], entity_type)
+            target_fresh = target in fresh_targets_for(
+                item["adapter_key"], reuse_days(entity_type)
+            )
             reused = expected if target_fresh else 0
+            if capped and not target_fresh:
+                base_fresh = target in fresh_targets_for(
+                    item["adapter_key"], policy_days(entity_type)
+                )
+                base_pages_after = 0 if base_fresh else pages
         elif entity_type in ("vacancy", "company"):
-            reused = min(expected, int(fresh_by_type[entity_type].get(item["adapter_key"], 0)))
+            reused = min(expected, int(reuse_counts[entity_type].get(item["adapter_key"], 0)))
+            if capped:
+                base_reused = min(
+                    expected, int(fresh_by_type[entity_type].get(item["adapter_key"], 0))
+                )
+                base_pages_after = (
+                    0
+                    if base_reused >= expected
+                    else max(1, math.ceil((expected - base_reused) / per_page))
+                )
 
         if entity_type is None:
             action, pages_after = "collect", pages
@@ -812,13 +900,24 @@ def assess_reuse(
         elif per_target:
             if target_fresh:
                 action, pages_after = "skip", 0
-                reason = (
-                    f"this target was read inside the {policy.get(entity_type)}-day staleness "
-                    "window"
-                )
+                if capped:
+                    reason = (
+                        f"this target was read inside the {window_label(entity_type)}-day reuse "
+                        "window"
+                    )
+                else:
+                    reason = (
+                        f"this target was read inside the {policy.get(entity_type)}-day staleness "
+                        "window"
+                    )
             else:
                 action, pages_after = "collect", pages
-                reason = "this target has not been read inside the staleness window"
+                reason = (
+                    f"this target's last read is older than the "
+                    f"{window_label(entity_type)}-day reuse window; re-opened"
+                    if capped
+                    else "this target has not been read inside the staleness window"
+                )
         elif reused == 0:
             action, pages_after = "collect", pages
             reason = "no comparable fresh records in the knowledge base"
@@ -826,12 +925,28 @@ def assess_reuse(
             action, pages_after = "skip", 0
             reason = (
                 f"{reused} fresh {entity_type} record(s) from this source are within the "
-                f"{policy.get(entity_type)}-day staleness window"
+                f"{window_label(entity_type)}-day reuse window"
+                if capped
+                else (
+                    f"{reused} fresh {entity_type} record(s) from this source are within the "
+                    f"{policy.get(entity_type)}-day staleness window"
+                )
             )
         else:
             action = "collect_partial"
             pages_after = max(1, math.ceil((expected - reused) / per_page))
             reason = f"{reused} of about {expected} {entity_type} record(s) already fresh"
+
+        refreshed = base_pages_after is not None and base_pages_after < pages_after
+        if refreshed:
+            report.refreshed += 1
+            if not per_target:
+                # The cap moved this source back from "covered" to "collect";
+                # say why rather than reporting it as never collected.
+                reason = (
+                    f"the reuse window is capped at {window_label(entity_type)} days; "
+                    f"{pages_after - base_pages_after} page(s) re-opened for refresh"
+                )
 
         saved_pages = max(0, pages - pages_after)
         seconds_saved = int(seconds * saved_pages / pages) if pages else 0
@@ -854,9 +969,13 @@ def assess_reuse(
         report.seconds_saved += seconds_saved
         report.cost_saved_eur += cost_saved
         if entity_type:
-            bucket = report.per_entity.setdefault(entity_type, {"reused": 0, "scheduled": 0})
+            bucket = report.per_entity.setdefault(
+                entity_type, {"reused": 0, "scheduled": 0, "refreshed": 0}
+            )
             bucket["reused"] += reused
             bucket["scheduled"] += max(0, expected - reused) if action != "skip" else 0
+            if refreshed:
+                bucket["refreshed"] += 1
 
         if apply_decisions:
             values: dict[str, Any] = {
@@ -870,7 +989,12 @@ def assess_reuse(
                     "planned_cost_eur": cost,
                 },
             }
-            if action == "skip":
+            if refreshed:
+                # A re-opened target starts a fresh unit of work: the previous
+                # run's counters and terminal status must not ride along, or
+                # collection would report the old records as this run's.
+                values.update(REOPENED_PLAN_VALUES)
+            elif action == "skip":
                 values["status"] = "skipped"
                 values["last_error"] = None
             elif item.get("status") == "skipped":
@@ -884,9 +1008,9 @@ def assess_reuse(
     # the entire knowledge base.  Capping the aggregate at the measured fresh
     # count keeps the headline one a person can check.
     for entity_type, bucket in report.per_entity.items():
-        cap = int(report.fresh_in_knowledge_base.get(entity_type) or 0)
-        if cap and bucket.get("reused", 0) > cap:
-            bucket["reused"] = cap
+        corpus_cap = int(report.fresh_in_knowledge_base.get(entity_type) or 0)
+        if corpus_cap and bucket.get("reused", 0) > corpus_cap:
+            bucket["reused"] = corpus_cap
 
     if apply_decisions:
         campaign_repo.update_campaign(campaign_id, {"reuse_report": report.to_dict()})
