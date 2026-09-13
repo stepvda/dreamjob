@@ -46,3 +46,8 @@ logs/*
 
 # Kilo / Agent Manager local state (never committed)
 .kilo/
+
+# Local Playwright capture artifacts: state.json holds a live session cookie
+# and capture*.py holds the login password. Never commit them.
+docs/v2_build/state.json
+docs/v2_build/capture*.py
