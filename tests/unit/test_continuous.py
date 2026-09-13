@@ -269,6 +269,26 @@ def test_a_deferral_is_an_attempt_not_a_run(phases: list[str]) -> None:
     assert state["last_report"] is None
 
 
+def test_a_deferral_advances_the_cycle(
+    running_job: Callable[[str, str], str], phases: list[str]
+) -> None:
+    """A phase whose own work is in flight must not freeze the rotation.
+
+    The live loop sat in ``discover`` for hours behind one long autopilot,
+    so contacts, enrich and score never got a turn.
+    """
+    continuous.set_enabled(True)
+    running_job("autopilot", "running")
+    assert continuous._current_phase() == "discover"
+
+    report = asyncio.run(continuous.run_phase(force=True))
+
+    assert report["deferred"] == "autopilot job running"
+    assert continuous._current_phase() == "contacts"
+    assert phases == []
+    assert continuous.get_state()["last_phase_at"] is None
+
+
 def test_a_real_phase_stamps_the_run_and_the_report(phases: list[str]) -> None:
     continuous.set_enabled(True)
 

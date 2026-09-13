@@ -370,6 +370,14 @@ async def run_phase(*, force: bool = False, phase: str | None = None) -> dict[st
         if busy:
             _record_attempt(current, f"{busy} job running")
             log.info("Continuous collection deferred: a %s job is running", busy)
+            # The work for this phase is already in flight, so move the cycle
+            # on rather than freeze it: a long autopilot (the discover chain)
+            # otherwise holds the pointer for hours and starves contacts,
+            # enrich and score.  ``last_phase_at`` is deliberately not stamped
+            # - the next tick is due immediately - and the phase gate above
+            # still stops the same phase stacking on itself.
+            nxt = PHASES[(PHASES.index(current) + 1) % len(PHASES)]
+            _store(SETTING_PHASE, nxt)
             return {"deferred": f"{busy} job running", "blocked_by": busy}
 
         try:
