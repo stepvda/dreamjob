@@ -26,6 +26,7 @@ import { api } from '../api/client'
 import { Caution, FirstRun, HelpTip, ScreenIntro } from '../components/Help'
 import Icon from '../components/Icon'
 import WorkflowMap from '../components/WorkflowMap'
+import { PlaceAutocomplete } from './directives/controls'
 import { EmployerCompanyLine } from './employers'
 import {
   Badge,
@@ -210,6 +211,12 @@ const EMPTY_FILTERS = {
   country: '',
   min_score: 0,
   exclude_not_interested: false,
+  // FR-144: a place and a radius. Empty coordinates mean "no area filter".
+  near_label: '',
+  near_lat: '',
+  near_lon: '',
+  radius_km: 25,
+  include_remote: true,
 }
 
 function human(value) {
@@ -242,7 +249,89 @@ function FacetSelect({ label, name, facet, value, onChange }) {
   )
 }
 
-function FilterBar({ facets, filters, onChange, onReset }) {
+/**
+ * FR-144: keep the opportunities within a radius of a place. Most sources send
+ * a place name, not coordinates, so the list can only be cut once those names
+ * have been geocoded; the coverage line says how many rows that leaves out and
+ * offers to place them.
+ */
+function AreaFilter({ filters, onChange, onArea, coverage, locating, onLocate }) {
+  const active = filters.near_lat !== ''
+  const unlocated = coverage?.unlocated ?? 0
+  return (
+    <div className="filter-grid" style={{ marginTop: 12 }}>
+      <div className="filter-grid-wide">
+        <Field label="Work within reach of">
+          {active ? (
+            <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <span className="badge" title={filters.near_label}>
+                <Icon name="target" /> {filters.near_label.split(',')[0]}
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                onClick={() => onArea({ near_label: '', near_lat: '', near_lon: '' })}
+              >
+                Remove
+              </button>
+            </div>
+          ) : (
+            <PlaceAutocomplete
+              placeholder="City, e.g. Brussels"
+              onPick={(place) => {
+                // A label typed without a geocoder match has no coordinates to
+                // measure from, so it cannot become a radius.
+                if (place.latitude == null || place.longitude == null) return
+                onArea({
+                  near_label: place.label,
+                  near_lat: place.latitude,
+                  near_lon: place.longitude,
+                })
+              }}
+            />
+          )}
+        </Field>
+      </div>
+      <Field label="Radius (km)">
+        <input
+          type="number"
+          min="1"
+          max="1000"
+          step="5"
+          value={filters.radius_km}
+          onChange={(e) => onChange('radius_km', Math.max(1, Number(e.target.value) || 1))}
+        />
+      </Field>
+      <div className="field">
+        <label>&nbsp;</label>
+        <label className="checkline">
+          <input
+            type="checkbox"
+            checked={filters.include_remote}
+            onChange={(e) => onChange('include_remote', e.target.checked)}
+          />
+          Keep remote roles
+        </label>
+      </div>
+      {coverage && (unlocated > 0 || locating) && (
+        <p className="filter-note small muted" style={{ gridColumn: '1 / -1' }}>
+          {locating
+            ? `Placing opportunities on the map… ${coverage.located} of ${coverage.total} placed so far.`
+            : `${unlocated} of ${coverage.total} opportunities have no exact place yet${
+                active ? ' and are hidden by the area filter' : ''
+              }. Some only name a country, which cannot be placed.`}{' '}
+          {!locating && (
+            <button type="button" className="btn btn-sm" onClick={onLocate}>
+              <Icon name="target" /> Place them on the map
+            </button>
+          )}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function FilterBar({ facets, filters, onChange, onArea, onReset, coverage, locating, onLocate }) {
   const active = Object.keys(EMPTY_FILTERS).some(
     (k) => String(filters[k] ?? '') !== String(EMPTY_FILTERS[k]),
   )
@@ -365,6 +454,15 @@ function FilterBar({ facets, filters, onChange, onReset }) {
           onChange={onChange}
         />
       </div>
+
+      <AreaFilter
+        filters={filters}
+        onChange={onChange}
+        onArea={onArea}
+        coverage={coverage}
+        locating={locating}
+        onLocate={onLocate}
+      />
 
       <div className="row row-wrap" style={{ marginTop: 12, gap: 14, alignItems: 'center' }}>
         <label className="checkline">
@@ -983,6 +1081,12 @@ export default function OpportunitiesPage() {
     }
     if (filters.min_score > 0) p.set('min_score', String(filters.min_score))
     if (filters.exclude_not_interested) p.set('exclude_not_interested', 'true')
+    if (filters.near_lat !== '' && filters.near_lon !== '') {
+      p.set('near_lat', String(filters.near_lat))
+      p.set('near_lon', String(filters.near_lon))
+      p.set('radius_km', String(filters.radius_km))
+      if (!filters.include_remote) p.set('include_remote', 'false')
+    }
     p.set('sort', sort)
     p.set('respect_manual_order', manualOrder ? 'true' : 'false')
     p.set('limit', String(PAGE_SIZE))
@@ -991,6 +1095,28 @@ export default function OpportunitiesPage() {
   }, [campaignId, debouncedQ, filters, sort, manualOrder, offset])
 
   const list = useFetch(() => api.get(`/opportunities?${query}`), [query])
+
+  // FR-144: how many rows the area filter can judge, and a locate run's progress.
+  const [locateJob, setLocateJob] = useState(null)
+  const coverage = useFetch(
+    () => api.get(`/opportunities/locations${locateJob ? `?job_id=${locateJob}` : ''}`),
+    [locateJob],
+  )
+  const locating = Boolean(locateJob)
+  useEffect(() => {
+    if (!locateJob) return undefined
+    // Data from before the run started says nothing about it.
+    const current = coverage.data?.job_id === locateJob
+    if (current && coverage.data.running === false) {
+      // Finished: the newly placed rows can now pass the radius.
+      setLocateJob(null)
+      list.reload()
+      return undefined
+    }
+    const t = setTimeout(() => coverage.reload(), 4000)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locateJob, coverage.data])
 
   // The shortlist lives on the server, so "the selected" is a query, not local
   // state - it stays correct across pages and filters (FR-284, FR-321).
@@ -1025,6 +1151,21 @@ export default function OpportunitiesPage() {
   function change(name, value) {
     setOffset(0)
     setFilters((f) => ({ ...f, [name]: value }))
+  }
+
+  function changeArea(values) {
+    setOffset(0)
+    setFilters((f) => ({ ...f, ...values }))
+  }
+
+  async function locateAll() {
+    setActionError(null)
+    try {
+      const res = await api.post('/opportunities/locate', {})
+      setLocateJob(res?.job_id || null)
+    } catch (e) {
+      setActionError(e)
+    }
   }
 
   async function patch(id, body) {
@@ -1625,6 +1766,10 @@ export default function OpportunitiesPage() {
         facets={facets.data}
         filters={filters}
         onChange={change}
+        onArea={changeArea}
+        coverage={coverage.data}
+        locating={locating}
+        onLocate={locateAll}
         onReset={() => {
           setFilters(EMPTY_FILTERS)
           setOffset(0)

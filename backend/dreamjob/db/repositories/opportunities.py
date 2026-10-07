@@ -20,6 +20,7 @@ are what the ranked list means:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from typing import Any
 
@@ -35,6 +36,9 @@ from dreamjob.db.connection import (
 )
 from dreamjob.db.repositories import employer_kind as _employer_kind
 from dreamjob.db.repositories.pipeline_cards import invalidate_active_seeker_cache
+
+#: Kilometres per degree of latitude, for the radius filter.
+KM_PER_DEGREE_LAT = 111.2
 
 #: Columns of ``opportunity`` that hold JSON and are decoded on the way out.
 JSON_COLUMNS = (
@@ -194,6 +198,25 @@ def _filter_clause(job_seeker_id: str, filters: dict[str, Any]) -> tuple[str, li
         add(" AND o.timing_flag = ?", filters["timing_flag"])
     if filters.get("has_compensation"):
         add(" AND o.comp_max IS NOT NULL")
+    if filters.get("radius_km") is not None and filters.get("near_lat") is not None \
+            and filters.get("near_lon") is not None:
+        # Equirectangular distance: plain arithmetic, so it needs no SQLite
+        # math extension and keeps paging and counts exact.  Within a few
+        # hundred kilometres it is within 1% of the great-circle distance.
+        lat, lon = float(filters["near_lat"]), float(filters["near_lon"])
+        ky = KM_PER_DEGREE_LAT
+        kx = KM_PER_DEGREE_LAT * math.cos(math.radians(lat))
+        radius = float(filters["radius_km"])
+        inside = (
+            "(o.latitude IS NOT NULL AND "
+            "((o.latitude - ?) * ?) * ((o.latitude - ?) * ?) + "
+            "((o.longitude - ?) * ?) * ((o.longitude - ?) * ?) <= ?)"
+        )
+        values = (lat, ky, lat, ky, lon, kx, lon, kx, radius * radius)
+        if filters.get("include_remote", True):
+            add(f" AND ({inside} OR IFNULL(o.work_arrangement, '') = 'remote')", *values)
+        else:
+            add(f" AND {inside}", *values)
     if filters.get("q"):
         like = f"%{filters['q']}%"
         add(
@@ -869,6 +892,41 @@ def profile_skills(job_seeker_id: str, profile_version_id: str | None = None) ->
         sql += " AND profile_version_id = ?"
         params.append(profile_version_id)
     return query_all(sql, tuple(params))
+
+
+def vacancy_term_frequencies(
+    queries: dict[str, list[list[str]]],
+) -> tuple[int, dict[str, int]]:
+    """How many vacancies mention each term, for FR-281's skill specificity.
+
+    ``queries`` maps a term to its spellings, each a list of tokens searched as
+    one phrase.  Returns the corpus size and a count per term.  The full-text
+    index is shared knowledge base and read-only here; a term the index cannot
+    parse is simply left out, and an absent index returns an empty count.
+    """
+    try:
+        total_row = query_one("SELECT COUNT(*) AS n FROM vacancy")
+    except Exception:  # noqa: BLE001 - a missing table means no corpus, not an error
+        return 0, {}
+    total = int((total_row or {}).get("n") or 0)
+    counts: dict[str, int] = {}
+    if not total:
+        return 0, counts
+    for term, spellings in queries.items():
+        phrases = [
+            '"' + " ".join(tokens) + '"' for tokens in spellings if tokens
+        ]
+        if not phrases:
+            continue
+        try:
+            row = query_one(
+                "SELECT COUNT(*) AS n FROM vacancy_fts WHERE vacancy_fts MATCH ?",
+                (" OR ".join(phrases),),
+            )
+        except Exception:  # noqa: BLE001 - an FTS syntax edge case skips one term
+            continue
+        counts[term] = int((row or {}).get("n") or 0)
+    return total, counts
 
 
 def reachability_inputs(job_seeker_id: str, company_id: str | None) -> dict[str, Any]:

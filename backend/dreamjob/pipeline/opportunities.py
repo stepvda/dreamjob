@@ -152,12 +152,19 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
 def infer_function_family(*texts: str | None) -> str | None:
-    """FR-261: the function family, from the title first, then the body."""
-    for text in texts:
+    """FR-261: the function family, from the title first, then the body.
+
+    The title is trusted on one match.  Any later text must match a family at
+    least twice: a single word in a body is how a French machinist's advert
+    ("Programmer, régler et optimiser les machines-outils") and a school
+    administrator's became "software engineering".
+    """
+    for position, text in enumerate(texts):
         if not text:
             continue
+        needed = 1 if position == 0 else 2
         for family, pattern in _FUNCTION_FAMILY_PATTERNS:
-            if pattern.search(text):
+            if sum(1 for _ in pattern.finditer(text)) >= needed:
                 return family
     return None
 

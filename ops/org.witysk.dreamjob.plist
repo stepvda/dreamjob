@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.witysk.dreamjob</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/nstephane/Dev/dreamjob/ops/dreamjob_run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nstephane/Dev/dreamjob</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- HOME is not set for a launchd job by default, and pydantic-settings
+         resolves the .env path from the package location rather than HOME, so
+         this is belt-and-braces; PATH gives the venv's python its Homebrew
+         runtime deps. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/nstephane</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nstephane/Dev/dreamjob/logs/launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nstephane/Dev/dreamjob/logs/launchd.err</string>
+</dict>
+</plist>

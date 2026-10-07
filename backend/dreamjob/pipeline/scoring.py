@@ -134,8 +134,91 @@ _STOPWORDS = frozenset(
         "who", "that", "this", "have", "has", "not", "all", "can", "new", "job", "role",
         "team", "work", "working", "years", "experience", "company", "about", "een",
         "van", "met", "voor", "les", "des", "pour", "dans", "nous", "vous",
+        # Filler that turned unrelated adverts into dream-job matches: a culture
+        # cue about "technology treated as someone else's problem" was violated
+        # by any advert containing both words, and an administrative post "met"
+        # a responsibility because it said "part" and "well".
+        "part", "stay", "well", "value", "values", "current", "problem", "problems",
+        "real", "rather", "only", "still", "also", "more", "than", "other", "need",
+        "make", "take", "good", "great", "people", "day", "daily", "way", "ways",
+        "what", "where", "when", "which", "their", "them", "they", "been", "being",
+        "some", "such", "very", "just", "like", "within", "across", "per",
     }
 )
+
+#: What an unassessed piece of evidence counts as: neither a match nor a miss.
+#: ``_weighted`` used to drop unknowns and renormalise over what was left, so a
+#: posting that said almost nothing scored higher than one that said a lot - an
+#: administrative vacancy listing one matching skill reached 100% profile fit,
+#: and a machinist's advert with one "met" criterion out of 39 reached 75% dream
+#: fit.  Counting the unknowns at a neutral value keeps CR-405 (missing is never
+#: a violation) without letting silence outrank evidence.
+NEUTRAL = 0.5
+
+#: Laplace-style shrinkage for skill overlap: ``k`` pseudo-skills at ``prior``.
+#: One required skill out of one is weak evidence; nine out of twelve is not.
+SKILL_PRIOR = 0.3
+SKILL_PRIOR_WEIGHT = 2.0
+
+#: The parts of the profile-fit sub-score.  The advert's own text carries the
+#: most weight because it is the part that is always there; the structured
+#: skill lists are often empty.  An unknown part counts as :data:`NEUTRAL`, so
+#: these weights are also what gap analysis converts "points lost" with.
+PROFILE_FIT_PARTS: dict[str, float] = {
+    "required_skill_overlap": 0.30,
+    "desirable_skill_overlap": 0.08,
+    "posting_skill_evidence": 0.32,
+    "seniority_score": 0.18,
+    "domain_score": 0.12,
+}
+
+#: Words a skill label is written with in a profile but abbreviated to in an
+#: advert.  Matching is by token set, so without these "Large language models"
+#: never meets "LLM" and "Retrieval-augmented generation" never meets "RAG".
+SKILL_ALIASES: dict[str, tuple[str, ...]] = {
+    "large language models": ("llm", "llms"),
+    "retrieval-augmented generation": ("rag",),
+    "generative ai": ("genai", "gen ai"),
+    "artificial intelligence": ("ai",),
+    "machine learning": ("ml",),
+    "postgresql": ("postgres",),
+    "natural language processing": ("nlp",),
+    "object-oriented design": ("object oriented", "ood", "oop"),
+    "application security": ("appsec", "secure coding", "owasp"),
+    "amazon web services": ("aws",),
+    "microsoft azure": ("azure",),
+    "vector databases": ("vector database", "vector search", "pgvector"),
+    "user experience design": ("ux",),
+}
+
+#: Words that say how senior or where, not what the job is; dropped before a
+#: title is compared with the target roles.
+_TITLE_NOISE = frozenset(
+    {
+        "senior", "junior", "medior", "mid", "level", "experienced", "ervaren", "confirmé",
+        "genders", "remote", "hybrid", "freelance", "interim", "m/f/d", "f/m/d", "m/w/d",
+        "f/m/x", "m/v/x", "h/f", "brussel", "brussels", "bruxelles", "belgium", "belgique",
+        "belgië", "via",
+    }
+)
+
+#: Dutch and French title words mapped onto the English the dream model writes
+#: in, so a Brussels "ontwikkelaar" is not scored as unrelated to "developer".
+_TITLE_TRANSLATIONS: dict[str, str] = {
+    "ontwikkelaar": "developer",
+    "développeur": "developer",
+    "developpeur": "developer",
+    "développeuse": "developer",
+    "ingenieur": "engineer",
+    "ingénieur": "engineer",
+    "architecte": "architect",
+    "informaticien": "developer",
+    "programmeur": "developer",
+    "logiciel": "software",
+    "beveiliging": "security",
+    "sécurité": "security",
+    "securite": "security",
+}
 
 
 def _tokens(*texts: Any) -> set[str]:
@@ -198,6 +281,17 @@ def _weighted(parts: list[tuple[float, float | None]]) -> float | None:
     return sum(w * v for w, v in known) / total
 
 
+def _weighted_neutral(parts: list[tuple[float, float | None]]) -> float | None:
+    """Like :func:`_weighted`, but an unknown part counts as :data:`NEUTRAL`.
+
+    Used where dropping a part would *reward* the row for the missing
+    evidence.  ``None`` only when nothing at all is known.
+    """
+    if not any(v is not None and w > 0 for w, v in parts):
+        return None
+    return _weighted([(w, NEUTRAL if v is None else v) for w, v in parts])
+
+
 # ---------------------------------------------------------------------------
 # Weights (FR-281 configurable, FR-285 learned)
 # ---------------------------------------------------------------------------
@@ -249,6 +343,11 @@ class ScoringContext:
     profile_skills: set[str] = field(default_factory=set)
     do_not_disclose: set[str] = field(default_factory=set)
     language: str = "en"
+    #: The seeker's skills as matchable terms: label -> its token-set spellings.
+    skill_terms: dict[str, list[frozenset[str]]] = field(default_factory=dict)
+    #: Token sets of every title the seeker is aiming at (dream model + directives).
+    role_titles: list[frozenset[str]] = field(default_factory=list)
+    _term_weights: dict[str, float] | None = None
     _companies: dict[str, dict] = field(default_factory=dict)
     _company_scores: dict[str, SubScore] = field(default_factory=dict)
     _reachability: dict[str, dict] = field(default_factory=dict)
@@ -267,6 +366,30 @@ class ScoringContext:
         if self._advisory is None:
             self._advisory = comp_mod.campaign_advisory(self.campaign_id)
         return self._advisory
+
+    @property
+    def term_weights(self) -> dict[str, float]:
+        """How distinctive each of the seeker's skills is, read once per run.
+
+        Inverse document frequency over the vacancy corpus: "Teamwork" or
+        "Sales" appears in a large share of adverts and says little about fit,
+        "FastAPI" or "Retrieval-augmented generation" appears in a few hundred
+        and says a lot.  Without a corpus every term weighs the same.
+        """
+        if self._term_weights is None:
+            # Phrase search needs the words in their written order, which the
+            # token sets in ``skill_terms`` no longer carry.
+            total, counts = repo.vacancy_term_frequencies(
+                {label: [list(s) for s in _term_spellings(label)] for label in self.skill_terms}
+            )
+            self._term_weights = {
+                label: (
+                    math.log((total + 1) / (counts[label] + 1)) if total and label in counts
+                    else 1.0
+                )
+                for label in self.skill_terms
+            }
+        return self._term_weights
 
     def company(self, company_id: str | None) -> dict | None:
         if not company_id:
@@ -344,6 +467,165 @@ def _block(row: dict | None, key: str) -> Any:
     return from_json(row.get(key), None)
 
 
+_TEXT_TOKEN_RE = re.compile(r"[\w+#.]+")
+_PAREN_RE = re.compile(r"\(([^)]*)\)")
+
+#: A skill label longer than this is a sentence ("Object-oriented analysis,
+#: design and component architecture"), not a term an advert would repeat.
+MAX_TERM_TOKENS = 4
+
+#: Title words that name a kind of job without saying which: on their own they
+#: make "Mechanical Design Engineer" look like "Software Design Engineer".
+_GENERIC_TITLE_WORDS = frozenset(
+    {
+        "engineer", "developer", "manager", "specialist", "consultant", "analyst", "lead",
+        "officer", "assistant", "medewerker", "employee", "design", "designer", "expert",
+        "technician", "coordinator", "head", "staff", "principal", "team", "member",
+        "development", "corporate", "business", "operation", "general",
+    }
+)
+
+
+def _text_tokens(text: Any) -> set[str]:
+    """Posting tokens for skill matching: keeps ``c#``/``node.js``, drops a full stop."""
+    return {
+        t.strip(".") for t in _TEXT_TOKEN_RE.findall(str(text or "").lower()) if t.strip(".")
+    }
+
+
+def _term_spellings(label: str) -> list[tuple[str, ...]]:
+    spellings = [tuple(t.strip(".") for t in _TEXT_TOKEN_RE.findall(label.lower()))]
+    for alias in SKILL_ALIASES.get(label.lower(), ()):
+        spellings.append(tuple(_TEXT_TOKEN_RE.findall(alias.lower())))
+    return [s for s in spellings if s and len(s) <= MAX_TERM_TOKENS and "".join(s).strip()]
+
+
+def _skill_terms(labels: Collection[str]) -> dict[str, list[frozenset[str]]]:
+    """The seeker's skills as terms an advert could contain.
+
+    Short labels are used as they are.  A long composite statement such as
+    "Full-stack web application delivery (Python/FastAPI, React, PostgreSQL)"
+    contributes the technologies in its brackets, which is where the
+    matchable words are.
+    """
+    pieces: list[str] = []
+    for label in labels:
+        text = str(label or "").strip()
+        if not text:
+            continue
+        pieces.append(text)
+        for inner in _PAREN_RE.findall(text):
+            pieces.extend(p.strip() for p in re.split(r"[,/;]| and ", inner) if p.strip())
+    terms: dict[str, list[frozenset[str]]] = {}
+    for piece in pieces:
+        key = piece.lower()
+        if key in terms:
+            continue
+        spellings = [
+            frozenset(s) for s in _term_spellings(piece)
+            if not (len(s) == 1 and len(s[0]) < 2)
+        ]
+        if spellings:
+            terms[key] = spellings
+    return terms
+
+
+def _title_tokens(text: Any) -> frozenset[str]:
+    """A title's content words, translated to English and lightly singularised."""
+    out: set[str] = set()
+    for raw in _TEXT_TOKEN_RE.findall(str(text or "").lower()):
+        for word in re.split(r"[-/]", raw.strip(".")):
+            word = _TITLE_TRANSLATIONS.get(word, word)
+            if len(word) < 2 or word in _STOPWORDS or word in _TITLE_NOISE:
+                continue
+            if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+                word = word[:-1]
+            out.add(word)
+    return frozenset(out)
+
+
+def _role_titles(
+    target_roles: list[Any], role_families: list[Any], directives: dir_mod.DirectiveSet | None
+) -> list[frozenset[str]]:
+    titles: list[str] = []
+    for role in target_roles:
+        titles.append(role.get("title", "") if isinstance(role, dict) else str(role))
+    for family in role_families:
+        if isinstance(family, dict):
+            titles.append(str(family.get("family") or ""))
+            titles.extend(str(t) for t in family.get("example_titles") or [])
+        else:
+            titles.append(str(family))
+    if directives is not None:
+        titles.extend(directives.job_content.all_titles())
+    return [tokens for tokens in map(_title_tokens, titles) if tokens]
+
+
+def title_relevance(opportunity: dict, ctx: ScoringContext) -> tuple[float | None, str]:
+    """How much of the posting's title is a role the seeker is aiming at.
+
+    Measured as the share of the *posting's* title words found in one target
+    title - "Full-Stack Engineer" is fully explained by "Senior Full-Stack
+    Software Engineer", an "administratief medewerker" not at all.  A match on
+    generic words only ("engineer", "design") counts for little.
+    """
+    if not ctx.role_titles:
+        return None, "no target roles to compare the title with"
+    title = _title_tokens(opportunity.get("title"))
+    if not title:
+        return None, "the posting has no usable title"
+    best, best_hits = 0.0, frozenset()
+    for wanted in ctx.role_titles:
+        hits = title & wanted
+        if not hits:
+            continue
+        coverage = len(hits) / len(title)
+        if not hits - _GENERIC_TITLE_WORDS:
+            coverage *= 0.4
+        if coverage > best:
+            best, best_hits = coverage, hits
+    if not best_hits:
+        return 0.0, "the title matches none of the target roles"
+    return best, f"title matches target-role words ({', '.join(sorted(best_hits)[:4])})"
+
+
+def posting_skill_evidence(
+    opportunity: dict, ctx: ScoringContext
+) -> tuple[float | None, list[str]]:
+    """How many of the seeker's distinctive skills the advert itself mentions.
+
+    The ``required_skills`` list is often empty or one item long; the advert
+    text almost never is.  Each matching skill counts by its specificity
+    (:attr:`ScoringContext.term_weights`) and the sum saturates, so three
+    distinctive skills already score well and fifty generic ones cannot.
+    """
+    if not ctx.skill_terms:
+        return None, []
+    text = " ".join(
+        [
+            str(opportunity.get("title") or ""),
+            str(opportunity.get("description") or "")[:8000],
+            " ".join(str(s) for s in opportunity.get("required_skills") or []),
+            " ".join(str(s) for s in opportunity.get("desirable_skills") or []),
+        ]
+    )
+    tokens = _text_tokens(text)
+    if len(tokens) < 5:
+        return None, []
+    weights = ctx.term_weights
+    hits = [
+        label for label, spellings in ctx.skill_terms.items()
+        if any(s <= tokens for s in spellings)
+    ]
+    ordered = sorted(weights.get(label, 1.0) for label in ctx.skill_terms)
+    median = ordered[len(ordered) // 2] if ordered else 1.0
+    scale = 3.0 * max(median, 1e-6)
+    raw = sum(weights.get(label, 1.0) for label in hits)
+    value = 1.0 - math.exp(-raw / scale)
+    hits.sort(key=lambda label: -weights.get(label, 1.0))
+    return value, hits
+
+
 def build_context(campaign: dict, *, language: str | None = None) -> ScoringContext:
     inputs = campaign_repo.load_planning_inputs(campaign)
     directive_row = inputs.get("directives")
@@ -364,11 +646,17 @@ def build_context(campaign: dict, *, language: str | None = None) -> ScoringCont
             if text:
                 skills.add(str(text).strip().lower())
 
+    directives = dir_mod.coerce_directive_set(directive_row) if directive_row else None
+    dream_roles = _block(dream, "target_roles") or []
+    dream_families = _block(dream, "role_families") or []
+
     return ScoringContext(
         job_seeker_id=seeker_id,
         campaign_id=campaign["id"],
         weights=load_weights(seeker_id),
-        directives=dir_mod.coerce_directive_set(directive_row) if directive_row else None,
+        directives=directives,
+        skill_terms=_skill_terms(skills),
+        role_titles=_role_titles(dream_roles, dream_families, directives),
         composite={
             "row": composite,
             "seniority": _block(composite, "seniority") or composite.get("seniority"),
@@ -424,7 +712,8 @@ def _skill_tokens(text: str) -> frozenset[str]:
     return frozenset(re.findall(r"[a-z0-9+#.]+", str(text or "").lower()))
 
 
-def _skill_overlap(required: list[str] | None, held: set[str]) -> float | None:
+def _skill_hits(required: list[str] | None, held: set[str]) -> tuple[int, int] | None:
+    """``(hits, listed)`` for a posting's skill list against the profile."""
     labels = [str(s).strip().lower() for s in (required or []) if str(s).strip()]
     if not labels:
         return None
@@ -439,7 +728,32 @@ def _skill_overlap(required: list[str] | None, held: set[str]) -> float | None:
         # is a subset of a held skill's tokens, or it is not a match.
         if any(key <= tokens for tokens in held_keys):
             hits += 1
-    return hits / len(labels)
+    return hits, len(labels)
+
+
+def _skill_overlap(required: list[str] | None, held: set[str]) -> float | None:
+    """The overlap, shrunk towards :data:`SKILL_PRIOR` when the list is short."""
+    counted = _skill_hits(required, held)
+    if counted is None:
+        return None
+    hits, listed = counted
+    return (hits + SKILL_PRIOR * SKILL_PRIOR_WEIGHT) / (listed + SKILL_PRIOR_WEIGHT)
+
+
+def _seeker_seniority(ctx: ScoringContext) -> tuple[int, int] | None:
+    """The band the seeker is *aiming at*, not the one they last held.
+
+    The directives say what they want; the composite profile says where they
+    have been.  Someone stepping back from a director title into hands-on
+    engineering - the case this was written for - was scored four bands away
+    from every senior engineering role because the composite came first.
+    """
+    if ctx.directives is not None:
+        content = ctx.directives.job_content
+        if content.seniority_min or content.seniority_max:
+            return content.seniority_range()
+    rank = _seniority_rank(ctx.composite.get("seniority"))
+    return None if rank is None else (rank, rank)
 
 
 def profile_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
@@ -451,9 +765,10 @@ def profile_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
     desirable = opportunity.get("desirable_skills") or []
     required_overlap = _skill_overlap(required, held)
     desirable_overlap = _skill_overlap(desirable, held)
-    if required_overlap is not None:
+    required_hits = _skill_hits(required, held)
+    if required_hits is not None:
         reasons.append(
-            f"{round(required_overlap * len(required))} of {len(required)} required skills "
+            f"{required_hits[0]} of {required_hits[1]} required skills "
             "are evidenced in the profile"
         )
     elif not held:
@@ -461,18 +776,26 @@ def profile_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
     else:
         reasons.append("the posting lists no required skills")
 
-    seeker_rank = _seniority_rank(ctx.composite.get("seniority"))
-    if seeker_rank is None and ctx.directives is not None:
-        low, high = ctx.directives.job_content.seniority_range()
-        seeker_rank = (low + high) // 2
+    evidence, evidence_hits = posting_skill_evidence(opportunity, ctx)
+    if evidence is not None:
+        reasons.append(
+            "the advert mentions " + ", ".join(evidence_hits[:5]) if evidence_hits
+            else "the advert mentions none of the profile's skills"
+        )
+
+    target = _seeker_seniority(ctx)
+    seeker_rank = None if target is None else (target[0] + target[1]) // 2
     opportunity_rank = _seniority_rank(opportunity.get("seniority"))
     seniority_score: float | None = None
-    if seeker_rank is not None and opportunity_rank is not None:
-        distance = abs(seeker_rank - opportunity_rank)
+    if target is not None and opportunity_rank is not None:
+        low, high = target
+        distance = 0 if low <= opportunity_rank <= high else min(
+            abs(opportunity_rank - low), abs(opportunity_rank - high)
+        )
         seniority_score = _clamp(1.0 - distance / 4.0)
         reasons.append(
-            "seniority matches" if distance == 0
-            else f"seniority is {distance} band(s) from the profile's level"
+            "seniority is within the target range" if distance == 0
+            else f"seniority is {distance} band(s) from the target range"
         )
 
     company = ctx.company(opportunity.get("company_id")) or {}
@@ -497,20 +820,22 @@ def profile_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
             else:
                 reasons.append("no overlap with the profile's recorded domains")
 
-    value = _weighted(
-        [
-            (0.50, required_overlap),
-            (0.15, desirable_overlap),
-            (0.20, seniority_score),
-            (0.15, domain_score),
-        ]
-    )
+    parts = {
+        "required_skill_overlap": required_overlap,
+        "desirable_skill_overlap": desirable_overlap,
+        "posting_skill_evidence": evidence,
+        "seniority_score": seniority_score,
+        "domain_score": domain_score,
+    }
+    value = _weighted_neutral([(PROFILE_FIT_PARTS[k], v) for k, v in parts.items()])
     return SubScore(
         value=value,
         reasons=reasons,
         detail={
             "required_skill_overlap": required_overlap,
             "desirable_skill_overlap": desirable_overlap,
+            "posting_skill_evidence": evidence,
+            "posting_skills_mentioned": evidence_hits[:12],
             "seniority_score": seniority_score,
             "seniority_rank_seeker": seeker_rank,
             "seniority_rank_opportunity": opportunity_rank,
@@ -979,10 +1304,42 @@ def compensation_fit(opportunity: dict, ctx: ScoringContext) -> SubScore:
     )
 
 
+#: An advert this many days old is treated as fully current ...
+FRESH_DAYS = 45
+#: ... and one this old as most likely filled.
+STALE_DAYS = 365
+STALE_FLOOR = 0.2
+
+
+def _advert_freshness(posted_at: Any) -> SubScore:
+    try:
+        when = datetime.fromisoformat(str(posted_at))
+    except (TypeError, ValueError):
+        return SubScore(0.8, ["advertised vacancy; posting date unknown"])
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    days = max((datetime.now(UTC) - when).days, 0)
+    if days <= FRESH_DAYS:
+        return SubScore(1.0, [f"advertised {days} day(s) ago"], {"age_days": days})
+    span = STALE_DAYS - FRESH_DAYS
+    value = max(STALE_FLOOR, 1.0 - (1.0 - STALE_FLOOR) * (days - FRESH_DAYS) / span)
+    return SubScore(
+        value,
+        [f"advertised {days} days ago; older adverts are often already filled"],
+        {"age_days": days},
+    )
+
+
 def plausibility_fit(opportunity: dict) -> SubScore:
-    """FR-281: plausibility, which only means something for speculative openings."""
+    """FR-281: plausibility - for a speculative opening, that it exists; for an
+    advertised vacancy, that it is *still* open.
+
+    An advert two years old was scored as certain to exist, so a 2024 posting
+    out-ranked this month's.  The age is read against today, so the number
+    moves slowly with time even on unchanged data; that drift is the point.
+    """
     if opportunity.get("kind") != KIND_SPECULATIVE:
-        return SubScore(1.0, ["this is an advertised vacancy; it certainly exists"])
+        return _advert_freshness(opportunity.get("posted_at"))
     value = opportunity.get("plausibility")
     if value is None:
         return SubScore(0.3, ["speculative opening with no plausibility score recorded"])
@@ -1256,8 +1613,17 @@ def dream_criteria(
                 status, explanation = "met", f"recorded as {actual}"
             elif _tokens(wanted) & _tokens(actual_text):
                 status, explanation = "partial", f"recorded as {actual}"
-            else:
+            elif len(_tokens(wanted)) <= 2:
+                # A short wanted value ("scale-up", "private") is a category, and
+                # a different recorded category really is a miss.
                 status, explanation = "violated", f"recorded as {actual}, not {wanted}"
+            else:
+                # A sentence ("Brussels or a remote arrangement") compared with a
+                # field ("BE", a legal-form line) shares no words without being
+                # contradicted by it; calling that a violation is a guess.
+                status, explanation = (
+                    "unknown", f"recorded as {actual}; cannot tell whether that meets it"
+                )
         criteria.append(
             _criterion(f"company_characteristic:{index}", label, status, explanation,
                        str(item.get("importance") or "strong"),
@@ -1295,8 +1661,12 @@ def dream_criteria(
             extra["blocked_by"] = "employer_not_disclosed"
         elif not hits:
             status, explanation = "unknown", f"nothing recorded either way about '{cue}'"
-        elif avoid:
+        elif avoid and len(hits) >= max(2, len(_tokens(cue)) // 2):
             status, explanation = "violated", f"{whose} mentions {named}"
+        elif avoid:
+            # One shared word ("technology") with a cue to avoid is not the
+            # thing being avoided; the bar is the same one "met" has to clear.
+            status, explanation = "unknown", f"{whose} only touches {named}"
         elif len(hits) >= max(1, len(_tokens(cue)) // 2):
             status, explanation = "met", f"{whose} mentions {named}"
         else:
@@ -1334,18 +1704,19 @@ def dream_criteria(
             explanation = f"{cannot_assess_because}, so this cannot be checked"
             extra = {"blocked_by": "employer_not_disclosed"}
         else:
+            # Only the title and the stated terms are checked, never the advert
+            # body.  A deal-breaker is usually written as a negation - "pure
+            # management roles with no hands-on design or development" - and
+            # token-matching it against a body fired on every advert that
+            # *offered* hands-on design and development, capping exactly the
+            # wanted roles at 10%.  Reading the body is the model's job.
             haystack = _tokens(
                 opportunity.get("title"),
-                advert,
                 opportunity.get("work_arrangement"),
                 opportunity.get("contract_type"),
-                # Skipped when the employer is not disclosed: this summary
-                # describes the agency, and a deal-breaker must never fire on
-                # facts about the wrong organisation.
-                company.get("business_summary"),
             )
             hits = _tokens(constraint) & haystack
-            if hits and len(hits) >= max(1, len(_tokens(constraint)) // 2):
+            if hits and len(hits) >= max(2, len(_tokens(constraint)) // 2):
                 status = "violated"
                 explanation = (
                     f"the role matches the excluded condition ({', '.join(sorted(hits)[:3])})"
@@ -1364,12 +1735,22 @@ def dream_criteria(
 
 
 def score_criteria(criteria: list[dict[str, Any]]) -> float | None:
-    """Turn the FR-383 meter into the deterministic dream-fit number."""
+    """Turn the FR-383 meter into the deterministic dream-fit number.
+
+    ``unknown`` counts as :data:`NEUTRAL` - not a violation (CR-405), but not
+    left out either: leaving it out let one "met" among thirty unknowns score
+    as a near-perfect fit.  ``cannot_assess`` stays out, as the meter promises.
+    """
     parts = [
-        (IMPORTANCE_WEIGHTS.get(c.get("importance", "strong"), 2.0), STATUS_VALUES[c["status"]])
+        (
+            IMPORTANCE_WEIGHTS.get(c.get("importance", "strong"), 2.0),
+            NEUTRAL if c.get("status") == "unknown" else STATUS_VALUES[c["status"]],
+        )
         for c in criteria
-        if c.get("status") in STATUS_VALUES
+        if c.get("status") in STATUS_VALUES or c.get("status") == "unknown"
     ]
+    if not any(c.get("status") in STATUS_VALUES for c in criteria):
+        return None
     value = _weighted(parts)
     if value is None:
         return None
@@ -1632,11 +2013,16 @@ def score_opportunity(
     }
 
     criteria = dream_criteria(opportunity, ctx, tag=tag)
-    deterministic_dream = score_criteria(criteria)
+    criteria_value = score_criteria(criteria)
+    title_value, title_note = title_relevance(opportunity, ctx)
+    # The title is the one thing every posting states and the clearest signal
+    # of what the job is; the criteria meter says how the rest lines up.
+    deterministic_dream = _weighted([(0.5, title_value), (0.5, criteria_value)])
     subscores["dream_fit"] = SubScore(
         deterministic_dream,
-        ["dream-job criteria assessed mechanically"],
-        {"criteria": len(criteria)},
+        [title_note, "dream-job criteria assessed mechanically"],
+        {"criteria": len(criteria), "title_relevance": title_value,
+         "criteria_score": criteria_value},
     )
 
     rationale: str | None = None
@@ -1644,35 +2030,56 @@ def score_opportunity(
     llm_extra: dict[str, Any] = {}
     if llm is not None:
         data = semantic_dream_fit(opportunity, ctx, subscores, criteria, llm, tag=tag)
-        if data is not None:
-            try:
-                semantic = _clamp(float(data.get("dream_fit")))
-            except (TypeError, ValueError):
-                semantic = None
-            if semantic is not None:
-                # The mechanical meter grounds the number; the model adjusts it.
-                blended = semantic if deterministic_dream is None else (
-                    0.6 * semantic + 0.4 * deterministic_dream
-                )
-                subscores["dream_fit"] = SubScore(
-                    blended,
-                    [
-                        str(data.get("dream_fit_reason") or "semantic match with the dream job"),
-                        "blended with the mechanical criteria assessment",
-                    ],
-                    {"semantic": semantic, "deterministic": deterministic_dream},
-                    method="llm+deterministic",
-                )
-                meter_method = "llm+deterministic"
-            criteria = _merge_criteria(criteria, data.get("criteria"))
-            rationale = str(data.get("rationale") or "").strip() or None
-            llm_extra = {
-                "strongest_match": str(data.get("strongest_match") or "").strip() or None,
-                "biggest_gap": str(data.get("biggest_gap") or "").strip() or None,
-            }
+    else:
+        # A rescore without a model (a weights change, a deterministic backfill)
+        # must not throw away the semantic judgement a previous run paid for.
+        data = _previous_semantic(opportunity)
+    if data is not None:
+        try:
+            semantic = _clamp(float(data.get("dream_fit")))
+        except (TypeError, ValueError):
+            semantic = None
+        if semantic is not None:
+            # The mechanical meter grounds the number; the model adjusts it.
+            blended = semantic if deterministic_dream is None else (
+                0.6 * semantic + 0.4 * deterministic_dream
+            )
+            subscores["dream_fit"] = SubScore(
+                blended,
+                [
+                    str(data.get("dream_fit_reason") or "semantic match with the dream job"),
+                    "blended with the mechanical criteria assessment",
+                ],
+                {"semantic": semantic, "deterministic": deterministic_dream,
+                 "title_relevance": title_value, "criteria_score": criteria_value,
+                 **({"carried_forward": True} if data.get("carried_forward") else {})},
+                method="llm+deterministic",
+            )
+            meter_method = "llm+deterministic"
+        criteria = _merge_criteria(criteria, data.get("criteria"))
+        rationale = str(data.get("rationale") or "").strip() or None
+        llm_extra = {
+            "strongest_match": str(data.get("strongest_match") or "").strip() or None,
+            "biggest_gap": str(data.get("biggest_gap") or "").strip() or None,
+        }
 
     weights = ctx.weights
-    overall = _weighted([(weights.get(name, 0.0), sub.value) for name, sub in subscores.items()])
+    gate = fit_gate(subscores, weights)
+    # A component that could not be assessed counts as neutral rather than
+    # dropping out: renormalising over what is left let the always-100%
+    # plausibility of an advertised vacancy carry agency rows whose company
+    # and pay were unknown to the top of the list.  The attractiveness of the
+    # employer then counts only as far as the job itself fits (see fit_gate).
+    overall = _weighted_neutral(
+        [
+            (
+                weights.get(name, 0.0),
+                sub.value if name not in GATED_COMPONENTS or sub.value is None
+                else sub.value * gate,
+            )
+            for name, sub in subscores.items()
+        ]
+    )
     if rationale is None:
         rationale = _fallback_rationale(opportunity, subscores, tag=tag)
 
@@ -1699,6 +2106,7 @@ def score_opportunity(
                 "partially_assessed": not tag.employer_disclosed,
             },
             "advisory": ADVISORY_NOTE,
+            "fit_gate": round(gate, 4),
             **llm_extra,
         },
         "scored_at": utcnow(),
@@ -1708,6 +2116,60 @@ def score_opportunity(
             None if sub.value is None else round(sub.value * 100, 1)
         )
     return columns
+
+
+#: Components that describe the employer or the package rather than the job.
+GATED_COMPONENTS = frozenset({"company", "compensation", "reachability"})
+
+#: The job fit (profile and dream) at which those components count in full.
+FIT_GATE_FULL = 0.6
+
+
+def fit_gate(subscores: dict[str, SubScore], weights: dict[str, float]) -> float:
+    """How much the employer's attractiveness may count for this row, 0..1.
+
+    A well-funded, well-paying, reachable employer is worth something only if
+    the job is one the seeker wants.  Without this, a corporate-development
+    post at a hiring scale-up out-ranked engineering roles on company and pay
+    alone.  Below :data:`FIT_GATE_FULL` the gated components shrink in
+    proportion to the fit.
+    """
+    fit = _weighted_neutral(
+        [
+            (weights.get("profile_fit", 0.0), subscores["profile_fit"].value),
+            (weights.get("dream_fit", 0.0), subscores["dream_fit"].value),
+        ]
+    )
+    if fit is None:
+        return NEUTRAL
+    return _clamp(fit / FIT_GATE_FULL)
+
+
+def _previous_semantic(opportunity: dict) -> dict[str, Any] | None:
+    """The model's earlier judgement on this row, in the shape a fresh call returns.
+
+    Only the semantic number, its reason and the narrative travel forward; the
+    criteria statuses are recomputed, because the mechanical rules they refine
+    may have changed since.
+    """
+    detail = from_json(opportunity.get("score_detail"), None)
+    if not isinstance(detail, dict):
+        return None
+    dream = (detail.get("components") or {}).get("dream_fit") or {}
+    if not str(dream.get("method") or "").startswith("llm"):
+        return None
+    semantic = (dream.get("detail") or {}).get("semantic")
+    if semantic is None:
+        return None
+    reasons = dream.get("reasons") or []
+    return {
+        "dream_fit": semantic,
+        "dream_fit_reason": reasons[0] if reasons else None,
+        "rationale": opportunity.get("rationale"),
+        "strongest_match": detail.get("strongest_match"),
+        "biggest_gap": detail.get("biggest_gap"),
+        "carried_forward": True,
+    }
 
 
 def _fallback_rationale(

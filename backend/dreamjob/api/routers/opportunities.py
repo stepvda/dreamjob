@@ -25,12 +25,13 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
+from dreamjob.db.connection import query_one
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.documents import package as package_module
 from dreamjob.jobs.runner import JobContext, runner
 from dreamjob.pipeline import compensation as comp_mod
-from dreamjob.pipeline import employer_product, scoring, speculative
+from dreamjob.pipeline import employer_product, locate, scoring, speculative
 from dreamjob.pipeline import opportunities as synth
 from dreamjob.security.audit import record_audit
 
@@ -241,6 +242,10 @@ def list_opportunities(
     pinned: bool | None = None,
     has_compensation: bool = False,
     exclude_not_interested: bool = False,
+    near_lat: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    near_lon: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    radius_km: Annotated[float | None, Query(gt=0, le=1000)] = None,
+    include_remote: bool = True,
     sort: str = "score",
     respect_manual_order: bool = True,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -250,11 +255,22 @@ def list_opportunities(
 
     ``respect_manual_order`` defaults to on: the job seeker's own positions come
     first, then pins, then the computed score (FR-284).
+
+    ``near_lat``/``near_lon``/``radius_km`` keep the opportunities placed within
+    that radius (FR-144); rows with no coordinates are left out, and the
+    response's ``location_coverage`` says how many that is.  Remote roles are
+    kept unless ``include_remote`` is false.
     """
     if sort not in repo.SORT_EXPRESSIONS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             f"sort must be one of {sorted(repo.SORT_EXPRESSIONS)}",
+        )
+    radius_parts = (near_lat, near_lon, radius_km)
+    if any(p is not None for p in radius_parts) and not all(p is not None for p in radius_parts):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "near_lat, near_lon and radius_km go together",
         )
     filters: dict[str, Any] = {
         "campaign_id": campaign_id,
@@ -275,12 +291,16 @@ def list_opportunities(
         "pinned": pinned,
         "has_compensation": has_compensation,
         "exclude_not_interested": exclude_not_interested,
+        "near_lat": near_lat,
+        "near_lon": near_lon,
+        "radius_km": radius_km,
+        "include_remote": include_remote,
     }
     rows = repo.list_opportunities(
         seeker.id, sort=sort, respect_manual_order=respect_manual_order,
         limit=limit, offset=offset, **filters,
     )
-    return {
+    out = {
         "items": [_present(r, seeker.locale) for r in rows],
         "total": repo.count_opportunities(seeker.id, **filters),
         "limit": limit,
@@ -289,6 +309,46 @@ def list_opportunities(
         "respect_manual_order": respect_manual_order,
         "advisory": scoring.ADVISORY_NOTE,
     }
+    if radius_km is not None:
+        out["location_coverage"] = locate.coverage(seeker.id)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Placing opportunities for the radius filter (FR-144)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/locate")
+async def locate_opportunities(seeker: Seeker) -> dict:
+    """Geocode the places on this seeker's opportunities, in the background.
+
+    One geocoder request per second and a month-long cache, so the first run
+    over a few hundred distinct places takes minutes and a re-run is quick.
+    """
+    job_id = runner.create("locate", job_seeker_id=seeker.id)
+
+    async def worker(ctx: JobContext) -> None:
+        report = await locate.locate_opportunities(seeker.id, progress=ctx.progress)
+        ctx.save_checkpoint(report=report)
+
+    await runner.start(job_id, worker)
+    return {"job_id": job_id, "status": "running", **locate.coverage(seeker.id)}
+
+
+@router.get("/locations")
+def location_coverage(seeker: Seeker, job_id: str | None = None) -> dict:
+    """How many opportunities a radius filter can judge, and whether a locate
+    run is still going."""
+    running = False
+    if job_id:
+        owned = query_one(
+            "SELECT id FROM job_run WHERE id = ? AND job_seeker_id = ?", (job_id, seeker.id)
+        )
+        if owned is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+        running = runner.is_running(job_id)
+    return {**locate.coverage(seeker.id), "running": running, "job_id": job_id}
 
 
 @router.get("/facets")

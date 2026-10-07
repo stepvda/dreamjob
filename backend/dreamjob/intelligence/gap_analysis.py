@@ -43,6 +43,7 @@ from dreamjob.intelligence.text import (
 )
 from dreamjob.llm.client import BudgetExhausted, LLMClient, LLMError
 from dreamjob.pipeline import directives as dir_mod
+from dreamjob.pipeline import scoring
 from dreamjob.pipeline.enrichment import default_llm, load_prompt
 
 log = logging.getLogger(__name__)
@@ -59,14 +60,10 @@ DIMENSIONS: tuple[str, ...] = (
     "visibility",
 )
 
-#: Mirrors the component weights inside ``scoring.profile_fit`` so that "points
-#: lost" is expressed in the units of the sub-score the seeker already sees.
-PROFILE_FIT_WEIGHTS = {
-    "required_skill_overlap": 0.50,
-    "desirable_skill_overlap": 0.15,
-    "seniority_score": 0.20,
-    "domain_score": 0.15,
-}
+#: The component weights inside ``scoring.profile_fit``, read from the scorer
+#: so that "points lost" is expressed in the units of the sub-score the seeker
+#: already sees and cannot drift from it.
+PROFILE_FIT_WEIGHTS = scoring.PROFILE_FIT_PARTS
 
 #: Seniority levels that evidence leadership scope (composite ``seniority``).
 LEADERSHIP_LEVELS = frozenset({"lead", "manager", "senior_manager", "director", "executive"})
@@ -480,28 +477,27 @@ def load_inputs(job_seeker_id: str, campaign_id: str | None = None) -> GapInputs
 # ---------------------------------------------------------------------------
 
 
-def _present_weight_sum(posting: Posting, fallback: tuple[str, ...]) -> float:
-    """Sum of the profile-fit component weights that actually scored.
+def _weight_sum() -> float:
+    """The profile-fit denominator.
 
-    ``scoring._weighted`` normalises over the components that had a value, so
-    a posting with no listed desirable skills gives its required-skill overlap
-    more than half the sub-score.  Using the same denominator keeps "points
-    lost" truthful rather than merely indicative.
+    ``scoring.profile_fit`` counts a part it could not assess as neutral
+    rather than leaving it out, so every part is always in the denominator;
+    using the same one keeps "points lost" truthful rather than indicative.
     """
-    detail = posting.profile_fit_detail
-    present = [k for k, w in PROFILE_FIT_WEIGHTS.items() if detail.get(k) is not None]
-    if not present:
-        present = list(fallback)
-    return sum(PROFILE_FIT_WEIGHTS[k] for k in present) or 1.0
+    return sum(PROFILE_FIT_WEIGHTS.values()) or 1.0
 
 
 def _skill_points_lost(posting: Posting) -> float:
-    """Profile-fit points one missing required skill costs this posting."""
+    """Profile-fit points one missing required skill costs this posting.
+
+    The scorer shrinks the overlap towards a prior with
+    ``SKILL_PRIOR_WEIGHT`` pseudo-skills, so one skill moves it by
+    ``1 / (listed + SKILL_PRIOR_WEIGHT)``.
+    """
     if not posting.required:
         return 0.0
-    denominator = _present_weight_sum(posting, ("required_skill_overlap",))
-    share = 1.0 / len(posting.required)
-    return 100.0 * PROFILE_FIT_WEIGHTS["required_skill_overlap"] * share / denominator
+    share = 1.0 / (len(posting.required) + scoring.SKILL_PRIOR_WEIGHT)
+    return 100.0 * PROFILE_FIT_WEIGHTS["required_skill_overlap"] * share / _weight_sum()
 
 
 def _seniority_points_lost(posting: Posting) -> float:
@@ -509,7 +505,7 @@ def _seniority_points_lost(posting: Posting) -> float:
     seniority_score = detail.get("seniority_score")
     if seniority_score is None:
         return 0.0
-    denominator = _present_weight_sum(posting, ("seniority_score",))
+    denominator = _weight_sum()
     return (
         100.0 * PROFILE_FIT_WEIGHTS["seniority_score"] * (1.0 - float(seniority_score))
         / denominator

@@ -1296,3 +1296,27 @@ def test_scoring_reads_the_employer_rating_from_the_campaigns_own_snapshots(db):
     assert any("employer review rating 4.2/5" in r for r in with_snapshots.reasons)
     # FR-265: advisory only - it is one visible component, never the score.
     assert any("advisory only" in r for r in with_snapshots.reasons)
+
+
+def test_the_area_filter_keeps_what_lies_within_the_radius(db):
+    """FR-144: a place and a radius cut the list; unplaced rows are left out."""
+    seeker_id, campaign, _company_id = _scored_campaign()
+    row = repo.list_opportunities(seeker_id, campaign_id=campaign["id"])[0]
+    brussels = {"near_lat": 50.8503, "near_lon": 4.3517}
+
+    # Not placed yet: a radius cannot judge it.
+    assert repo.count_opportunities(seeker_id, radius_km=30, **brussels) == 0
+
+    update_row("opportunity", row["id"], {"latitude": 51.0543, "longitude": 3.7174})  # Ghent
+    assert repo.count_opportunities(seeker_id, radius_km=30, **brussels) == 0
+    assert repo.count_opportunities(seeker_id, radius_km=60, **brussels) == 1
+
+    # A remote role has no office to measure, and is kept unless asked not to.
+    update_row(
+        "opportunity", row["id"],
+        {"latitude": None, "longitude": None, "work_arrangement": "remote"},
+    )
+    assert repo.count_opportunities(seeker_id, radius_km=30, **brussels) == 1
+    assert repo.count_opportunities(
+        seeker_id, radius_km=30, include_remote=False, **brussels
+    ) == 0

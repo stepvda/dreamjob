@@ -389,9 +389,9 @@ def test_gap_analysis_produces_actionable_gaps(campaign):
     titles = {link.title for link in kubernetes.decisive_opportunities}
     assert titles == {"Data Platform Lead", "Senior Data Engineer"}
 
-    # One skill of three missing costs a third of the required-skill overlap,
-    # which is the whole of the profile-fit sub-score here.
-    assert kubernetes.decisive_opportunities[0].points_lost == pytest.approx(33.3, abs=0.5)
+    # One skill of three missing moves the shrunk required-skill overlap by
+    # 1 / (3 + SKILL_PRIOR_WEIGHT), and that part is 30% of profile fit.
+    assert kubernetes.decisive_opportunities[0].points_lost == pytest.approx(6.0, abs=0.5)
 
 
 def test_gap_analysis_links_only_where_the_gap_bites(campaign):
