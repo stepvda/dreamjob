@@ -385,6 +385,19 @@ async def _run_continuous() -> dict[str, Any]:
     return await continuous.run_phase()
 
 
+async def _run_geolocation() -> dict[str, Any]:
+    """Keep placing new opportunities on the map (FR-144).
+
+    Synthesis places what it can from known towns; the rest waits for the
+    geocoder at one request per second, which is far too slow to do inline.
+    This only starts (or resumes) the ``geolocate`` job when rows wait - the
+    job runs in the pool, so the scheduler loop is never held by it.
+    """
+    from dreamjob.pipeline import locate  # noqa: PLC0415 - avoids an import cycle
+
+    return await locate.ensure_running()
+
+
 async def _run_learning() -> dict[str, Any]:
     """Tell a seeker when outcome learning has enough evidence to apply (FR-425).
 
@@ -443,6 +456,8 @@ DEFAULT_TASKS: list[Task] = [
          "Enrich the employers behind the opportunities (FR-221..246, FR-341)"),
     Task("continuous_collection", 300, _run_continuous,
          "Expand the shared data corpus while enabled"),
+    Task("geolocation", 120, _run_geolocation,
+         "Place new opportunities on the map for the radius filter (FR-144)"),
     Task("follow_ups", HOUR, _run_follow_ups,
          "Notify about follow-ups whose date has passed (FR-327)"),
     Task("learning", 24 * HOUR, _run_learning,

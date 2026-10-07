@@ -36,6 +36,7 @@ from dreamjob.db.connection import from_json, query_all
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.pipeline import directives as dir_mod
+from dreamjob.pipeline import locate
 from dreamjob.pipeline import signals as signals_mod
 from dreamjob.pipeline import taxonomy as tax
 from dreamjob.pipeline.skills import normalise_labels
@@ -277,6 +278,10 @@ def normalise_vacancy(
 
     Nothing is invented: a field the posting does not state and the text does
     not imply stays ``None``, and the caller can see that in the record.
+
+    The record is placed on the map from what is already known (FR-144) -
+    before the directive gate, so a posting with no country but a known town
+    can still be shown to lie inside the seeker's area.
     """
     title = (vacancy.get("title") or "").strip()
     description = vacancy.get("description") or ""
@@ -289,7 +294,7 @@ def normalise_vacancy(
     salary_max = vacancy.get("salary_max")
     stated = salary_min is not None or salary_max is not None
 
-    return {
+    record = {
         "kind": KIND_VACANCY,
         "company_id": vacancy.get("company_id") or (company or {}).get("id"),
         "vacancy_id": vacancy.get("id"),
@@ -325,6 +330,7 @@ def normalise_vacancy(
         "speculative_rationale": None,
         "language": vacancy.get("language"),
     }
+    return locate.place_now(record, company)
 
 
 # ---------------------------------------------------------------------------

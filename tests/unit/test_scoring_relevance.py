@@ -238,10 +238,10 @@ def test_a_prominent_place_beats_the_rows_country_hint(monkeypatch):
 
     async def fake(query, *, country_codes=None, egress=None, **_):
         if country_codes:
-            return result("BE", 0.2)        # a Belgian street called Barcelona
-        return result("ES", 0.8) if query == "Barcelona" else result("NL", 0.3)
+            return [result("BE", 0.2)]      # a Belgian street called Barcelona
+        return [result("ES", 0.8) if query == "Barcelona" else result("NL", 0.3)]
 
-    monkeypatch.setattr(geo, "geocode", fake)
+    monkeypatch.setattr(geo, "search", fake)
     city = asyncio.run(locate._resolve("Barcelona", ["BE"], None))
     assert city.country_code == "ES"
     # An obscure place abroad loses to the country-restricted match.
@@ -257,9 +257,9 @@ def test_a_place_missing_from_the_hinted_country_is_found_abroad(monkeypatch):
 
     async def fake(query, *, country_codes=None, egress=None, **_):
         if country_codes:
-            return None
-        return geo.GeocodeResult(query=query, display_name="Almere", latitude=52.37,
-                                 longitude=5.21, country_code="NL", importance=0.45)
+            return []
+        return [geo.GeocodeResult(query=query, display_name="Almere", latitude=52.37,
+                                  longitude=5.21, country_code="NL", importance=0.45)]
 
-    monkeypatch.setattr(geo, "geocode", fake)
+    monkeypatch.setattr(geo, "search", fake)
     assert asyncio.run(locate._resolve("Almere", ["BE"], None)).country_code == "NL"

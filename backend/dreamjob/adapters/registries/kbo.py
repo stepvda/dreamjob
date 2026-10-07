@@ -237,6 +237,51 @@ def _labelled(text: str, *labels: str) -> str | None:
     return None
 
 
+_SEAT_LABELS = (
+    "Registered seat's address:",
+    "Address of the seat:",
+    "Adres van de zetel:",
+    "Adres van de maatschappelijke zetel:",
+    "Adresse du siège:",
+    "Adresse du siège social:",
+)
+#: The second line of a Belgian address: the postcode and the municipality.
+_POSTCODE_LINE = re.compile(r"^(\d{4})\s+(\S.*)$")
+
+
+def _seat(text: str) -> dict[str, str] | None:
+    """The registered seat, street *and* town (FR-144).
+
+    The register lays the seat out over two lines - "Steenhouwersvest 11",
+    then "2000 Antwerpen".  Read as a label/value row it kept only the street,
+    which names a dozen places in Belgium; the town line is what says which.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        label = next(
+            (lb for lb in _SEAT_LABELS if line.lower().startswith(lb.lower())), None
+        )
+        if label is None:
+            continue
+        following = [ln.strip() for ln in lines[index + 1:index + 3]]
+        street = line[len(label):].lstrip(" :\t").strip() or (
+            following.pop(0) if following else ""
+        )
+        if not street:
+            return None
+        town = _POSTCODE_LINE.match(following[0]) if following else None
+        if town is None:
+            return {"kind": "seat", "address": street}
+        postcode, municipality = town.group(1), town.group(2).strip()
+        return {
+            "kind": "seat",
+            "address": f"{street}, {postcode} {municipality}",
+            "postcode": postcode,
+            "city": municipality,
+        }
+    return None
+
+
 @dataclass(frozen=True)
 class EntityMatch:
     """What the exact-name gate concluded about one phonetic hit list.
@@ -487,15 +532,7 @@ class KBOAdapter(RegistryAdapter):
 
         status_raw = (_labelled(text, "Status:", "Toestand:", "Statut:") or "").lower()
         legal_form = _labelled(text, "Legal form:", "Rechtsvorm:", "Forme légale:")
-        address = _labelled(
-            text,
-            "Registered seat's address:",
-            "Address of the seat:",
-            "Adres van de zetel:",
-            "Adres van de maatschappelijke zetel:",
-            "Adresse du siège:",
-            "Adresse du siège social:",
-        )
+        seat = _seat(text)
         start_date = _labelled(text, "Start date:", "Begindatum:", "Date de début:")
         nace = sorted({code for code in re.findall(r"\b\d{2}\.\d{2,3}\b", text)})
 
@@ -508,7 +545,7 @@ class KBOAdapter(RegistryAdapter):
             source=f"{KBO_PUBLIC_SEARCH}?ondernemingsnummer={number}",
             vat_number=f"BE{number}",
             sector_codes=nace or None,
-            locations=[{"kind": "seat", "address": address}] if address else None,
+            locations=[seat] if seat else None,
             business_summary=self._summary(legal_form, status_raw, start_date),
             stage="nonprofit" if legal_form and "asbl" in legal_form.lower() else None,
             ownership=None,

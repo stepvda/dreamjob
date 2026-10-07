@@ -60,11 +60,15 @@ GEOCODE_CACHE_TTL_SECONDS = 30 * 24 * 3600
 # global would therefore have worked in the API and raised "bound to a
 # different event loop" inside the first collection job that geocoded
 # anything.  The pacing below stays global, which is what Nominatim's policy
-# is about: ``_last_request_at`` is shared, so one request per second is
-# honoured across every loop in the process, not once per loop.
+# is about: ``_next_slot`` is shared, so one request per second is honoured
+# across every loop in the process, not once per loop.  It is reserved under a
+# thread lock, because the per-loop locks do not exclude one another: the
+# placement job and a request handler, each on its own loop, would otherwise
+# both read the same timestamp and both decide the second was theirs.
 _pace_locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
 _pace_locks_guard = threading.Lock()
-_last_request_at = 0.0
+_slot_guard = threading.Lock()
+_next_slot = 0.0
 
 
 def _pace_lock_for_this_loop() -> asyncio.Lock:
@@ -96,6 +100,9 @@ class GeocodeResult(BaseModel):
     longitude: float
     country_code: str | None = None
     place_type: str | None = None
+    #: Nominatim's own measure of how big the place is: 4 a country, 8 a
+    #: region or province, 14-16 a town, 21 a postcode, 26+ a street or a house.
+    place_rank: int | None = None
     osm_id: str | None = None
     importance: float | None = None
     bounding_box: list[float] | None = None
@@ -216,19 +223,29 @@ def _geocoder_client() -> EgressClient:
 async def _paced_fetch(client: EgressClient, url: str) -> Any:
     """Fetch under the one-request-per-second rule.
 
-    The lock is held across the request rather than only before it, so two
-    concurrent callers cannot both decide the second is free.  A response
-    served from the HTTP cache costs the operator nothing, so it does not
-    consume the rate budget and does not delay the next real request.
+    Each caller reserves the next free second before it waits, so callers on
+    different loops queue behind one another instead of reading the same
+    timestamp.  A response served from the HTTP cache costs the operator
+    nothing: its second is handed back when nobody has queued behind it, so it
+    does not delay the next real request.
     """
-    global _last_request_at
+    global _next_slot
     async with _pace_lock_for_this_loop():
-        elapsed = time.monotonic() - _last_request_at
-        if elapsed < MIN_REQUEST_INTERVAL_SECONDS:
-            await asyncio.sleep(MIN_REQUEST_INTERVAL_SECONDS - elapsed)
+        with _slot_guard:
+            now = time.monotonic()
+            slot = max(now, _next_slot)
+            _next_slot = reserved = slot + MIN_REQUEST_INTERVAL_SECONDS
+        if slot > now:
+            await asyncio.sleep(slot - now)
         result = await client.fetch(url, access_method="api")
-        if not result.from_cache:
-            _last_request_at = time.monotonic()
+        with _slot_guard:
+            if result.from_cache:
+                if _next_slot == reserved:
+                    _next_slot = slot
+            else:
+                # A second from when the answer arrived, not from when it was
+                # asked: a slow response must not let the next one in early.
+                _next_slot = max(_next_slot, time.monotonic() + MIN_REQUEST_INTERVAL_SECONDS)
         return result
 
 
@@ -238,8 +255,33 @@ def _memoise(key: str, payload: list[dict[str, Any]]) -> None:
     _memo[key] = payload
 
 
-async def _call(path: str, params: dict[str, Any], egress: EgressClient | None) -> list[dict]:
-    """One Nominatim call.  Returns ``[]` rather than raising (NFR-104)."""
+class GeocoderUnavailable(Exception):
+    """The geocoder could not answer - offline, rate-limited or failing.
+
+    Only raised to a caller that asked with ``strict=True``.  Everyone else
+    gets the empty answer NFR-104 promises; a caller that *records* answers
+    needs to tell "no such place" apart from "nobody asked", or one outage
+    files every place it was working through as unplaceable.
+    """
+
+
+class _Unanswered(Exception):
+    pass
+
+
+async def _call(
+    path: str,
+    params: dict[str, Any],
+    egress: EgressClient | None,
+    *,
+    strict: bool = False,
+) -> list[dict]:
+    """One Nominatim call.  Returns ``[]`` rather than raising (NFR-104).
+
+    With ``strict``, a call the geocoder did not answer raises
+    :class:`GeocoderUnavailable` instead.  Either way an unanswered call is not
+    memoised, so the next attempt asks again.
+    """
     settings = get_settings()
     query = {k: v for k, v in params.items() if v not in (None, "", [])}
     query.setdefault("format", "jsonv2")
@@ -253,6 +295,10 @@ async def _call(path: str, params: dict[str, Any], egress: EgressClient | None) 
         result = await _paced_fetch(client, url)
         if not result.ok:
             log.info("Geocoder returned HTTP %s for %s", result.status_code, params.get("q"))
+            # 429 and 5xx are the geocoder not answering; any other refusal is
+            # its answer to this query.
+            if result.status_code == 429 or (result.status_code or 0) >= 500:
+                raise _Unanswered(f"HTTP {result.status_code}")
             return []
         import json  # noqa: PLC0415 - local, the response is small
 
@@ -269,10 +315,19 @@ async def _call(path: str, params: dict[str, Any], egress: EgressClient | None) 
                 payload = await _fetch(client)
     except Exception as exc:  # noqa: BLE001 - offline or blocked: degrade, never fail
         log.info("Geocoding unavailable (%s): %s", type(exc).__name__, exc)
+        if strict:
+            raise GeocoderUnavailable(str(exc) or type(exc).__name__) from exc
         return []
 
     _memoise(url, payload)
     return payload
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_result(query: str, row: dict[str, Any]) -> GeocodeResult | None:
@@ -289,6 +344,7 @@ def _to_result(query: str, row: dict[str, Any]) -> GeocodeResult | None:
         longitude=longitude,
         country_code=(address.get("country_code") or "").upper() or None,
         place_type=row.get("addresstype") or row.get("type"),
+        place_rank=_as_int(row.get("place_rank")),
         osm_id=f"{row.get('osm_type', '')}/{row.get('osm_id', '')}".strip("/") or None,
         importance=float(row["importance"]) if row.get("importance") is not None else None,
         bounding_box=[float(v) for v in box] if isinstance(box, list) and len(box) == 4 else None,
@@ -302,8 +358,13 @@ async def search(
     country_codes: list[str] | None = None,
     language: str = "en",
     egress: EgressClient | None = None,
+    strict: bool = False,
 ) -> list[GeocodeResult]:
-    """Auto-complete candidates for a place (FR-144).  Empty when unavailable."""
+    """Auto-complete candidates for a place (FR-144).  Empty when unavailable.
+
+    ``strict`` raises :class:`GeocoderUnavailable` instead, for callers that
+    record the answer.
+    """
     text = (query or "").strip()
     if len(text) < 2:
         return []
@@ -317,6 +378,7 @@ async def search(
             "countrycodes": ",".join(c.lower() for c in country_codes) if country_codes else None,
         },
         egress,
+        strict=strict,
     )
     out = [_to_result(text, row) for row in rows]
     return [r for r in out if r is not None]
@@ -328,10 +390,12 @@ async def geocode(
     country_codes: list[str] | None = None,
     language: str = "en",
     egress: EgressClient | None = None,
+    strict: bool = False,
 ) -> GeocodeResult | None:
     """Resolve one place name to coordinates, or ``None`` if it cannot be resolved."""
     results = await search(
-        query, limit=1, country_codes=country_codes, language=language, egress=egress
+        query, limit=1, country_codes=country_codes, language=language, egress=egress,
+        strict=strict,
     )
     return results[0] if results else None
 
