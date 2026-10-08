@@ -39,6 +39,7 @@ import Icon from '../components/Icon'
 import WorkflowMap from '../components/WorkflowMap'
 import { ErrorBox, JobProgress, Loading, useFetch } from '../components/ui'
 
+import InternshipTerms from './apply/InternshipTerms'
 import JobList from './apply/JobList'
 import PackageDetail from '../components/package/PackageDetail'
 import { BulkApprovalModal, SendAllModal } from '../components/package/Modals'
@@ -83,6 +84,7 @@ export default function ApplyBrowserPage() {
   }, [query])
 
   const guard = useFetch(() => applyApi.sendStatus(), [])
+  const internship = useFetch(() => applyApi.internship(), [])
 
   const filterKey = filters.join(',')
   const list = useFetch(
@@ -378,6 +380,14 @@ export default function ApplyBrowserPage() {
         </FirstRun>
       ) : (
         <>
+          <InternshipTerms
+            saved={internship.data}
+            loading={internship.loading}
+            onSave={async (terms) => {
+              internship.setData(await applyApi.saveInternship(terms))
+            }}
+          />
+
           <div className="row row-wrap" style={{ marginBottom: 12, gap: 8 }}>
             <button
               className="btn"

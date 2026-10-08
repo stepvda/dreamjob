@@ -40,7 +40,7 @@ import importlib
 import inspect
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
@@ -52,6 +52,7 @@ from dreamjob.db.repositories import apply as apply_repo
 from dreamjob.db.repositories import contacts as contact_repo
 from dreamjob.db.repositories import dispatch as dispatch_repo
 from dreamjob.db.repositories import opportunities as opportunities_repo
+from dreamjob.documents import internship as internship_terms
 from dreamjob.documents import package as package_module
 from dreamjob.documents.package import GenerationError, GenerationOptions, NeverSent
 from dreamjob.jobs.runner import JobContext, runner
@@ -150,6 +151,15 @@ class RegenerateIn(BaseModel):
     cv_template: str | None = None
     contact_id: str | None = None
     use_llm: bool = True
+
+
+class InternshipIn(BaseModel):
+    """Whether applications ask for an internship, and on what terms."""
+
+    internship: bool = False
+    duration_months: int | None = Field(None, ge=1, le=internship_terms.MAX_DURATION_MONTHS)
+    start_month: str | None = Field(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    pay: Literal["paid", "unpaid", "either"] = "either"
 
 
 class SendIn(BaseModel):
@@ -620,6 +630,31 @@ async def generate_packages(
 
     await runner.start(job_id, worker)
     return {"job_id": job_id, "kind": "apply_generation", "count": len(ids)}
+
+
+# ---------------------------------------------------------------------------
+# Internship terms - read by every e-mail generated after they are saved
+# ---------------------------------------------------------------------------
+
+
+def _internship_view(pref: dict[str, Any]) -> dict[str, Any]:
+    # The sentence is shown on the screen exactly as the generator will write it.
+    return {**pref, "preview": internship_terms.sentence(pref, "en")}
+
+
+@router.get("/preferences/internship")
+def get_internship(seeker: CurrentSeeker = Depends(current_seeker)) -> dict[str, Any]:
+    return _internship_view(packages_repo.internship_preference(seeker.id))
+
+
+@router.put("/preferences/internship")
+def put_internship(
+    payload: InternshipIn, seeker: CurrentSeeker = Depends(current_seeker)
+) -> dict[str, Any]:
+    """Saved for the seeker; packages already generated keep their text until regenerated."""
+    return _internship_view(
+        packages_repo.set_internship_preference(seeker.id, payload.model_dump())
+    )
 
 
 # ---------------------------------------------------------------------------

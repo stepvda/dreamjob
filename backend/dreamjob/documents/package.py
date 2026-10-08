@@ -383,10 +383,16 @@ def run_consistency(
 
     corpus = repo.provenance_corpus(job_seeker_id, opportunity_id)
     lang = normalise_language(package.get("language") or "en")
-    # Wording the system itself writes: the email scaffolding and the month
-    # names the CV templates render dates with (NFR-206 - known origin).
+    # Wording the system itself writes: the email scaffolding, the internship
+    # terms the seeker chose, and the month names the CV templates render dates
+    # with (NFR-206 - known origin).
     corpus["boilerplate"] = "\n".join(
-        [intro_email.scaffolding(lang), *MONTH_ABBREVIATIONS[lang], label(lang, "cv_present")]
+        [
+            intro_email.scaffolding(lang),
+            str((notes.get("email") or {}).get("internship") or ""),
+            *MONTH_ABBREVIATIONS[lang],
+            label(lang, "cv_present"),
+        ]
     )
     extra = {}
     if package.get("email_body"):

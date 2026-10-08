@@ -1,9 +1,9 @@
 ---
 id: introduction_email
-version: 1.0.0
+version: 1.1.0
 task: generate.email
 model_preference: strong
-updated: 2026-09-08
+updated: 2026-10-08
 requirements: FR-321, FR-323, NFR-205, NFR-206, NFR-302, CR-405
 description: >
   The introduction email that is actually sent, with the tailored CV attached.
@@ -43,6 +43,8 @@ The recipient is {{recipient}}.
 
 The tailored CV this email accompanies:
 {{cv_summary}}
+
+{{internship_rule}}
 
 The opening is in the untrusted block `opening`, and what is known about the
 company is in the untrusted block `company`.
