@@ -1,0 +1,62 @@
+# Continuous integration for Dream Job.
+#
+# Runs on GitHub-hosted runners for every push and pull request.  It is also
+# the gate for continuous deployment: the server (macstudio) polls main and
+# deploys a commit only once every check run of this workflow on that commit
+# has succeeded - see ops/autodeploy.sh.  Nothing here runs on the server, and
+# no secret is needed: the repository is public, and a self-hosted runner on a
+# public repository would let a pull request run code on the production host.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock
+      - name: Install dependencies
+        # The versions production runs; see requirements.lock.
+        run: python -m pip install -r requirements.txt -c requirements.lock
+      - name: Unit tests
+        run: python -m pytest -q tests/unit
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build

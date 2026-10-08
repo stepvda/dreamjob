@@ -887,8 +887,12 @@ def test_follow_up_falls_due_and_threads_under_the_original(world):
     parent = repo.get_dispatch(sent["dispatch_id"], world["seeker_id"])
     assert parent["follow_up_due_at"]
 
-    # Nothing is due yet.
-    assert dispatcher.due_follow_ups(world["seeker_id"]) == []
+    # Nothing is due yet - asked on the test's own clock, five minutes after
+    # sending.  Asked on the wall clock, this went false five days after
+    # 2026-09-09 and stayed false.
+    assert dispatcher.due_follow_ups(
+        world["seeker_id"], now=datetime(2026, 9, 9, 7, 35, tzinfo=UTC)
+    ) == []
 
     update_row(
         "dispatch",
