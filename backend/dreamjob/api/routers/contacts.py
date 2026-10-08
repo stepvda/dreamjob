@@ -426,6 +426,19 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
 
     options = body.model_dump()
     options.pop("campaign_id", None)
+    # Once every company still lacking a contact was attempted inside the
+    # freshness window - which the continuous loop's own discovery ticks bring
+    # about within a week - the backoff selects nothing and the pass "finished"
+    # having visited no company at all.  The loop answers that by retrying the
+    # recent no-contact verdicts; the button does the same, keeping the
+    # no-contact filter, rather than reporting an empty success.
+    retried_recent = False
+    if body.scope == "all" and not body.refresh and not body.retry_recent:
+        normal_pool = await asyncio.to_thread(
+            apply_repo.all_companies_for_contact, 1, job_seeker_id=seeker.id
+        )
+        if not normal_pool:
+            options["retry_recent"] = retried_recent = True
     # ``shortlist`` counts vacancies; ``all`` counts companies.  Once the pool
     # is the whole company table, ``max_companies`` is the ceiling that
     # matters, so the estimate follows the smaller of the two.
@@ -452,6 +465,7 @@ async def discover_contacts_for_seeker(body: DiscoverAllRequest, seeker: Seeker)
         "scope": body.scope,
         "limit": body.limit,
         "reused": False,
+        "retry_recent": retried_recent,
     }
 
 

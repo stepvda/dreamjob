@@ -186,6 +186,7 @@ function ContactList() {
         job: null,
         done: false,
         reused: started.reused === true,
+        retryRecent: started.retry_recent === true,
         startedAt: Date.now(),
         scope,
         limit,
@@ -317,6 +318,12 @@ function ContactList() {
                 Continuing the run already in progress.
               </p>
             )}
+            {batch.retryRecent && (
+              <p className="small muted" style={{ margin: '0 0 8px' }}>
+                Every company without a contact was already tried in the last week, so this pass
+                tries them again.
+              </p>
+            )}
             <JobProgress
               report={batch.job?.report}
               job={
@@ -338,6 +345,13 @@ function ContactList() {
                     {batch.job.report.companies_unreachable || 0} companies with
                     nothing found · {batch.job.report.vacancies_covered || 0}{' '}
                     vacancies newly covered
+                    {batch.done && !batch.job.report.requested && (
+                      <>
+                        {' '}
+                        — there were no companies to visit: every company in the database already
+                        has a contact.
+                      </>
+                    )}
                   </>
                 ) : (
                   <>
