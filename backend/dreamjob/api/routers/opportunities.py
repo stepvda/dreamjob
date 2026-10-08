@@ -25,7 +25,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from dreamjob.api.deps import CurrentSeeker, current_seeker, owned_or_404
-from dreamjob.db.connection import query_one
 from dreamjob.db.repositories import campaigns as campaign_repo
 from dreamjob.db.repositories import opportunities as repo
 from dreamjob.documents import package as package_module
@@ -319,36 +318,15 @@ def list_opportunities(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/locate")
-async def locate_opportunities(seeker: Seeker) -> dict:
-    """Geocode the places on this seeker's opportunities, in the background.
-
-    One geocoder request per second and a month-long cache, so the first run
-    over a few hundred distinct places takes minutes and a re-run is quick.
-    """
-    job_id = runner.create("locate", job_seeker_id=seeker.id)
-
-    async def worker(ctx: JobContext) -> None:
-        report = await locate.locate_opportunities(seeker.id, progress=ctx.progress)
-        ctx.save_checkpoint(report=report)
-
-    await runner.start(job_id, worker)
-    return {"job_id": job_id, "status": "running", **locate.coverage(seeker.id)}
-
-
 @router.get("/locations")
-def location_coverage(seeker: Seeker, job_id: str | None = None) -> dict:
-    """How many opportunities a radius filter can judge, and whether a locate
-    run is still going."""
-    running = False
-    if job_id:
-        owned = query_one(
-            "SELECT id FROM job_run WHERE id = ? AND job_seeker_id = ?", (job_id, seeker.id)
-        )
-        if owned is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-        running = runner.is_running(job_id)
-    return {**locate.coverage(seeker.id), "running": running, "job_id": job_id}
+def location_coverage(seeker: Seeker) -> dict:
+    """How many opportunities a radius filter can judge (FR-144).
+
+    Placement is automatic (``pipeline.locate``): ``pending`` rows are still
+    waiting for the geocoder, ``unplaced`` ones name no place that can be
+    measured from - only a country, or nothing.
+    """
+    return locate.coverage(seeker.id)
 
 
 @router.get("/facets")

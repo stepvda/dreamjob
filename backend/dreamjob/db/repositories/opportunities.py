@@ -454,12 +454,19 @@ SYNTHESIS_FIELDS = frozenset(
         "company_id", "vacancy_id", "kind", "title", "function_family", "seniority",
         "description", "speculative_rationale", "plausibility", "required_skills",
         "desirable_skills", "location", "country", "latitude", "longitude",
+        "location_precision", "located_at",
         "work_arrangement", "remote_days", "contract_type", "fte_percentage",
         "posted_at", "application_channel", "application_target", "source_url",
         "source_adapter", "comp_min", "comp_max", "comp_currency", "comp_is_stated",
         "language", "timing_flag",
     }
 )
+
+#: Where the row is on the map (FR-144), decided by ``pipeline.locate``.
+PLACEMENT_FIELDS = ("latitude", "longitude", "location_precision", "located_at")
+#: What placement is decided from: a refresh that changes none of these keeps
+#: the placement the row already has.
+PLACE_INPUTS = ("location", "country", "company_id")
 
 #: Fields the scorer owns (FR-281, FR-282, FR-383).  ``manual_rank`` is not one
 #: of them, which is the whole point of FR-284's acceptance criterion.
@@ -536,8 +543,35 @@ def upsert_synthesised(
     fields = _restrict(values, SYNTHESIS_FIELDS)
     if existing is None:
         return create_opportunity(job_seeker_id, campaign_id, fields), True
+    if not _replaces_placement(fields, existing):
+        fields = {k: v for k, v in fields.items() if k not in PLACEMENT_FIELDS}
     update_opportunity(existing["id"], fields, job_seeker_id=job_seeker_id)
     return str(existing["id"]), False
+
+
+def _replaces_placement(fields: dict, existing: dict) -> bool:
+    """Whether a refresh's placement should overwrite the row's.
+
+    The refresh is placed from cached answers only, so it often knows less
+    than the background job already worked out - and the posting itself
+    almost never carries coordinates.  Writing it over the row would undo
+    the job on every synthesis run.  It wins only when the row moved, when
+    the posting now carries coordinates, or when it decided a row the job
+    has not reached yet.
+    """
+    if not any(k in fields for k in PLACEMENT_FIELDS):
+        return False
+    moved = any(
+        k in fields and (fields.get(k) or None) != (existing.get(k) or None)
+        for k in PLACE_INPUTS
+    )
+    if moved or fields.get("location_precision") == "source":
+        return True
+    if existing.get("located_at"):
+        return False
+    return bool(fields.get("located_at")) or (
+        fields.get("latitude") is not None and existing.get("latitude") is None
+    )
 
 
 def save_scores(opportunity_id: str, values: dict, *, job_seeker_id: str | None = None) -> None:

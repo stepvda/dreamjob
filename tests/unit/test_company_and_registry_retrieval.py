@@ -327,6 +327,11 @@ def test_the_kbo_company_page_yields_the_dr101_identity(db):
     assert identity["legal_id"] == "0473191041"
     assert identity["vat_number"] == "BE0473191041"
     assert identity["locations"][0]["address"].startswith("President Kennedypark")
+    # FR-144: the seat's second line is the town; without it the street is
+    # one of several of that name, and cannot be placed on the map.
+    assert identity["locations"][0]["address"].endswith("8500 Kortrijk")
+    assert identity["locations"][0]["postcode"] == "8500"
+    assert identity["locations"][0]["city"] == "Kortrijk"
     assert "26.700" in identity["sector_codes"]
 
 
