@@ -288,6 +288,7 @@ can show what is in force. Groups include:
 ## Development
 
 ```bash
+python3 -m pip install -r requirements.txt -c requirements.lock   # the versions production runs
 PYTHONPATH=backend python3 -m pytest tests/unit tests/integration -q -m 'not llm and not load'
 python3 -m ruff check backend/dreamjob             # lint
 cd frontend && npm run build                       # production build
@@ -302,6 +303,28 @@ harness and persona generator live under `tests/e2e`.
 `plan / fetch / parse / normalise`, decorate with `@register_adapter`. It appears
 in the catalogue at the next boot. A language is content only — the prompt
 templates and `help/content.js`.
+
+### Deployment
+
+A push to `main` deploys itself to the production server (macstudio):
+
+1. GitHub Actions (`.github/workflows/ci.yml`) builds the frontend and runs the
+   unit tests, for every push and pull request. When a push to `main` passes,
+   its last job fast-forwards the `deploy` branch to that commit.
+2. On the server, `ops/autodeploy.sh` (launchd, every minute) fetches `deploy`
+   and runs the new commit's `ops/deploy.sh`: fast-forward, dependencies and
+   the frontend build when they changed, backend restart, health check - and a
+   rollback to the previous commit when the new backend does not come up.
+
+The server pulls; GitHub never reaches into it, and no runner is installed
+there. A commit whose CI fails never reaches `deploy`, so it is never deployed.
+
+```bash
+tail -f logs/deploy.log                                  # on the server: what happened
+curl -s https://dreamjob.one.witysk.org/version.json     # what is live
+touch logs/deploy/PAUSED                                 # pause deploys (rm to resume)
+ops/deploy.sh <commit>                                   # deploy by hand
+```
 
 ### Operator tooling
 
