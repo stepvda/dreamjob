@@ -31,6 +31,7 @@ import PackageDetail from '../components/package/PackageDetail'
 import { BulkApprovalModal, SendAllModal } from '../components/package/Modals'
 import { SendGuardBanner, SendNowProvider } from '../components/package/Send'
 import applyApi from './apply/api'
+import InternshipTerms from './apply/InternshipTerms'
 import {
   ConsistencyBadge,
   PACKAGE_STATUS_LABEL,
@@ -74,6 +75,7 @@ export default function ApplicationsPage() {
 
   // The send guard, read before either send control is pressed (RK-05).
   const guard = useFetch(() => applyApi.sendStatus(), [])
+  const internship = useFetch(() => applyApi.internship(), [])
 
   const [filter, setFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(null)
@@ -339,6 +341,12 @@ export default function ApplicationsPage() {
 
       {actionError && <ErrorBox error={actionError} />}
       {error && <ErrorBox error={error} onRetry={reload} />}
+
+      <InternshipTerms
+        saved={internship.data}
+        loading={internship.loading}
+        onSave={async (terms) => internship.setData(await applyApi.saveInternship(terms))}
+      />
 
       {gen && (
         <div style={{ marginBottom: 14 }}>
