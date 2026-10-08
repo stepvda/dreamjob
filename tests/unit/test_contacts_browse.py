@@ -639,6 +639,59 @@ def test_discover_request_accepts_and_returns_the_scope(
         ).status_code == 422
 
 
+def test_discover_all_retries_recent_companies_when_the_backoff_hides_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The button must not finish having visited nothing.
+
+    Once every company without a contact was tried inside the freshness window
+    (the continuous loop gets there within a week), the normal pool is empty.
+    The pass then retries those companies, as the loop does, and says so.
+    """
+    from dreamjob.api.deps import CurrentSeeker, current_admin, current_seeker
+    from dreamjob.api.routers import contacts as router_module
+    from dreamjob.db.connection import from_json
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    ids = _seed()
+
+    async def _no_start(job_id: str, *args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(router_module.runner, "start", _no_start)
+    pools: list[dict] = []
+    monkeypatch.setattr(
+        router_module.apply_repo, "all_companies_for_contact", lambda *a, **k: list(pools)
+    )
+
+    seeker = CurrentSeeker(
+        id=ids["seeker_id"], email="seeker@example.org", display_name="Stephane",
+        is_admin=True, locale="en",
+    )
+    app = FastAPI()
+    app.include_router(router_module.router, prefix="/api/contacts")
+    app.dependency_overrides[current_seeker] = lambda: seeker
+    app.dependency_overrides[current_admin] = lambda: seeker
+
+    def start(limit: int) -> tuple[dict, dict]:
+        body = client.post(
+            "/api/contacts/discover", json={"scope": "all", "limit": limit}
+        ).json()
+        row = query_one("SELECT checkpoint FROM job_run WHERE id = ?", (body["job_id"],))
+        return body, from_json(row["checkpoint"], {})["options"]
+
+    with TestClient(app) as client:
+        body, options = start(5)
+        assert body["retry_recent"] is True
+        assert options["retry_recent"] is True
+
+        pools.append({"company_id": "c-1"})
+        body, options = start(6)
+        assert body["retry_recent"] is False
+        assert options["retry_recent"] is False
+
+
 def test_discovery_status_returns_the_report_not_the_checkpoint() -> None:
     """The status route must not ship the ~100 KB visited list to the browser.
 
