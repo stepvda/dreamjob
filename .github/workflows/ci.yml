@@ -1,11 +1,12 @@
 # Continuous integration for Dream Job.
 #
 # Runs on GitHub-hosted runners for every push and pull request.  It is also
-# the gate for continuous deployment: the server (macstudio) polls main and
-# deploys a commit only once every check run of this workflow on that commit
-# has succeeded - see ops/autodeploy.sh.  Nothing here runs on the server, and
-# no secret is needed: the repository is public, and a self-hosted runner on a
-# public repository would let a pull request run code on the production host.
+# the gate for continuous deployment: when a push to main passes, the last job
+# fast-forwards the `deploy` branch to it, and the server (macstudio) deploys
+# whatever `deploy` points at - see ops/autodeploy.sh.  Nothing here runs on
+# the server, and no secret is needed beyond the job's own GITHUB_TOKEN: the
+# repository is public, and a self-hosted runner on a public repository would
+# let a pull request run code on the production host.
 
 name: CI
 
@@ -56,3 +57,31 @@ jobs:
         run: python -m pip install -r requirements.txt -c requirements.lock
       - name: Unit tests
         run: python -m pytest -q -rs tests/unit
+
+  promote:
+    name: Promote to deploy
+    needs: test
+    # Pushes to main only: a pull request never moves what production runs,
+    # and its token could not push anyway.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: promote
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Fast-forward deploy to this commit
+        run: |
+          # A re-run of an older commit must not move production back.
+          if git rev-parse --verify --quiet origin/deploy >/dev/null &&
+             git merge-base --is-ancestor "$GITHUB_SHA" origin/deploy; then
+            echo "deploy is already at or past $GITHUB_SHA"
+            exit 0
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/deploy"
+          echo "deploy -> $GITHUB_SHA"
