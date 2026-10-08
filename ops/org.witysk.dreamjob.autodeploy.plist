@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Continuous deployment for Dream Job: every minute, ops/autodeploy.sh
+     deploys main once CI has passed on it.  A user LaunchAgent, like the
+     backend's own org.witysk.dreamjob, so it can restart that job.
+
+     Install:
+       cp ops/org.witysk.dreamjob.autodeploy.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.witysk.dreamjob.autodeploy.plist
+     After changing this file, bootout and bootstrap it again: a deploy does
+     not reload the job that is running it. -->
+<dict>
+    <key>Label</key>
+    <string>org.witysk.dreamjob.autodeploy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/nstephane/Dev/dreamjob/ops/autodeploy.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nstephane/Dev/dreamjob</string>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/nstephane</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- The scripts log to logs/deploy.log themselves; this catches only
+         what escapes them. -->
+    <key>StandardOutPath</key>
+    <string>/Users/nstephane/Dev/dreamjob/logs/autodeploy.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nstephane/Dev/dreamjob/logs/autodeploy.launchd.log</string>
+</dict>
+</plist>

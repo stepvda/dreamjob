@@ -11,6 +11,9 @@ venv/
 # Node
 node_modules/
 frontend/dist/
+# Built aside and kept for rollback by ops/deploy.sh
+frontend/dist.new/
+frontend/dist.prev/
 frontend/.vite/
 
 # Secrets & local config
