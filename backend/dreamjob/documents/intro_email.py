@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from dreamjob.documents import internship
 from dreamjob.documents._llm import complete_json
 from dreamjob.documents.pdf_builder import normalise_language
 from dreamjob.documents.templates import CvDocument
@@ -143,6 +144,8 @@ class EmailDraft:
     used_llm: bool = False
     notes: list[str] = field(default_factory=list)
     assertions: list[str] = field(default_factory=list)
+    #: The fixed internship sentence appended to the body, "" when there is none.
+    internship: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +158,7 @@ class EmailDraft:
             "email_used_llm": self.used_llm,
             "notes": self.notes,
             "vacancy_assertions": self.assertions,
+            "internship": self.internship,
         }
 
 
@@ -222,7 +226,8 @@ def compose_email(
             log.warning("Email generation failed for %s: %s", opportunity.get("id"), exc)
             notes.append(f"Email assembled without the model ({exc.__class__.__name__}).")
 
-    body = _assemble(body_core, cv, lang, recipient)
+    terms = internship.sentence(inputs.get("internship"), lang)
+    body = _assemble(body_core, cv, lang, recipient, terms)
     hits = vacancy_assertions(body, lang) if speculative else []
     if hits:
         notes.append(
@@ -239,6 +244,7 @@ def compose_email(
         used_llm=used_llm,
         notes=notes,
         assertions=hits,
+        internship=terms,
     )
 
 
@@ -279,8 +285,10 @@ def scaffolding(language: str) -> str:
     )
 
 
-def _assemble(core: str, cv: CvDocument, lang: str, recipient: dict | None) -> str:
-    """Greeting, body, attachment line, sign-off, signature, objection sentence."""
+def _assemble(
+    core: str, cv: CvDocument, lang: str, recipient: dict | None, terms: str = ""
+) -> str:
+    """Greeting, body, internship terms, attachment line, sign-off, signature, objection."""
     named, generic = GREETING[lang]
     name = str((recipient or {}).get("full_name") or "").strip()
     greeting = named.format(name=name) if name else generic
@@ -295,6 +303,7 @@ def _assemble(core: str, cv: CvDocument, lang: str, recipient: dict | None) -> s
         "",
         core.strip(),
         "",
+        *([terms, ""] if terms else []),
         ATTACHMENT_LINE[lang],
         "",
         SIGN_OFF[lang],
@@ -401,6 +410,7 @@ def _generate(
         company_name=company.get("name") or "",
         recipient=who,
         cv_summary=_cv_summary(cv),
+        internship_rule=internship.prompt_rule(inputs.get("internship")),
     )
     if instructions:
         user += f"\n\nThe job seeker asked for this revision:\n{str(instructions)[:2000]}"

@@ -37,6 +37,7 @@ from dreamjob.db.connection import (
     write_tx,
 )
 from dreamjob.db.repositories import contacts as contact_repo
+from dreamjob.documents import internship
 from dreamjob.security import at_rest
 
 #: Columns of ``application_package`` holding JSON, decoded on the way out.
@@ -333,6 +334,37 @@ def disclosure_paths(job_seeker_id: str) -> set[str]:
     return {str(r["field_path"]) for r in rows}
 
 
+def internship_preference(job_seeker_id: str) -> dict[str, Any]:
+    """Whether this seeker's applications ask for an internship, and on what terms."""
+    row = query_one(
+        "SELECT internship, duration_months, start_month, pay FROM apply_preference "
+        "WHERE job_seeker_id = ?",
+        (job_seeker_id,),
+    )
+    return internship.normalise(row)
+
+
+def set_internship_preference(job_seeker_id: str, values: dict[str, Any]) -> dict[str, Any]:
+    pref = internship.normalise(values)
+    execute(
+        "INSERT INTO apply_preference "
+        "(job_seeker_id, internship, duration_months, start_month, pay, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(job_seeker_id) DO UPDATE SET internship = excluded.internship, "
+        "duration_months = excluded.duration_months, start_month = excluded.start_month, "
+        "pay = excluded.pay, updated_at = excluded.updated_at",
+        (
+            job_seeker_id,
+            int(pref["internship"]),
+            pref["duration_months"],
+            pref["start_month"],
+            pref["pay"],
+            utcnow(),
+        ),
+    )
+    return pref
+
+
 def profile_version(job_seeker_id: str, profile_version_id: str | None = None) -> dict | None:
     if profile_version_id:
         row = query_one(
@@ -586,6 +618,7 @@ def generation_inputs(job_seeker_id: str, opportunity_id: str) -> dict[str, Any]
         ),
         "introduction_paths": introduction_paths(job_seeker_id, opportunity_id),
         "do_not_disclose": disclosure_paths(job_seeker_id),
+        "internship": internship_preference(job_seeker_id),
         "company_snapshot_at": (company_row or {}).get("refreshed_at")
         or (company_row or {}).get("collected_at"),
     }

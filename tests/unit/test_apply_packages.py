@@ -220,6 +220,36 @@ def test_apply_email_refers_to_the_cv() -> None:
     assert stored["prompt_version"]
 
 
+def test_internship_terms_are_appended_and_pass_the_checks() -> None:
+    """The terms are the system's sentence, so their figures do not fail FR-322."""
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.documents import internship
+    from dreamjob.pipeline import apply_packages
+
+    ids = seed()
+    terms = {"internship": True, "duration_months": 6, "start_month": "2031-02", "pay": "unpaid"}
+    repo.set_internship_preference(ids["seeker"], terms)
+    result = apply_packages.generate_package(ids["seeker"], ids["opportunity"])
+    package = repo.get_package(result.package_id, ids["seeker"])
+
+    sentence = internship.sentence(terms, "nl")
+    assert sentence == "Ik zoek een onbetaalde stage van 6 maanden, vanaf februari 2031."
+    assert package["email_body"].count(sentence) == 1
+    assert package["generation_notes"]["email"]["internship"] == sentence
+    assert result.consistency_status == "pass"
+
+
+def test_no_internship_sentence_unless_asked() -> None:
+    from dreamjob.db.repositories import applications as repo
+    from dreamjob.pipeline import apply_packages
+
+    ids = seed()
+    result = apply_packages.generate_package(ids["seeker"], ids["opportunity"])
+    package = repo.get_package(result.package_id, ids["seeker"])
+    assert "stage" not in package["email_body"].lower()
+    assert package["generation_notes"]["email"]["internship"] == ""
+
+
 def test_speculative_apply_email_asserts_no_vacancy() -> None:
     """FR-263 / FR-323: a spontaneous application never claims a vacancy exists."""
     from dreamjob.db.repositories import applications as repo

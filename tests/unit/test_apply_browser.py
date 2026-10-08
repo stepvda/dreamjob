@@ -644,3 +644,26 @@ def test_a_missing_package_is_a_404_not_a_500(client, world):
     assert client.get(f"/api/apply/{world['opportunity_id']}").status_code == 404
     assert client.post(f"/api/apply/{world['opportunity_id']}/send", json={}).status_code == 404
     assert client.get("/api/apply/does-not-exist").status_code == 404
+
+
+def test_internship_terms_round_trip_and_are_validated(client, world):
+    """The Apply screen's internship terms are saved for the seeker and previewed."""
+    assert client.get("/api/apply/preferences/internship").json()["internship"] is False
+
+    saved = client.put(
+        "/api/apply/preferences/internship",
+        json={"internship": True, "duration_months": 6, "start_month": "2027-03", "pay": "paid"},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["preview"] == (
+        "I am looking for a paid internship of 6 months, starting in March 2027."
+    )
+    again = client.get("/api/apply/preferences/internship").json()
+    assert again["duration_months"] == 6 and again["pay"] == "paid"
+
+    for bad in (
+        {"internship": True, "duration_months": 0},
+        {"internship": True, "start_month": "2027-13"},
+        {"internship": True, "pay": "sometimes"},
+    ):
+        assert client.put("/api/apply/preferences/internship", json=bad).status_code == 422

@@ -1,9 +1,9 @@
 ---
 id: apply_email
-version: 1.0.0
+version: 1.1.0
 task: generate.email
 model_preference: strong
-updated: 2026-09-09
+updated: 2026-10-08
 requirements: FR-263, FR-321, FR-323, FR-324, NFR-104, NFR-205, NFR-206, NFR-302, NFR-602
 description: >
   The Apply Browser's application e-mail: a very brief motivation letter that
@@ -62,6 +62,8 @@ The tailored CV that is attached to this e-mail:
 {{cv_summary}}
 
 {{fit_hint}}
+
+{{internship_rule}}
 
 The opening is in the untrusted block `opening`; what is known about the
 company is in the untrusted block `company`.

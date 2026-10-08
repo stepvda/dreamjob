@@ -64,7 +64,7 @@ from dreamjob.db.repositories import admin as admin_repo
 from dreamjob.db.repositories import applications as repo
 from dreamjob.db.repositories import contacts as contacts_repo
 from dreamjob.db.repositories import dispatch as dispatch_repo
-from dreamjob.documents import intro_email
+from dreamjob.documents import internship, intro_email
 from dreamjob.documents import package as package_module
 from dreamjob.documents._llm import complete_json
 from dreamjob.documents.package import GenerationError, GenerationOptions
@@ -726,7 +726,8 @@ def compose_apply_email(
             log.warning("Apply e-mail generation failed for %s: %s", opportunity.get("id"), exc)
             notes.append(f"E-mail assembled without the model ({exc.__class__.__name__}).")
 
-    body = intro_email._assemble(core, cv, lang, recipient)
+    terms = internship.sentence(inputs.get("internship"), lang)
+    body = intro_email._assemble(core, cv, lang, recipient, terms)
     hits = intro_email.vacancy_assertions(body, lang) if speculative else []
     if hits:
         notes.append(
@@ -743,6 +744,7 @@ def compose_apply_email(
         used_llm=used_llm,
         notes=notes,
         assertions=hits,
+        internship=terms,
     )
 
 
@@ -778,6 +780,7 @@ def _ask_model(
         recipient=who,
         cv_summary=intro_email._cv_summary(cv),
         word_budget=WORD_BUDGET,
+        internship_rule=internship.prompt_rule(inputs.get("internship")),
         fit_hint=(
             "The motivation and fit document (FR-330) for this opportunity already argues the "
             "points in the untrusted block `fit`. Use at most one of them, in one sentence, and "

@@ -38,6 +38,10 @@ export const applyApi = {
   /** The send guard, read before either send control is pressed (RK-05). */
   sendStatus: () => api.get('/apply/send-status'),
 
+  /** Whether applications ask for an internship, and on what terms. */
+  internship: () => api.get('/apply/preferences/internship'),
+  saveInternship: (body) => api.put('/apply/preferences/internship', body),
+
   /** FR-284: what the pipeline works on. */
   select: (opportunityIds, selected) =>
     api.post('/apply/select', { opportunity_ids: opportunityIds, selected }),

@@ -1071,8 +1071,14 @@ def run_checks(
             | {str(c.get("full_name") or "") for c in contacts}
             | {str(c.get("role_title") or "") for c in contacts}
             | {str(corpus.get("boilerplate") or "")},
+            # The boilerplate carries the internship terms the seeker chose
+            # ("6 months, starting in March 2027"); those figures are theirs.
             allow_figures=opening_figures(
-                opportunity, company, corpus.get("vacancy") or inputs.get("vacancy"), contacts
+                opportunity,
+                company,
+                corpus.get("vacancy") or inputs.get("vacancy"),
+                contacts,
+                corpus.get("boilerplate"),
             ),
             language=document.language,
         )
