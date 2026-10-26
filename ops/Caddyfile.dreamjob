@@ -25,11 +25,8 @@
 # node process — all avoided deliberately.
 # =============================================================================
 
-dreamjob.one.witysk.org {
-	tls {
-		protocols tls1.2 tls1.3
-	}
-
+# --- dreamjob.one.witysk.org: routes shared by the public TLS site and the LAN origin ---------
+(dreamjob_app) {
 	# The SPA is entirely self-hosted: no CDN, no web fonts, no third-party
 	# script, and it opens no WebSocket or EventSource (verified against
 	# frontend/src before this was written). So 'self' is a real policy here
@@ -86,11 +83,12 @@ dreamjob.one.witysk.org {
 	# held back by the proxy.
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8420 {
+			header_up X-Forwarded-For {client_ip}
 			transport http {
 				read_timeout 1800s
 				write_timeout 1800s
 			}
-			header_up X-Real-IP {remote_host}
+			header_up X-Real-IP {client_ip}
 			flush_interval -1
 		}
 	}
@@ -112,4 +110,26 @@ dreamjob.one.witysk.org {
 		try_files {path} /index.html
 		file_server
 	}
+}
+
+# Public TLS site. Removed once the Turris (172.16.1.1) terminates TLS for
+# dreamjob.one.witysk.org (phase 2, documentation/network_fw_setup.docx).
+dreamjob.one.witysk.org {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	import dreamjob_app
+}
+
+# LAN origin for the Turris reverse proxy (phase 2, 2026-10-26). The Turris
+# terminates public TLS and proxies here; ov-failover on the Turris moves
+# one.witysk.org to the other node when this one stops answering. Plain HTTP,
+# LAN only. The Turris is the one trusted proxy (servers 172.16.1.8:8180 in the
+# global options), so {client_ip} is the visitor it saw, not 172.16.1.1.
+http://dreamjob.one.witysk.org:8180 {
+	bind 172.16.1.8
+	request_header X-Real-IP {client_ip}
+	header X-OV-Origin macstudio
+	import dreamjob_app
 }
