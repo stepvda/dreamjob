@@ -16,9 +16,9 @@
 #   BACKEND_PORT="$(cat react/local/run/backend_port)" \
 #     /opt/homebrew/bin/caddy reload --config react/Caddyfile.macstudio
 #
-# TLS: *.one.witysk.org already resolves to the public IP and :443 forwards to
-# this node (it holds the one.witysk.org Let's Encrypt cert), so ACME for this
-# name succeeds on its own. No cert pre-staging needed.
+# TLS: terminated on the Turris (172.16.1.1) since phase 2 (2026-10-26), which
+# proxies to the LAN origin below (http://dreamjob.one.witysk.org:8180 on
+# 172.16.1.8). This node no longer has a public site for this name.
 #
 # PORTS: the Dream Job backend listens on 127.0.0.1:8420. 8000 (the app's own
 # default) and 8002 are onevoice's backend, 8100 its AI gateway, 5173 another
@@ -110,16 +110,6 @@
 		try_files {path} /index.html
 		file_server
 	}
-}
-
-# Public TLS site. Removed once the Turris (172.16.1.1) terminates TLS for
-# dreamjob.one.witysk.org (phase 2, documentation/network_fw_setup.docx).
-dreamjob.one.witysk.org {
-	tls {
-		protocols tls1.2 tls1.3
-	}
-
-	import dreamjob_app
 }
 
 # LAN origin for the Turris reverse proxy (phase 2, 2026-10-26). The Turris
